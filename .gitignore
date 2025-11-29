@@ -1,0 +1,29 @@
+# IDE / editor stuff
+.idea/
+
+# Virtual environments
+.we_venv/
+venv/
+env/
+
+# Python cache / compiled files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data, Caches and temp dirs 
+data/
+cache/
+
+
+# OS crap
+.DS_Store
+Thumbs.db
