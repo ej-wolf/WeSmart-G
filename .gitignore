@@ -22,6 +22,7 @@ __pycache__/
 # Data, Caches and temp dirs 
 data/
 cache/
+dummy_test/rawframes_dummy/
 
 
 # OS crap

@@ -8,18 +8,15 @@ from my_local_utils import _make_unique_dir, _save_log, _load_log_lines
 FRAME_H, FRAME_W = 256, 256
 CENTER_SIZE = 0.2
 
-def json_to_box_frames(
-    json_path, out_root,
-    H: int = FRAME_H,   W: int = FRAME_W,
-    # clip_name: str | None = None,
-    **kwargs):
+
+def json_to_box_frames( json_path, out_root,
+    H: int = FRAME_H,   W: int = FRAME_W, **kwargs):
     """  Convert detector JSON into a sequence of box-frame images.
     Each frame is rendered on an H×W monochrome canvas using the
     normalized TL/BR bounding boxes in data["frames"][i]["bbs"].
-    :param
-        json_path: Path to detector JSON.
-        out_root: Root directory for the output clip folder.
-        H, W: Output frame height and width in pixels.
+    :param json_path: Path to detector JSON.
+    :param out_root: Root directory for the output clip folder.
+    :param H, W: Output frame height and width in pixels.
     Returns:  (clip_name, num_frames)
     """
 
@@ -30,21 +27,21 @@ def json_to_box_frames(
         data = json.load(f)
 
     frames = data["frames"]
+    title = data.get("video", "")
 
-    # Derive clip name if not given (replace '.' to be safe in folder names)
-    # if clip_name is None:
-    #     clip_name = json_path.stem.replace(".", "_")
-    # clip_dir = out_root/clip_name
-    if kwargs.get("clip_name", None) is None:
-        video_field = data.get("video", "")
-        if isinstance(video_field, str) and video_field:
-            clip_name = Path(video_field).stem
-        else:
-            clip_name = json_path.stem.replace(".", "_")
+    #* Derive clip name if not given (replace '.' to be safe in folder names)
+    if kwargs.get("clip_name", None) is not None:
+        clip_name = kwargs.get("clip_name", None)
+    elif  kwargs.get("use_file_name", False):
+        # Use the JSON filename (no extension), sanitized
+        clip_name = json_path.stem.replace(".", "_")
+    elif isinstance(title, str) and len(title) > 0:
+        clip_name = Path(title).stem
+    else:
+        clip_name = json_path.stem.replace(".", "_")
 
-    # clip_dir.mkdir(parents=True, exist_ok=True)
-    # Create unique directory for this clip
-    clip_dir, clip_name = _make_unique_dir(out_root, clip_name)
+    #* Create unique directory for this clip
+    clip_dir, clip_name = _make_unique_dir(out_root, clip_name, no_space=True)
 
     event_lines = []
     for idx, fr in enumerate(frames, start=1):
@@ -52,19 +49,17 @@ def json_to_box_frames(
         img = np.full((H, W), 255, dtype=np.uint8)
 
         bb_ls = fr.get('bbs',[]) or fr.get('bbs_list_of_keypoints', [])
-        #for bb in fr.get("bbs", []):
         for bb in bb_ls:
-               # print(f"bb = {len(bb)}")
             if len(bb) < 6:
                 continue
             cls_id, cls_conf, tl_x, tl_y, br_x, br_y = bb[0:6]
 
-            # Optional vertical flip if y is measured from bottom
+            #* Optional vertical flip if y is measured from bottom
             if kwargs.get('y_from_bottom',):
                 tl_y = 1.0 - tl_y
                 br_y = 1.0 - br_y
 
-            # Convert normalized coords to pixel coords
+            #* Convert normalized coords to pixel coords
             x1 = int(tl_x*W)
             y1 = int(tl_y*H)
             x2 = int(br_x*W)
@@ -95,7 +90,8 @@ def json_to_box_frames(
 
         frame_num = fr.get("f", idx)
         time_ms = int(fr.get("t", 0) * 1000)
-        # Extract group events for this frame
+
+        #* Extract group events for this frame
         raw_events = fr.get("event_grouped") or fr.get("group_events") or []
         pairs = []
         for ev in raw_events:
@@ -114,8 +110,6 @@ def json_to_box_frames(
             events_str = "[" + "; ".join(pairs) + "]"
             event_lines.append(f"{time_ms},{frame_num},{events_str}")
 
-        # out_name = clip_dir / f"img_{idx:05d}.jpg"
-        # out_name = clip_dir/f"frm_{fr.get('f', idx):05d}_{int(fr.get('t', 0)*1000):08d}.jpg"
         out_name = clip_dir/f"frm_{frame_num:05d}_{time_ms:08d}.jpg"
         cv2.imwrite(str(out_name), img)
 
@@ -142,9 +136,6 @@ def process_json_folder(json_root, out_root, H: int = 256, W: int = 256, **kwarg
 
     results = []
     for json_path in sorted(json_root.rglob("*.json")):
-        # clip_name, num_frames = json_to_box_frames(
-        #     json_path, out_root, H=H, W=W, clip_name=None,y_from_bottom=y_from_bottom,
-        # )
         try:
             clip_name, num_frames = json_to_box_frames(
                 json_path, out_root, H=H, W=W, clip_name=None, **kwargs)
@@ -154,7 +145,6 @@ def process_json_folder(json_root, out_root, H: int = 256, W: int = 256, **kwarg
             print(f"[ERROR] Failed processing {json_path}:\n-{e}")
             results.append((None, 0, str(json_path)))
     return results
-
 
 
 def play_frames(frames_dir, log=None, x: float = 1.0, event_color=False):
