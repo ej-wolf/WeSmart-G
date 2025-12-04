@@ -2,7 +2,7 @@
     Config file for the TRN training
 """
 
-print(f"\nThis is the Config cGPT version")
+print(f"\nConfig: 1st cGPT version")
 # ----- basic dataset + path settings -----
 
 # # from extern.mmaction2.mmaction.utils import register_all_modules
@@ -11,7 +11,6 @@ print(f"\nThis is the Config cGPT version")
 
 default_scope = 'mmaction'
 dataset_type = 'RawframeDataset'
-
 #* project paths
 Current_Data_Root = '/data/cache'
 Valid_File = "val.txt"
@@ -38,7 +37,9 @@ model = dict( type='Recognizer2D',
                   num_segments=num_segments,
                   in_channels=2048,
                   spatial_type='avg',
+
                   consensus=dict(type='TRN', num_segments=num_segments),
+
                   dropout_ratio=0.4,
                   init_std=0.001,
                   ),
@@ -81,8 +82,8 @@ val_pipeline = [
 test_pipeline = val_pipeline
 
 data = dict(      # you might need to lower this if you hit OOM
-    videos_per_gpu=8,
-    workers_per_gpu=4,
+    videos_per_gpu = 8,
+    workers_per_gpu= 4,
     train=dict( type=dataset_type, ann_file=ann_file_train, data_prefix=data_root, pipeline=train_pipeline),
     val =dict( type=dataset_type, ann_file=ann_file_valid, data_prefix=data_root_val, pipeline=val_pipeline),
     test=dict( type=dataset_type, ann_file=ann_file_test, data_prefix=data_root_val, pipeline=test_pipeline),
@@ -110,7 +111,7 @@ log_config = dict( interval=20, hooks=[ dict(type='TextLoggerHook'),
 
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-work_dir = './work_dirs/trn_r50_boxcartoon_violence'
+work_dir = '../../work_dirs/trn_r50_boxcartoon_violence'
 load_from = None
 resume_from = None
 workflow = [('train', 1)]

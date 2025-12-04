@@ -9,7 +9,8 @@ def print_hi(name):
 """ code """
 import os
 from pathlib import Path
-from data_processing import json_to_box_frames, process_json_folder, play_frames
+from data_processing import json_to_box_frames, process_json_folder #, play_frames
+from visual_util import play_frames
 import data_processing as jsn
 from  temporal_segment import  segment_all_clips, make_labels_file, make_train_val_ds
 from my_local_utils import collection, clear_dir
@@ -25,19 +26,27 @@ def test_data_proc():
     process_json_folder(json_path, frames_path, draw_center=True)
 
 
-def process_data(raw_data_path, data_root:Path = None):
+def process_data(json_path, data_root:Path = None, sub_dirs=None):
 
-    raw_data_path = collection(raw_data_path)
+    json_path = collection(json_path)
     data_root = CWD/'data' if data_root is  None else Path(data_root)
+    data_root = data_root/'frames'
+    data_root.mkdir(exist_ok=True)
 
-    for path in raw_data_path:
-        process_json_folder(path, Path(data_root)/'frames',
-                            use_file_name=True, draw_center=DRAW_CENTER)
-    # return
+    if sub_dirs and len(json_path) == len(sub_dirs):
+        data_paths = zip(json_path, sub_dirs)
+    else:
+        data_paths = zip(json_path, ['.']*len(json_path))
+
+    # for path in json_path:
+    for j, f in data_paths:
+        # print(f" Input : {j} \n Output: {data_root/f}")
+        process_json_folder(j, data_root/f, use_file_name=True, draw_center=DRAW_CENTER)
+    return
+
     segments = segment_all_clips(data_root/'frames', data_root/'cache')
 
     ann_path = data_root/'cache'/'all_windows.txt'
-
     with ann_path.open("w", encoding="utf-8") as f:
         for name, n_frames, label in segments:
             f.write(f"{name} {n_frames} {label}\n")
@@ -71,16 +80,23 @@ def play_all_clips(frames_root, x: float = 1.0, event_color=False):
 if __name__ == "__main__":
 
     # Example manual usage; adapt as needed
-    json_path = [Path("/mnt/local-data/Projects/Wesmart/data/json"),
-                 Path("/mnt/local-data/Projects/Wesmart/data/json_02"),
-                 #  Path("/mnt/local-data/Projects/Wesmart/data/jsons_corrected"),
-                 ]
+    json_dirs = ['json_ds','usual_jsons_from_cams', 'usual_jsons_from_events' ]
+    main_path = Path("/mnt/local-data/Projects/Wesmart/data/")
+    # json_path = [Path("/mnt/local-data/Projects/Wesmart/data/json"),
+    #              Path("/mnt/local-data/Projects/Wesmart/data/json_02"),
+    #              #  Path("/mnt/local-data/Projects/Wesmart/data/jsons_corrected"),
+    #              ]
+    json_path = [main_path/d for d in json_dirs]
     CWD = Path(os.getcwd())
     data_root = CWD/"data"
-    # process_data(json_path)
+    #process_data(json_path)
+    process_data(json_path, sub_dirs=['train', 'test', 'test'])
 
     clear_dir(data_root/'cache')
-    segments = segment_all_clips(data_root/'frames', data_root/'cache', win_len=15, stride=5)
+    # segments = segment_all_clips(data_root/'frames', data_root/'cache', win_len=15, stride=5)
+    segments = segment_all_clips(data_root/'frames'/'train', data_root/'cache', win_len=15, stride=5)
+    segment_all_clips(data_root/'frames'/'test' , data_root/'cache', win_len=15, stride=5)
+
     make_labels_file(segments)
     make_train_val_ds(segments, data_root/'cache')
     play_all_clips(data_root/'frames', x=3.0, event_color=True)

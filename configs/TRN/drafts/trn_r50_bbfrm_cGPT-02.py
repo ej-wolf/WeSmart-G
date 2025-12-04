@@ -1,31 +1,28 @@
 # TRN on box-based raw frames (violence vs non-violence)
-# This config is written for mmengine-style Runner.from_cfg.
-# Paths are relative to extern/mmaction2 as working directory.
+# * Config  for a mmengine-style Runner.from_cfg.
+# * Paths are relative to extern/mmaction2 as working directory.
 
-
+print(f"\nConfig: 2nd cGPT version (for new style mmaction)")
 
 default_scope = 'mmaction'
 dataset_type = 'RawframeDataset'
 
-# Paths (from CWD = weSmart/extern/mmaction2)
+#*  Paths (from CWD = weSmart/extern/mmaction2)
 DATA_ROOT = '../../data/cache'
-
-
 
 data_root = DATA_ROOT
 data_root_val = DATA_ROOT
-ann_file_train = DATA_ROOT + '/train.txt'
-ann_file_val = DATA_ROOT + '/val.txt'
+ann_file_train= DATA_ROOT + '/train.txt'
+ann_file_val  = DATA_ROOT + '/val.txt'
 ann_file_test = DATA_ROOT + '/val.txt'  # reuse val as test for now
 
 # ----------------------------------------------------------------------
 # Model: TRN + ResNet50, binary classification (violence / non-violence)
 # ----------------------------------------------------------------------
-
 num_classes  = 2
 num_segments = 8   # frames sampled per window
 
-model = dict( type='Recognizer2D',
+model = dict(type='Recognizer2D',
         backbone=dict( type='ResNet',
         depth=50,
         pretrained='torchvision://resnet50',
@@ -37,13 +34,12 @@ model = dict( type='Recognizer2D',
         num_segments=num_segments,
         spatial_type='avg',
         relation_type='TRNMultiScale',  # or 'TRN' for simpler variant
-
         hidden_dim=256,
         dropout_ratio=0.8,
         init_std=0.001,
-    ),
-    train_cfg=None,
-    test_cfg=dict(average_clips='prob'),
+        ),
+        train_cfg=None,
+        test_cfg=dict(average_clips='prob'),
 )
 
 # ----------------------------------------------------------------------
@@ -52,8 +48,7 @@ model = dict( type='Recognizer2D',
 
 img_norm_cfg = dict(mean=[123.675, 116.28, 103.53],
                     std= [58.395, 57.12, 57.375],
-                    to_bgr=False,
-                    )
+                    to_bgr=False,)
 
 train_pipeline = [
     dict(type='SampleFrames', clip_len=1, frame_interval=1, num_clips=num_segments),
@@ -68,8 +63,8 @@ train_pipeline = [
     ]
 
 val_pipeline = [
-    dict( type='SampleFrames', clip_len=1, frame_interval=1, num_clips=num_segments,
-        test_mode=True, ),
+    dict(type='SampleFrames', clip_len=1, frame_interval=1, num_clips=num_segments,
+         test_mode=True, ),
     dict(type='RawFrameDecode'),
     dict(type='Resize', scale=(-1, 256)),
     dict(type='CenterCrop', crop_size=224),
@@ -172,58 +167,9 @@ env_cfg = dict(
 log_level = 'INFO'
 
 # Work dir relative to extern/mmaction2
-work_dir = '../../work_dirs/trn_r50_bbrfm_c2_s8'
+work_dir = '../../../work_dirs/trn_r50_bbrfm_c2_s8'
 
 load_from = None
 resume_from = None
 vis_backends = [dict(type='LocalVisBackend')]
 visualizer = dict(type='ActionVisualizer', vis_backends=vis_backends)
-
-# ----------------------------------------------------------------------
-# OLD-STYLE FIELDS (kept for reference, now unused by mmengine Runner)
-# ----------------------------------------------------------------------
-
-# data = dict(
-#     videos_per_gpu=16,
-#     workers_per_gpu=4,
-#     train=dict(
-#         type=dataset_type,
-#         ann_file=ann_file_train,
-#         data_prefix=data_root,
-#         pipeline=train_pipeline),
-#     val=dict(
-#         type=dataset_type,
-#         ann_file=ann_file_val,
-#         data_prefix=data_root_val,
-#         pipeline=val_pipeline),
-#     test=dict(
-#         type=dataset_type,
-#         ann_file=ann_file_test,
-#         data_prefix=data_root_val,
-#         pipeline=test_pipeline),
-# )
-
-# optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0001)
-# optimizer_config = dict(grad_clip=dict(max_norm=40, norm_type=2))
-
-# lr_config = dict(
-#     policy='step',
-#     step=[20, 40],
-# )
-
-# checkpoint_config = dict(interval=5)
-# evaluation = dict(
-#     interval=5,
-#     metrics=['top_k_accuracy', 'mean_class_accuracy'],
-# )
-
-# log_config = dict(
-#     interval=20,
-#     hooks=[
-#         dict(type='TextLoggerHook'),
-#         # dict(type='TensorboardLoggerHook'),
-#     ],
-# )
-
-# dist_params = dict(backend='nccl')
-# workflow = [('train', 1)]

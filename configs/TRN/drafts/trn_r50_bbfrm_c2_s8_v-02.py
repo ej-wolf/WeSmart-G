@@ -191,7 +191,7 @@ log_level = 'INFO'
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 
-work_dir = '../../work_dirs/R50_bbrfm_01'
+work_dir = '../../../work_dirs/R50_bbrfm_01'
 load_from = None
 resume_from = None
 vis_backends = [dict(type='LocalVisBackend')]
