@@ -79,27 +79,30 @@ def play_all_clips(frames_root, x: float = 1.0, event_color=False):
 
 if __name__ == "__main__":
 
+    CWD = Path(os.getcwd())
     # Example manual usage; adapt as needed
     json_dirs = ['json_ds','usual_jsons_from_cams', 'usual_jsons_from_events' ]
     main_path = Path("/mnt/local-data/Projects/Wesmart/data/")
-    # json_path = [Path("/mnt/local-data/Projects/Wesmart/data/json"),
-    #              Path("/mnt/local-data/Projects/Wesmart/data/json_02"),
-    #              #  Path("/mnt/local-data/Projects/Wesmart/data/jsons_corrected"),
-    #              ]
-    json_path = [main_path/d for d in json_dirs]
-    CWD = Path(os.getcwd())
-    data_root = CWD/"data"
-    #process_data(json_path)
-    process_data(json_path, sub_dirs=['train', 'test', 'test'])
 
+
+    #* Set the main data dir inside the python project
+    data_root = CWD/"data"
+
+    #* Convret jsons to frames
+    #process_data(json_path)
+    json_path_ls = [main_path/d for d in json_dirs]
+    process_data(json_path_ls, sub_dirs=['train', 'test', 'test'])
+
+    #* Make segmentations
     clear_dir(data_root/'cache')
     # segments = segment_all_clips(data_root/'frames', data_root/'cache', win_len=15, stride=5)
     segments = segment_all_clips(data_root/'frames'/'train', data_root/'cache', win_len=15, stride=5)
-    segment_all_clips(data_root/'frames'/'test' , data_root/'cache', win_len=15, stride=5)
+    tst_seg = segment_all_clips(data_root/'frames'/'test' , data_root/'cache', win_len=15, stride=5)
 
     make_labels_file(segments)
+    make_labels_file(tst_seg)
     make_train_val_ds(segments, data_root/'cache')
-    play_all_clips(data_root/'frames', x=3.0, event_color=True)
+    play_all_clips(data_root/'frames'/'test', x=3.0, event_color=True)
 
     pass
 
