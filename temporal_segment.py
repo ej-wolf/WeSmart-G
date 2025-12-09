@@ -157,6 +157,8 @@ def make_labels_file(segments, file_name=None):
     if file_name is None:
         file_name = Path(os.getcwd())/SEGMENTS_DIR/LABELS_FILE
 
+    file_name.parent.mkdir(exist_ok=True, parents=True)
+
     with file_name.open("w", encoding="utf-8") as f:
         for name, n_frm, lbl in segments:
             f.write(f"{name} {n_frm} {lbl}\n")

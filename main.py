@@ -97,12 +97,15 @@ if __name__ == "__main__":
     clear_dir(data_root/'cache')
     # segments = segment_all_clips(data_root/'frames', data_root/'cache', win_len=15, stride=5)
     segments = segment_all_clips(data_root/'frames'/'train', data_root/'cache', win_len=15, stride=5)
-    tst_seg = segment_all_clips(data_root/'frames'/'test' , data_root/'cache', win_len=15, stride=5)
+    # tst_seg = segment_all_clips(data_root/'frames'/'test' , data_root/'cache', win_len=15, stride=5)
 
     make_labels_file(segments)
-    make_labels_file(tst_seg)
+    # make_labels_file(tst_seg)
     make_train_val_ds(segments, data_root/'cache')
-    play_all_clips(data_root/'frames'/'test', x=3.0, event_color=True)
+    # play_all_clips(data_root/'frames'/'test', x=3.0, event_color=True)
+
+    #* crete primitive test
+    # make_labels_file(segments,data_root/'labels'/'fake_test_01.txt')
 
     pass
 

@@ -9,6 +9,7 @@ dataset_type = 'RawframeDataset'
 
 #* Paths (assuming CWD = ./extern/mmaction2)
 Current_Data_Root = '../../data/cache'
+All_Lbl_File = "all_label.txt"
 Valid_File = "val.txt"
 Train_File = "train.txt"
 
@@ -16,7 +17,7 @@ data_root = Current_Data_Root
 data_root_val  = data_root
 ann_file_train = data_root + '/' + Train_File
 ann_file_valid = data_root + '/' + Valid_File
-ann_file_test  = data_root + '/' + Valid_File   #* reuse val as test for now
+ann_file_test  = data_root + '/' + All_Lbl_File   #* reuse val as test for now
 
 # -------------------------------------------------------------------------------
 #* --- Model: TRN with ResNet50 backbone, 2 classes (violence/ no-violence) -----
@@ -167,7 +168,6 @@ log_level = 'INFO'
 work_dir = '../../work_dirs/R50_bbrfm_01'
 load_from = None
 resume_from = None
-
-vis_backends = [dict(type='LocalVisBackend'), dict(type='TensorboardVisBackend')]
+vis_backends = [dict(type='LocalVisBackend')] # , dict(type='TensorboardVisBackend')]
 visualizer = dict(type='ActionVisualizer', vis_backends=vis_backends)
 # workflow = [('train', 1)]
