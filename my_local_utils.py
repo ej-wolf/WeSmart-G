@@ -1,19 +1,5 @@
-from pathlib import Path
 import shutil
-
-# def _make_unique_dir(root, base_name):
-#     """Create a unique subdir under root for base_name, adding (2), (3), ... if needed."""
-#
-#     root = Path(root)
-#     clip_name = base_name
-#     i = 2
-#     clip_dir = root/clip_name
-#     while clip_dir.exists():
-#         clip_name = f"{base_name} ({i})"
-#         clip_dir = root / clip_name
-#         i += 1
-#     clip_dir.mkdir(parents=True, exist_ok=True)
-#     return clip_dir, clip_name
+from pathlib import Path
 
 
 def _make_unique_dir(root, base_name, **kwargs):
@@ -154,3 +140,88 @@ def as_collection(x):
     return [x]
 
 collection = as_collection
+
+
+"*** models related  ***"
+from pathlib import Path
+
+#*86->63
+def get_epoch_pth(dir_path:str|Path, epoch:int|str|None='best') -> str:
+    """ Return path to a checkpoint .pth file in dir_path.
+    :param epoch:- int  : desired epoch; if exact file not found, pick the closest
+                            *later* epoch_XX.pth, or the last available if none later.
+                 - 'best' (default): return a 'best' checkpoint if present
+                         (file name containing 'best'). If none, fall back to last
+                       epoch_XX.pth and print a warning.
+                 - 'last': return the last epoch_XX.pth (highest epoch number).
+    """
+    #* Helper: extract epoch number from names like 'epoch_25.pth'
+    def _epoch_of(name: str) -> int | None:
+        if name.startswith('epoch_') and name.endswith('.pth'):
+            num_part = name[len('epoch_'):-len('.pth')]
+            try:
+                return int(num_part)
+            except ValueError:
+                return None
+
+    def all_pairs():
+        epc_pairs = [(p.name, _epoch_of(p.name)) for p in pth_files]
+        return [(p, e) for p, e in epc_pairs if e is not None]
+
+    dir_path = Path(dir_path)
+    if not dir_path.is_dir():
+        raise FileNotFoundError(f'Checkpoint directory not found: {dir_path}')
+
+    pth_files = sorted(dir_path.glob('*.pth'))
+    if not pth_files:
+        # raise FileNotFoundError(f'No .pth files found in {dir_path}')
+        print(f"[Error] No pth files found in {dir_path}")
+        return None
+
+    #* --- 'best' case ---
+    if (isinstance(epoch, str) and epoch == 'best') or epoch is None:
+        pth = [p for p in pth_files if 'best' in p.name]
+        if pth:  # If several, pick the newest by mtime
+            best_pth = max(pth, key=lambda p: p.stat().st_mtime)
+            return str(best_pth.name)
+        print("[WARN] No best checkpoint found, falling back to last epoch.")
+        epoch = 'last'  # fallthrough
+
+    #* --- 'last' case ---
+    if isinstance(epoch, str) and epoch == 'last':
+        epoch_pairs = all_pairs()
+        if not epoch_pairs:
+            # Only weird filenames – fall back to newest
+            latest = max(pth_files, key=lambda p: p.stat().st_mtime)
+            return str(latest)
+        last_pth, _ = max(epoch_pairs, key=lambda pe: pe[1])
+        return last_pth
+
+    #* --- numeric (or numeric-string) epoch request ---
+    if not isinstance(epoch, int):
+        print(f"Unsupported epoch spec: {epoch!r}")
+
+    #* Exact match first
+    pth = f'epoch_{epoch}.pth'
+    if (dir_path/pth).is_file():
+        return pth
+    #* Otherwise, search for closest later epoch_XX.pth
+    epoch_pairs = all_pairs()
+    closest_pth, _ = min(epoch_pairs,key=lambda pe: (abs(pe[1] - epoch), -pe[1]), )
+    return str(closest_pth)
+
+def tst_get_pth(tst_path:str=None):
+    tst_ls = [None, 'best', 'last', 10, 25, 17, 51, 81, -1]
+    if tst_path is None:
+        d = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/tsm_r50_bbfrm")
+    for t in tst_ls:
+        # print(t)
+        print(get_epoch_pth(d, t))
+    d = d.parent
+    print(get_epoch_pth(d)),  print(get_epoch_pth(d, epoch=10))
+
+
+if __name__ == "__main__":
+    tst_get_pth()
+
+#277->

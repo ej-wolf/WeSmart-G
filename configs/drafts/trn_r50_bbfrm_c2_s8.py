@@ -111,7 +111,7 @@ log_config = dict( interval=20, hooks=[ dict(type='TextLoggerHook'),
 
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-work_dir = '../../../work_dirs/trn_r50_bbrfm_c2_s8'
+work_dir = '../../work_dirs/trn_r50_bbrfm_c2_s8'
 load_from = None
 resume_from = None
 workflow = [('train', 1)]

@@ -5,7 +5,8 @@ from pathlib import Path
 
 from my_local_utils import _load_log_lines
 
-log_path ="./work_dirs/R50_bbrfm_01/20251202_042950/20251202_042950.log"
+#log_path ="./work_dirs/R50_bbrfm_01/20251202_042950/20251202_042950.log"
+log_path ="./work_dirs/R50_bbrfm_01/20251209_042904/20251209_042904.log"
 # log_path = "20251202_042950.log"
 
 

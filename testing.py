@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import os
 import pickle
 import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
-
 import numpy as np
-import run_safe_test
+
+# import run_safe_test
+from my_local_utils import get_epoch_pth
 
 def _load_rawframe_labels(ann_file: str | Path) -> np.ndarray:
     """ Load labels from a Rawframe annotation file.
@@ -137,120 +139,58 @@ def evaluate_test_scores(ann_file: str | Path, scores_path: str | Path, *,
              }
 
 
-def test_trn_checkpoint(checkpoint_path: str | Path,
-                        config_path: str | Path,
-                        ann_file: str | Path,
-                        out_dir: str | Path,
-                        *,
-                        positive_label: int = 1,
-                        threshold: float | None = None,
-                        python_exec: str = "python",
-                        mmaction_root: str | Path = "extern/mmaction2",
-                        use_out_flag: str = "--out",
-                        ) -> Dict[str, object]:
-    """ Run MMAction2 tools/test.py and compute basic metrics.
-        A thin wrapper around the official test script. It assumes that
-        ``tools/test.py`` accepts an ``--out`` (or ``--dump``) argument which
-        saves raw prediction scores as a pickle file.
-
-    Parameters
-    ----------
-    checkpoint_path: path Trained model checkpoint (.pth).
-    config_path: path    
-        Config used for testing (same as training, but with proper test split).
-    ann_file : path
-        Rawframe annotation file for the test set (same order as in test).
-    out_dir : path
-        Directory where the temporary scores pickle will be stored.
-    positive_label : int, default 1
-        Index of the positive class (violence).
-    threshold : float or None, default None
-        Optional decision threshold on the positive class. If None, argmax
-        over class scores is used.
-    0python_exec : str, default "python"
-        Python executable to use when calling tools/test.py.
-    mmaction_root : path, default "extern/mmaction2"
-        Root of the MMAction2 repo (where tools/test.py lives).
-    use_out_flag : str, default "--out"
-        Flag passed to tools/test.py to save scores. For some versions this
-        might need to be "--dump" instead.
-
-    :returns  dict passing the forward the  evaluate_scores_from_test_output return structure
-    """
-
-    config_path = Path(config_path)
-    checkpoint_path = Path(checkpoint_path)
-    ann_file = Path(ann_file)
-    out_dir = Path(out_dir)
-    mmaction_root = Path(mmaction_root)
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    scores_path = out_dir/"test_scores.pkl"
-
-    test_script = mmaction_root/"tools/test.py"
-    wrapper = Path("run_safe_test.py")
-    # test_script = "tools/test.py"
-    if not wrapper.is_file():
-        raise FileNotFoundError(f"Cannot find tools/test.py under {mmaction_root}")
-
-    cmd = [ python_exec, str(wrapper),
-            str(config_path), str(checkpoint_path),
-            use_out_flag, str(scores_path),
-            "--launcher", "none",]
-
-    # cmd2 = (f"python {test_script}  {config_path}  {checkpoint_path}"
-    #         f" {use_out_flag} {scores_path}  --launcher none")
-
-    # Run MMAction2's test script in its own repo root
-    # subprocess.run(cmd, check=True, cwd=str(mmaction_root))
-    subprocess.run(cmd, check=True, cwd=".")
-
-    # Now compute metrics from the saved scores
-    # return evaluate_test_scores(        ann_file=ann_file,
-    #     scores_path=scores_path,
-    #     positive_label=positive_label,
-    #     threshold=threshold,
-    # )
-    return evaluate_test_scores(ann_file, scores_path, positive_label=positive_label, threshold=threshold,)
-
-def lunch_wrapper(**kwargs):
-
+def launch_wrapper(**kwargs):
     prfx = Path(kwargs.get('relative_path', '../..' ))
+    # out_dir = prfx/kwargs.get('out_dir', kwargs['checkpoint_path'])
+    score_file = (prfx/kwargs.get('out_dir', Path(kwargs['checkpoint_path']).parent/'test_eval')/
+                       kwargs.get('score_file', "test_scores.pkl"))
 
-    cmd = [ 'python', kwargs.get('wrapper','run_safe_test.py'),
-            str(prfx/kwargs['config_path']), str(prfx/kwargs['checkpoint_path']),
-            kwargs.get('use_out_flag', '--dumb'), str(prfx/kwargs['out_dir']/"test_scores.pkl"),
+    cmd = [ 'python', kwargs.get('wrapper','run_safe_test.py'), #* the wrapper script
+            str(prfx/kwargs['config_path']),
+            str(prfx/kwargs['checkpoint_path']),
+            kwargs.get('pkl_flag', '--dump'), str(score_file),
             "--launcher", "none",]
-    # run_in = kwargs.get('run_in','.')
+
     subprocess.run(cmd, check=True, cwd=kwargs.get('run_in','.'))
+
+
+def set_with_defaults(run_tag:str, **kwargs)-> dict:
+
+
+    pth = get_epoch_pth(Path(os.getcwd())/'work_dirs'/run_tag, kwargs.get('pth', 'best'))
+    return {'wrapper': kwargs.get('testing_file','run_safe_test.py'),
+            'config_path': f"configs/{run_tag}.py",
+            'checkpoint_path': f"work_dirs/{run_tag}/{pth}"}
+
+
+
+def print_metrics(metrics:dict):
+    print(f"Samples  :{metrics['num_samples']};  Labels {metrics['support']}\n"
+          f"Accuracy : {metrics['accuracy']:6f}\n"
+          f"Recall   : {metrics['recall']:6f}\n"
+          f"Confusion matrix: {metrics['confusion_matrix'][0]}\n"
+          f"                  {metrics['confusion_matrix'][1]}")
+
 
 
 if __name__ == "__main__":
 
-    # metrics = test_trn_checkpoint(
-    #           config_path = "../../configs/TRN/trn_r50_bbfrm_02.py",
-    #           checkpoint_path="../../work_dirs/R50_bbrfm_01/best_acc_top1_epoch_5.pth",
-    #           ann_file="data/cache/all_label.txt",
-    #           out_dir ="../../work_dirs/R50_bbrfm_01/test_eval",
-    #           positive_label=1,      # whatever is your “violence” class index
-    #           threshold=None,        # or some float if you want explicit thresholding
-    #           mmaction_root="extern/mmaction2",
-    #           use_out_flag="--dump",  # change to "--dump\out" if needed
-    #           )
 
     test_params = {'wrapper': 'run_safe_test.py',
                    'config_path': "configs/TRN/trn_r50_bbfrm_02.py",
-                   'checkpoint_path': "work_dirs/R50_bbrfm_01/best_acc_top1_epoch_5.pth",
-                   'out_dir' :"work_dirs/R50_bbrfm_01/test_eval" }
+                   'checkpoint_path': "work_dirs/tsn_R50_bbrfm/epoch_25.pth",
+                   }
 
+    test_params = set_with_defaults('tsm_r50_bbfrm')
 
-
-    lunch_wrapper (**test_params)
+    # launch_wrapper (**test_params)
 
     metrics = evaluate_test_scores( ann_file="data/cache/all_label.txt",  # same as val_dataloader.ann_file in config
-        scores_path="work_dirs/R50_bbrfm_01/test_eval/test_scores.pkl",
+        scores_path="work_dirs/tsm_r50_bbfrm/test_eval/test_scores.pkl",
         positive_label=1,  # or 0, depending on your label mapping
         threshold=None,  # argmax over scores (default)
         )
 
-    print(metrics)
+    print_metrics(metrics)
+
+#256( ,2,15)

@@ -167,7 +167,7 @@ env_cfg = dict(
 log_level = 'INFO'
 
 # Work dir relative to extern/mmaction2
-work_dir = '../../../work_dirs/trn_r50_bbrfm_c2_s8'
+work_dir = '../../work_dirs/trn_r50_bbrfm_c2_s8'
 
 load_from = None
 resume_from = None

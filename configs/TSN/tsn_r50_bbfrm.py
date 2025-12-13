@@ -19,62 +19,66 @@ ann_file_train = data_root + '/' + Train_File
 ann_file_valid = data_root + '/' + Valid_File
 ann_file_test  = data_root + '/' + All_Lbl_File   #* reuse val as test for now
 
-work_dir = '../../work_dirs/trn_R50_bbrfm'
+work_dir = '../../work_dirs/tsn_R50_bbrfm'
 # -------------------------------------------------------------------------------
 #* --- Model: TRN with ResNet50 backbone, 2 classes (violence/ no-violence) -----
 # -------------------------------------------------------------------------------
 num_classes  = 2   #*  2 classes (violence / no-violence)
 num_segments = 8   #*  number of segments (frames) TRN sees per window
+in_channels = 2048
 
-model = dict(type='Recognizer2D',
-             backbone= dict(type='ResNet',
-                       depth=50, out_indices=(3, ),
-                       pretrained='torchvision://resnet50',
-                       ),
-             cls_head= dict(type='TRNHead',
-                       num_classes =num_classes,
-                       num_segments=num_segments,
-                       in_channels=2048,
-                       spatial_type='avg',
-                       relation_type='TRNMultiScale', #* or 'TRN' for simpler relation
-                       # consensus=dict(type='TRN', num_segments=num_segments),
-                       hidden_dim=256,
-                       dropout_ratio=0.8,             #* 0.8 is TRN’s default
-                       init_std=0.001,
-                       ),
-             # This is sometimes only in TSN configs; harmless to keep
-             train_cfg=None,
-             test_cfg=dict(average_clips='prob')
-             )
+model = dict( type='Recognizer2D',
+              backbone=dict(type='ResNet',
+                            depth=50,
+                            pretrained='torchvision://resnet50',
+                            out_indices=(3,),  # feature from res4
+                            norm_cfg=dict(type='BN', requires_grad=True),
+                            norm_eval=False,
+                            style='pytorch',
+              ),
+              cls_head=dict(type='TSNHead',
+                            num_classes=2,         # violence / non-violence
+                            in_channels=2048,
+                            spatial_type='avg',
+                            dropout_ratio=0.5,
+                            consensus=dict(type='AvgConsensus', dim=1),
+                            average_clips='prob',
+              ),
+              data_preprocessor=dict(
+                                type='ActionDataPreprocessor',
+                                mean=[123.675, 116.28, 103.53],
+                                std=[58.395, 57.12, 57.375],
+                                format_shape='NCHW',
+              ),
+            )
 
 # ----------------------------------------------------------------------
 # Pipelines
 # ----------------------------------------------------------------------
 
 img_norm_cfg = dict(mean=[123.675, 116.28, 103.53],
-                    std=  [58.395,  57.12, 57.375],
+                    std = [58.395,  57.12, 57.375],
                     to_rgb=True)
 
 #* Each window has ~15–20 frames; TRN will sample 8 of them
-train_pipeline = [    #* 8 segments per window
-    dict(type='SampleFrames', clip_len=1, frame_interval=1, num_clips=num_segments),
-    dict(type='RawFrameDecode'),
-    dict(type='Resize', scale=(-1, 256)),
-    dict(type='CenterCrop', crop_size=224),
-    dict(type='Flip', flip_ratio=0.5),
-    dict(type='FormatShape', input_format='NCHW'),
-    dict(type='PackActionInputs')
-    ]
+train_pipeline = [ #* 8 segments per window
+                dict(type='SampleFrames', clip_len=1, frame_interval=1, num_clips=num_segments),
+                dict(type='RawFrameDecode'),
+                dict(type='Resize', scale=(-1, 256)),
+                dict(type='CenterCrop', crop_size=224),
+                dict(type='Flip', flip_ratio=0.5),
+                dict(type='FormatShape', input_format='NCHW'),
+                dict(type='PackActionInputs')
+                ]
 
-val_pipeline = [
-    dict(type='SampleFrames', clip_len=1, frame_interval=1, num_clips=num_segments,
-         test_mode=True),
-    dict(type='RawFrameDecode'),
-    dict(type='Resize', scale=(-1, 256)),
-    dict(type='CenterCrop', crop_size=224),
-    dict(type='FormatShape', input_format='NCHW'),
-    dict(type='PackActionInputs'),
-    ]
+val_pipeline = [dict(type='SampleFrames', clip_len=1, frame_interval=1, num_clips=num_segments,
+                     test_mode=True),
+                dict(type='RawFrameDecode'),
+                dict(type='Resize', scale=(-1, 256)),
+                dict(type='CenterCrop', crop_size=224),
+                dict(type='FormatShape', input_format='NCHW'),
+                dict(type='PackActionInputs'),
+                ]
 
 test_pipeline = val_pipeline
 
@@ -83,32 +87,34 @@ test_pipeline = val_pipeline
 # ----------------------------------------------------------------------
 
 #* --- DataLoaders (mmengine-style) ---
-train_dataloader = dict(
-        batch_size=16, num_workers=4, persistent_workers=True,
-        sampler=dict(type='DefaultSampler', shuffle=True),
-        dataset=dict(type=dataset_type,
-                     ann_file=ann_file_train,
-                     data_prefix=dict(img=data_root),
-                     pipeline=train_pipeline,)
-        )
+batch_sz = 16 #* consts for all dataloaders
+n_workers = 4
+train_dataloader = dict( batch_size=batch_sz, num_workers=n_workers, persistent_workers=True,
+                        sampler=dict(type='DefaultSampler', shuffle=True),
+                        dataset=dict(type=dataset_type,
+                                     ann_file=ann_file_train,
+                                     data_prefix=dict(img=data_root),
+                                     pipeline=train_pipeline,
+                                     )
+                        )
 
-val_dataloader = dict(
-        batch_size=16, num_workers=4, persistent_workers=True,
-        sampler=dict(type='DefaultSampler', shuffle=False),
-        dataset=dict(type=dataset_type,
-                     ann_file=ann_file_valid,
-                     data_prefix=dict(img=data_root_val),
-                     pipeline=val_pipeline)
-        )
+val_dataloader = dict( batch_size=batch_sz, num_workers=n_workers, persistent_workers=True,
+                       sampler=dict(type='DefaultSampler', shuffle=False),
+                       dataset=dict(type=dataset_type,
+                                     ann_file=ann_file_valid,
+                                     data_prefix=dict(img=data_root_val),
+                                     pipeline=val_pipeline
+                                    )
+                      )
 
-test_dataloader = dict(
-        batch_size=16, num_workers=4,  persistent_workers=True,
-        sampler=dict(type='DefaultSampler', shuffle=False),
-        dataset=dict(type=dataset_type,
-                     ann_file=ann_file_test,
-                     data_prefix=dict(img=data_root_val),
-                     pipeline=test_pipeline)
-        )
+test_dataloader = dict(batch_size=batch_sz, num_workers=n_workers,  persistent_workers=True,
+                       sampler=dict(type='DefaultSampler', shuffle=False),
+                       dataset=dict(type=dataset_type,
+                                    ann_file=ann_file_test,
+                                    data_prefix=dict(img=data_root_val),
+                                    pipeline=test_pipeline
+                                    )
+                       )
 
 #* ----- training schedule / runtime settings (you can keep defaults or tweak) -----
 
@@ -165,6 +171,7 @@ log_level = 'INFO'
 
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
+
 
 load_from = None
 resume_from = None
