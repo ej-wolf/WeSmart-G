@@ -35,6 +35,20 @@ def _load_rawframe_labels(ann_file: str | Path) -> np.ndarray:
     return np.asarray(labels, dtype=np.int64)
 
 
+def load_ann_file(ann_path:str|Path):
+    ann_path = Path(ann_path)
+    samples,labels = [], []
+    with ann_path.open('r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            # path label
+            path_str, label_str = line.rsplit(' ', 1)  # safer if path has spaces
+            samples.append((path_str, int(label_str)))
+            labels += [int(label_str)]
+    return samples, labels
+
 def _compute_binary_confusion( y_true:Iterable[int], y_pred:Iterable[int], positive_label:int= 1,)\
                               -> Tuple[int, int, int, int]:
     """ Return TN, FP, FN, TP for a binary problem.
@@ -92,7 +106,8 @@ def evaluate_test_scores(ann_file: str | Path, scores_path: str | Path, *,
     ann_file = Path(ann_file)
     scores_path = Path(scores_path)
 
-    y_true = _load_rawframe_labels(ann_file)
+    # y_true = _load_rawframe_labels(ann_file)
+    _, y_true = load_ann_file(ann_file)
 
     with scores_path.open("rb") as f:
         raw_scores = pickle.load(f)
@@ -180,16 +195,23 @@ if __name__ == "__main__":
                    'config_path': "configs/TRN/trn_r50_bbfrm_02.py",
                    'checkpoint_path': "work_dirs/tsn_R50_bbrfm/epoch_25.pth",
                    }
+    test_params = {'wrapper': 'run_safe_test.py',
+                   'config_path': "configs/tsm_R50_MMA_RWF.py",
+                   'checkpoint_path': "work_dirs/tsm_R50_MMA_RLVS/best_acc_top1_epoch_5.pth",
+                   }
 
-    test_params = set_with_defaults('tsm_r50_bbfrm')
+    # test_params = set_with_defaults('tsm_r50_bbfrm')
 
     # launch_wrapper (**test_params)
 
-    metrics = evaluate_test_scores( ann_file="data/cache/all_label.txt",  # same as val_dataloader.ann_file in config
-        scores_path="work_dirs/tsm_r50_bbfrm/test_eval/test_scores.pkl",
-        positive_label=1,  # or 0, depending on your label mapping
-        threshold=None,  # argmax over scores (default)
+    metrics = evaluate_test_scores( #ann_file="data/cache/all_label.txt",  # same as val_dataloader.ann_file in config
+        ann_file="data/json_frames/all_label.txt",
+        scores_path="work_dirs/tsm_r50_bbfrm/test_eval/test_scores.pkl"
         )
+
+    # metrics = evaluate_test_scores( ann_file="data/video/RWF-2000/val.txt",  # same as val_dataloader.ann_file in config
+    #     scores_path="work_dirs/tsm_R50_MMA_RLVS/test_eval/test_scores.pkl",
+    #     positive_label=1, threshold=None, )
 
     print_metrics(metrics)
 

@@ -20,20 +20,21 @@ ann_file_valid = data_root + '/' + Valid_File
 ann_file_test  = data_root + '/' + All_Lbl_File   #* reuse val as test for now
 
 work_dir = '../../work_dirs/tsm_R50_bbfrm'
-# -------------------------------------------------------------------------------
 
-#* --- Model: TSM with ResNet50 backbone, 2 classes (violence/ no-violence) -----
+# -------------------------------------------------------------------------------
+# --- Model: TSM with ResNet50 backbone, 2 classes (violence/ no-violence) -----
 # -------------------------------------------------------------------------------
 num_classes  = 2   #*  2 classes (violence / no-violence)
 num_segments = 8   #*  number of segments (frames) TRN sees per window
 in_channels = 2048
 
 model = dict( type='Recognizer2D',
-              data_preprocessor=dict( type='ActionDataPreprocessor',
-                                      mean=[123.675, 116.28, 103.53],
-                                      std=[58.395, 57.12, 57.375],
-                                      format_shape='NCHW',
-                                      ),
+              data_preprocessor=dict(
+                            type='ActionDataPreprocessor',
+                            mean=[123.675, 116.28, 103.53],
+                            std=[58.395, 57.12, 57.375],
+                            format_shape='NCHW',
+                            ),
               backbone=dict(type='ResNetTSM',          # <-- key difference vs TSN/TRN
                             pretrained='torchvision://resnet50',
                             depth=50,
@@ -43,19 +44,19 @@ model = dict( type='Recognizer2D',
                             norm_eval=False,
                             style='pytorch',shift_div=8, #* typical TSM setting
                             ),
-              cls_head=dict( type='TSMHead',
-                             num_classes=2,            # violence / non-violence
-                             in_channels=2048,
-                             spatial_type='avg',
-                             dropout_ratio=0.5,
-                             init_std=0.01,
-                             average_clips='prob',
-                             ),
+              cls_head=dict(type='TSMHead',
+                            num_classes=2,            # violence / non-violence
+                            in_channels=2048,
+                            spatial_type='avg',
+                            dropout_ratio=0.5,
+                            init_std=0.01,
+                            average_clips='prob',
+                            ),
               test_cfg=dict(average_clips='prob'),
              )
 
 # ----------------------------------------------------------------------
-# Pipelines
+# --- Pipelines
 # ----------------------------------------------------------------------
 
 img_norm_cfg = dict(mean=[123.675, 116.28, 103.53],
@@ -85,7 +86,7 @@ val_pipeline = [dict(type='SampleFrames', clip_len=1, frame_interval=1, num_clip
 test_pipeline = val_pipeline
 
 # ----------------------------------------------------------------------
-# NEW mmengine-style sections (Runner.from_cfg expects these)
+# --- NEW mmengine-style sections (Runner.from_cfg expects these)
 # ----------------------------------------------------------------------
 
 #* --- DataLoaders (mmengine-style) ---

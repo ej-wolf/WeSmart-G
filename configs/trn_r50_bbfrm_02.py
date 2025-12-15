@@ -19,7 +19,7 @@ ann_file_train = data_root + '/' + Train_File
 ann_file_valid = data_root + '/' + Valid_File
 ann_file_test  = data_root + '/' + All_Lbl_File   #* reuse val as test for now
 
-work_dir = '../../work_dirs/trn_R50_bbrfm'
+work_dir = '../work_dirs/trn_R50_bbrfm'
 # -------------------------------------------------------------------------------
 #* --- Model: TRN with ResNet50 backbone, 2 classes (violence/ no-violence) -----
 # -------------------------------------------------------------------------------

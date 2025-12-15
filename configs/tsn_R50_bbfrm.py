@@ -1,5 +1,5 @@
 """
-    Config file for the TRN training
+    Config file for the TSN training
 """
 # ----- basic dataset + path settings -----
 print(f"\nThis is the Config for Version 2.x")
@@ -19,41 +19,44 @@ ann_file_train = data_root + '/' + Train_File
 ann_file_valid = data_root + '/' + Valid_File
 ann_file_test  = data_root + '/' + All_Lbl_File   #* reuse val as test for now
 
-work_dir = '../../work_dirs/tsn_R50_bbrfm'
+work_dir = '../../work_dirs/tsn_R50_bbfrm'
+
 # -------------------------------------------------------------------------------
-#* --- Model: TRN with ResNet50 backbone, 2 classes (violence/ no-violence) -----
+# --- Model: TRN with ResNet50 backbone, 2 classes (violence/ no-violence) -----
 # -------------------------------------------------------------------------------
 num_classes  = 2   #*  2 classes (violence / no-violence)
 num_segments = 8   #*  number of segments (frames) TRN sees per window
 in_channels = 2048
 
 model = dict( type='Recognizer2D',
+              data_preprocessor=dict(
+                            type='ActionDataPreprocessor',
+                            mean=[123.675, 116.28, 103.53],
+                            std=[58.395, 57.12, 57.375],
+                            format_shape='NCHW',
+                            ),
               backbone=dict(type='ResNet',
-                            depth=50,
                             pretrained='torchvision://resnet50',
-                            out_indices=(3,),  # feature from res4
+                            depth=50,
+
+                            out_indices=(3,), #* feature from res4
                             norm_cfg=dict(type='BN', requires_grad=True),
                             norm_eval=False,
                             style='pytorch',
-              ),
+                            ),
               cls_head=dict(type='TSNHead',
-                            num_classes=2,         # violence / non-violence
+                            num_classes=2,    #* violence / non-violence
                             in_channels=2048,
                             spatial_type='avg',
                             dropout_ratio=0.5,
                             consensus=dict(type='AvgConsensus', dim=1),
                             average_clips='prob',
-              ),
-              data_preprocessor=dict(
-                                type='ActionDataPreprocessor',
-                                mean=[123.675, 116.28, 103.53],
-                                std=[58.395, 57.12, 57.375],
-                                format_shape='NCHW',
-              ),
+                            ),
             )
 
+
 # ----------------------------------------------------------------------
-# Pipelines
+# --- Pipelines
 # ----------------------------------------------------------------------
 
 img_norm_cfg = dict(mean=[123.675, 116.28, 103.53],
@@ -83,7 +86,7 @@ val_pipeline = [dict(type='SampleFrames', clip_len=1, frame_interval=1, num_clip
 test_pipeline = val_pipeline
 
 # ----------------------------------------------------------------------
-# NEW mmengine-style sections (Runner.from_cfg expects these)
+# --- NEW mmengine-style sections (Runner.from_cfg expects these)
 # ----------------------------------------------------------------------
 
 #* --- DataLoaders (mmengine-style) ---

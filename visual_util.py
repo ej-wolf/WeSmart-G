@@ -5,10 +5,9 @@ from pathlib import Path
 
 from my_local_utils import _load_log_lines
 
-#log_path ="./work_dirs/R50_bbrfm_01/20251202_042950/20251202_042950.log"
-log_path ="./work_dirs/R50_bbrfm_01/20251209_042904/20251209_042904.log"
-# log_path = "20251202_042950.log"
-
+def _close_all_on_key(event):
+    if event.key in ('x', 'C'):
+        plt.close('all')
 
 def play_frames(frames_dir, log=None, x: float = 1.0, event_color=False):
     """Play frames as a cartoon using timestamps in filenames.
@@ -149,9 +148,7 @@ def plot_my_log(log_path, **kwargs):
         r"Epoch\(train\)\s+\[(\d+)\]\[\d+/\d+\].*?"
         r"loss:\s+([0-9.]+)\s+top1_acc:\s+([0-9.]+)"
     )
-    val_pat = re.compile(
-        r"Epoch\(val\)\s+\[(\d+)\]\[\d+/\d+\].*?acc/top1:\s+([0-9.]+)"
-    )
+    val_pat = re.compile(r"Epoch\(val\)\s+\[(\d+)\]\[\d+/\d+\].*?acc/top1:\s+([0-9.]+)")
 
     # Aggregate per epoch (mean over all train iters)
     train_losses = {}  # epoch -> [losses]
@@ -188,7 +185,7 @@ def plot_my_log(log_path, **kwargs):
 
     # 1) Plot loss
     if plot_loss:
-        plt.figure()
+        fig = plt.figure()
         plt.plot(epochs, mean_train_loss, marker="o", label="train loss")
         plt.xlabel("epoch"); plt.ylabel("loss")
         plt.title("Training loss vs epoch")
@@ -197,7 +194,7 @@ def plot_my_log(log_path, **kwargs):
 
     # 2) Plot accuracy-ish (train top1 and val metric)
     if plot_acc:
-        plt.figure()
+        fig = plt.figure()
         plt.plot(epochs, mean_train_acc, marker="o", label="train top1")
         if val_epochs:
             plt.plot(val_epochs, val_acc_vals, marker="s", label="val metric (acc/top1)")
@@ -205,8 +202,18 @@ def plot_my_log(log_path, **kwargs):
         plt.title("Train / val accuracy vs epoch")
         plt.grid(True, alpha=0.3)
         plt.legend(); plt.tight_layout()
+
+    fig.canvas.mpl_connect('key_press_event', _close_all_on_key)
     plt.show()
 
 
 if __name__ == "__main__":
-    plot_my_log(log_path)
+
+    log_path = "./work_dirs/R50_bbrfm_01/20251209_042904/20251209_042904.log"
+    rlv_log = "./work_dirs/tsm_R50_MMA_RLVS/20251214_112723/20251214_112723.log"
+    rwf_log = "./work_dirs/tsm_R50_MMA_RWF/20251214_094114/20251214_094114.log"
+    rwf_log = "/work_dirs/tsm_R50_MMA_RWF/20251215_023321/20251215_023321.log"
+    l =  "./work_dirs/tsm_R50_MMA_JOINT/20251215_041232/20251215_041232.log"
+    # plot_my_log(rlv_log)
+    plot_my_log(l)
+
