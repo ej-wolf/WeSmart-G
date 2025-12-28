@@ -5,21 +5,20 @@ from pathlib import Path
 from datetime import datetime
 
 #* imports from this project
-from my_local_utils import _make_unique_dir, _save_log, _load_log_lines
+from my_local_utils import _make_unique_dir, _save_log
 
 FRAME_H, FRAME_W = 256, 256
 CENTER_SIZE = 0.2
 
 
-def json_to_box_frames( json_path, out_root,
-    H: int = FRAME_H,   W: int = FRAME_W, **kwargs):
-    """  Convert detector JSON into a sequence of box-frame images.
+def json_to_box_frames( json_path, out_root, H:int=FRAME_H, W:int=FRAME_W, **kwargs):
+    """  Convert detector JSON into a sequence of box-frame images. #176- 146
     Each frame is rendered on an H×W monochrome canvas using the
     normalized TL/BR bounding boxes in data["frames"][i]["bbs"].
     :param json_path: Path to detector JSON.
     :param out_root: Root directory for the output clip folder.
     :param H, W: Output frame height and width in pixels.
-    Returns:  (clip_name, num_frames)
+    Returns:  (clip_name, clip_info)
     """
 
     json_path = Path(json_path)
@@ -34,9 +33,6 @@ def json_to_box_frames( json_path, out_root,
     # If no frames, return empty info
     if not frames:
         return None, {'Duration': 0.0, 'Frames': 0, 'Events': 0, 'T_evn': 0.0, 'stat': {},}
-        # clip_name = kwargs.get("clip_name") or json_path.stem
-        # clip_info = {'Time': 0.0, 'Frames': 0, 'Events': 0, 'T_evn': 0.0, 'stat': {},}
-        # return clip_name, clip_info
 
     #* Derive clip name if not given (replace '.' to be safe in folder names)
     if kwargs.get("clip_name", None) is not None:
@@ -48,6 +44,7 @@ def json_to_box_frames( json_path, out_root,
         clip_name = Path(title).stem
     else:
         clip_name = json_path.stem.replace(".", "_")
+
     #* Create unique directory for this clip
     clip_dir, clip_name = _make_unique_dir(out_root, clip_name, no_space=True)
 
@@ -61,7 +58,6 @@ def json_to_box_frames( json_path, out_root,
     for idx, fr in enumerate(frames, start=1):
         # White background
         img = np.full((H, W), 255, dtype=np.uint8)
-
         bb_ls = fr.get('bbs',[]) or fr.get('bbs_list_of_keypoints', [])
         for bb in bb_ls:
             if len(bb) < 6:
@@ -72,13 +68,11 @@ def json_to_box_frames( json_path, out_root,
             if kwargs.get('y_from_bottom',):
                 tl_y = 1.0 - tl_y
                 br_y = 1.0 - br_y
-
             #* Convert normalized coords to pixel coords
             x1 = int(tl_x*W)
             y1 = int(tl_y*H)
             x2 = int(br_x*W)
             y2 = int(br_y*H)
-
             # Clip to image bounds
             x1 = max(0, min(W - 1, x1))
             x2 = max(0, min(W - 1, x2))
@@ -107,7 +101,6 @@ def json_to_box_frames( json_path, out_root,
         t = float(fr.get('t', 0.0))
         time_ms = int(t*1000)
         times_s += [t]
-
 
         #* Extract group events for this frame
         raw_events = fr.get('event_grouped') or fr.get('group_events') or []
@@ -142,27 +135,7 @@ def json_to_box_frames( json_path, out_root,
         _save_log(event_lines, clip_dir / f"{clip_name}_events.log")
 
 
-    #*** handel clip_info ***
-    # if times_s:
-    #     if len(times_s) > 1:
-    #         # duration: from first to last timestamp
-    #         duration = max(times_s) - min(times_s)
-    #         dt = duration/(len(times_s) - 1) if duration > 0 else 0.0
-    #         # if duration > 0:
-    #         #     dt = duration / (len(times_s) - 1)
-    #         # else:
-    #         #     dt = 0.0
-    #     else:
-    #         duration = 0.0
-    #         dt = 0.0
-    #
-    #     # Approx total event time as (num event frames) * dt
-    #     # event_frames = sum(1 for v in event_flags if v)
-    #     # t_event = event_frames * dt
-    #     t_event = sum(event_flags)*dt
-    # else:
-    #     duration = 0.0
-    #     t_event = 0.0
+    #*** crate clip_info ***
     if times_s:
         duration = max(times_s) - min(times_s)
         dt = duration/(len(times_s) - 1) if duration > 0 else 0.0
@@ -171,27 +144,24 @@ def json_to_box_frames( json_path, out_root,
         duration = 0.0
         t_event = 0.0
 
-
     #* Count contiguous event segments (any event flag)
-    events_count = 0
-    prev = False
+    events_count, prev = 0, False
     for cur in event_flags:
         if cur and not prev:
             events_count += 1
         prev = cur
-    # num_frames = len(frames)
+
     clip_info = {'Duration': max(times_s),  # float(total_time),
                  'Frames': len(frames),
                  'Events': events_count,
                  'T_evn': float(t_event),
                  'stat': stat,}
 
-    return clip_name, clip_info # len(frames)
+    return clip_name, clip_info
 
 
-def process_json_folder_(json_root, out_root, H: int = 256, W: int = 256, **kwargs):
+def process_json_folder_(json_root, out_root, H:int=256, W:int= 256, **kwargs):
     """ Process all JSON files in a folder into box-frame clips.
-    Args:
     :param json_root: Folder containing detector JSON files (recursively).
     :param out_root: Root folder for all generated clips.
     :param H, W: Output frame size.
@@ -205,56 +175,56 @@ def process_json_folder_(json_root, out_root, H: int = 256, W: int = 256, **kwar
     results = []
     for json_path in sorted(json_root.rglob("*.json")):
         try:
-            clip_name, num_frames = json_to_box_frames(
+            clip_name, info = json_to_box_frames(
                 json_path, out_root, H=H, W=W, clip_name=None, **kwargs)
-            results.append((clip_name, num_frames, str(json_path)))
+            # results.append((clip_name, info, str(json_path)))
+            results += [(clip_name, info, str(json_path))]
         except Exception as e:
-            # Robust processing: report failure and continue with next file
+            #* Robust processing: report failure and continue with next file
             print(f"[ERROR] Failed processing {json_path}:\n-{e}")
-            results.append((None, 0, str(json_path)))
+            results += [(None, {}, str(json_path))]   # results.append((None, {}, str(json_path)))
     return results
 
 
 def process_json_folder(json_root, data_root, H: int = FRAME_H, W: int = FRAME_W, **kwargs):
-    """  Process all JSON files in a folder into box-frame clips.
-    Returns:  list of (clip_name, clip_info, json_path)
+    """  Process all JSON files in a folder into box-frame clips. Also create a clip stats log.
+        :param json_root: Folder containing detector JSON files (recursively).
+        :param data_root: Root folder for all generated clips.
+        kwargs('new_stat_log'): if True create new log, if False (default) use the most recent log in data_root
+        Returns:  list of (clip_name, clip_info, json_path)
     """
-
     json_root = Path(json_root)
     data_root = Path(data_root)
     data_root.mkdir(parents=True, exist_ok=True)
 
     # # Control whether to start a new clips-stat log or append to the latest one
-    # new_stat_log = bool(kwargs.pop('new_stat_log', False))
 
     results = []
     for json_path in sorted(json_root.rglob("*.json")):
         try:
-            clip_name, clip_info = json_to_box_frames(
-                json_path, data_root, H=H, W=W, clip_name=None, **kwargs)
-            results.append((clip_name, clip_info, str(json_path)))
+            clip_name, info = json_to_box_frames(json_path, data_root, H, W, **kwargs)
+            results.append((clip_name, info, str(json_path)))
         except Exception as e:
             # Robust processing: report failure and continue with next file
             print(f"[ERROR] Failed processing {json_path}: {e}")
-            # results.append((None, {'duration': 0.0, 'Frames': 0, 'Events': 0, 'T_evn': 0.0, 'stat': {}}, str(json_path)))
-            results+= [None, {'duration': 0.0, 'Frames': 0, 'Events': 0, 'T_evn': 0.0, 'stat': {}}, str(json_path) ]
+            results+= [None, {}, str(json_path)]
 
-    # Build per-clip stats log under data_root
+    #* Build per-clip stats log under data_root
     stats_rows: list[str] = []
-    for clip_name, clip_info, json_path_str in results:
-        if not clip_name or not clip_info:
+    for clip_name, info, json_path_str in results:
+        if not clip_name or not info:
             continue
-        stat_dict = clip_info.get('stat', {}) or {}
+        stat_dict = info.get('stat', {}) or {}
         if stat_dict:
             pairs = [f"{k}:{v}" for k, v in sorted(stat_dict.items())]
             stat_str = '[' + '.'.join(pairs) + ']'
         else:
             stat_str = ''
         row = ','.join([str(clip_name),
-                        str(clip_info.get('Duration', 0.0)),
-                        str(clip_info.get('Frames', 0)),
-                        str(clip_info.get('Events', 0)),
-                        str(clip_info.get('T_evn', 0.0)),
+                        str(info.get('Duration', 0.0)),
+                        str(info.get('Frames', 0)),
+                        str(info.get('Events', 0)),
+                        str(info.get('T_evn', 0.0)),
                         stat_str])
         stats_rows.append(row)
 
@@ -262,16 +232,14 @@ def process_json_folder(json_root, data_root, H: int = FRAME_H, W: int = FRAME_W
     # new_stat_log = bool(kwargs.pop('new_stat_log', False))
 
     if stats_rows:
-        # Decide which log file to use
+        #* Decide which log file to use
         if kwargs.pop('new_stat_log', False):
             log_path = None
         else:
-            existing_logs = sorted(data_root.glob('clips_stat_*.log'),
-                                   key=lambda p: p.stat().st_mtime,)
+            existing_logs = sorted(data_root.glob('clips_stat_*.log'), key=lambda p: p.stat().st_mtime,)
             log_path = existing_logs[-1] if existing_logs else None
 
         if log_path is None:
-            # stamp = datetime.now().strftime("%y%m%d-%H%S")
             log_path = data_root/f"clips_stat_{datetime.now().strftime('%y%m%d-%H%S')}.log"
             #* New file: write header
             with log_path.open("w", encoding="utf-8") as f:
@@ -279,9 +247,11 @@ def process_json_folder(json_root, data_root, H: int = FRAME_H, W: int = FRAME_W
                 for row in stats_rows:
                     f.write(row + "\n")
         else:
-            # Append to existing stats log
+            #* Append to existing stats log
             with log_path.open('a', encoding='utf-8') as f:
                 for row in stats_rows:
                     f.write(row + '\n')
 
     return results
+
+#288(0,4,4)->255(0,4,1)

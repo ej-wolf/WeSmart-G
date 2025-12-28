@@ -163,7 +163,8 @@ test_evaluator = val_evaluator
 
 log_level = 'INFO'
 log_processor = dict(type='LogProcessor', window_size=20, by_epoch=True)
-vis_backends = [dict(type='LocalVisBackend')]
+vis_backends = [dict(type='LocalVisBackend'),
+                dict(type='TensorboardVisBackend')]
 visualizer = dict(type='ActionVisualizer', vis_backends=vis_backends)
 
 # Default hooks (rough equivalent of old log_config, checkpoint_config, etc.)

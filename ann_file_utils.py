@@ -17,12 +17,33 @@ def save_ann_file(ann_file: str | Path, lines: Iterable[str]):
     with ann_file.open("w") as f:
         for ln in lines_list:
             f.write(ln + "\n")
-    # print(f"Saved {len(lines_list)} lines to {ann_file}")
+
+
+def load_ann_file(ann_path:str|Path) -> tuple(list[int], dict[str, int]):
+    """ Load an MMAction-format annotation file.
+        <rel/path> <label>
+    Returns:  {video_names[str]: labels[int]}  - 'relative paths'
+    """
+    ann_path = Path(ann_path)
+    video_ann: dict[str, int] = {}
+    labels: list[int] = []
+
+    with ann_path.open("r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            # Use rsplit to be robust to spaces in the path
+            path_str, label_str = line.rsplit(" ", 1)
+            video_ann[path_str] = int(label_str)
+            labels += [int(label_str)]
+
+    return labels, video_ann
 
 
 
-def annotate_dir(dir_path:str|Path, ann:int,
-                 rel_dir = None, shuffle: bool = False, **kwargs) -> list[str]:
+def annotate_dir(dir_path:str|Path, ann:int, rel_dir=None,
+                 shuffle:bool=False, **kwargs) -> list[str]:
     """ Return annotation lines for a single class directory.
         the returned lines have the format::
         relative/path/from_dataset_root <ann>   where `dataset_root` is `dir_path.parent`.
@@ -53,18 +74,15 @@ def annotate_dir(dir_path:str|Path, ann:int,
 
 
 def build_ann_files(root_dir:str|Path, shuffle:bool = False)-> dict[str, Path]:
-    """Build one annotation file per class subdirectory under ``root_dir``.
+    """ Build one annotation file per class subdirectory under ``root_dir``.
     Assumes the following structure::
-
         root_dir/
             classA/
             classB/
             ...
     For each class directory, writes an annotation file next to ``root_dir``
     (i.e. in ``root_dir.parent``) named::
-
         <root_name>_<class_name>.txt
-
     Labels are integers assigned by sorted class name order (0, 1, 2, ...).
     Returns a mapping ``{class_name: ann_file_path}``.
     """
@@ -105,13 +123,11 @@ def split_ann_file(ann_path:str|Path, out_path: str|Path|None = None,
                    ratio: float = 0.8,  seed: int = 42, shuffle: bool = True,
                    ) -> tuple[Path, Path]:
     """Split an annotation file into two parts.
-
     ann_path: path to input annotation file (``rel/path <label>`` per line).
     out_path: directory for the output files. If ``None``, uses ``ann_path.parent``.
     out_tags: names for the two splits (default: ("train", "test")).
-    ratio:   fraction of lines to allocate to the *first* tag.
-
-    Returns ``(first_path, second_path)``.
+    ratio:    fraction of lines to allocate to the *first* tag.
+    Returns `(first_path, second_path)`
     """
 
     ann_path = Path(ann_path).resolve()
@@ -309,3 +325,5 @@ if __name__ == "__main__":
     # proc_lib(RWF_root, RWF_dir_ls, )
     # proc_lib(RLVS_root, RLVS_dir_ls)
     main_local()
+
+#322(0,4,2)

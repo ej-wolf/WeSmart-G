@@ -3,32 +3,9 @@ from pathlib import Path
 import numpy as np
 import pickle
 
-# from typing import Dict, Iterable, List, Tuple
 from typing import Iterable
+from ann_file_utils import load_ann_file
 
-#*  Basic helpers
-
-# def load_ann_file(ann_path:str|Path) -> Tuple[List[str], List[int]]:
-def load_ann_file(ann_path:str|Path) -> tuple(list[int], dict[str, int]):
-    """ Load an MMAction-format annotation file.
-        <rel/path> <label>
-    Returns:  {video_names[str]: labels[int]}  - 'relative paths'
-    """
-    ann_path = Path(ann_path)
-    video_ann: dict[str, int] = {}
-    labels: list[int] = []
-
-    with ann_path.open("r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            # Use rsplit to be robust to spaces in the path
-            path_str, label_str = line.rsplit(" ", 1)
-            video_ann[path_str] = int(label_str)
-            labels += [int(label_str)]
-
-    return labels, video_ann
 
 def _compute_binary_confusion(y_pred: Iterable[int], y_gt: Iterable[int],
                               positive_label:int=1) -> tuple[int, int, int, int]:
@@ -51,11 +28,9 @@ def _compute_binary_confusion(y_pred: Iterable[int], y_gt: Iterable[int],
 
 
 # --- Core evaluation: y_pred + y_gt -> metrics
-
 def evaluate_test_scores(y_pred: Iterable[int],  y_gt: Iterable[int],
                          *,  positive_label: int = 1,) -> dict[str, object]:
     """ Evaluate binary metrics from predicted and ground-truth labels.
-
     :param y_pred : iterable of int,    Predicted labels, shape [N].
     :param y_gt   : iterable of int,    Ground-truth labels, shape [N].
     :param positive_label: int, Which class is considered "positive" (e.g. violence).
@@ -91,7 +66,6 @@ def evaluate_test_scores(y_pred: Iterable[int],  y_gt: Iterable[int],
             'recall': float(recall),
             'false_positive_rate': float(fpr),
             'confusion_matrix': [[tn, fp], [fn, tp]],}
-
 
 
 #* Scores -> predictions
@@ -194,6 +168,6 @@ if __name__ == "__main__":
         scores_path="work_dirs/tsm_r50_bbfrm/test_eval/test_scores.pkl"   )
 
     print_metrics(met_vid)
-    # print_metrics(met_frm)
+    print_metrics(met_frm)
 
-#299 -> 292(1,15,10) -> 199(2,1,4)
+#299 -> 292(1,15,10) -> 199(2,1,4) -> 175( ,1,1)

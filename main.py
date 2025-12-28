@@ -9,9 +9,9 @@ def print_hi(name):
 """ code """
 import os
 from pathlib import Path
-from data_processing import json_to_box_frames, process_json_folder #, play_frames
+from json_processing import json_to_box_frames, process_json_folder #, play_frames
 from visual_util import play_frames
-import data_processing as jsn
+import json_processing as jsn
 from  temporal_segment import  segment_all_clips, make_labels_file, make_train_val_ds
 from my_local_utils import collection, clear_dir
 
@@ -82,7 +82,9 @@ if __name__ == "__main__":
     CWD = Path(os.getcwd())
     # Example manual usage; adapt as needed
     json_dirs = ['json_ds','usual_jsons_from_cams', 'usual_jsons_from_events' ]
+    json_dirs = ['Jsons']
     main_path = Path("/mnt/local-data/Projects/Wesmart/data/")
+    main_path = Path("/mnt/local-data/Projects/Wesmart/datasets/")
 
 
     #* Set the main data dir inside the python project
@@ -91,12 +93,13 @@ if __name__ == "__main__":
     #* Convret jsons to frames
     #process_data(json_path)
     json_path_ls = [main_path/d for d in json_dirs]
-    process_data(json_path_ls, sub_dirs=['train', 'test', 'test'])
+    # process_data(json_path_ls, sub_dirs=['train', 'test', 'test'])
+    process_data(json_path_ls)
 
     #* Make segmentations
     clear_dir(data_root/'cache')
-    # segments = segment_all_clips(data_root/'frames', data_root/'cache', win_len=15, stride=5)
-    segments = segment_all_clips(data_root/'frames'/'train', data_root/'cache', win_len=15, stride=5)
+    segments = segment_all_clips(data_root/'frames', data_root/'cache', win_len=15, stride=5)
+    # segments = segment_all_clips(data_root/'frames'/'train', data_root/'cache', win_len=15, stride=5)
     # tst_seg = segment_all_clips(data_root/'frames'/'test' , data_root/'cache', win_len=15, stride=5)
 
     make_labels_file(segments)
