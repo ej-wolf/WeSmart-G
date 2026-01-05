@@ -14,11 +14,11 @@ def launch_wrapper(**kwargs):
     score_file = (prfx/kwargs.get('out_dir', Path(kwargs['checkpoint_path']).parent/'test_eval')/
                        kwargs.get('score_file', "test_scores.pkl"))
 
-    cmd = [ 'python', kwargs.get('wrapper','run_safe_test.py'), #* the wrapper script
+    cmd = [ 'python', kwargs.get('wrapper', 'wrapper/run_safe_test.py'),  #* the wrapper script
             str(prfx/kwargs['config_path']),
             str(prfx/kwargs['checkpoint_path']),
             kwargs.get('pkl_flag', '--dump'), str(score_file),
-            "--launcher", "none",]
+            "--launcher", "none", ]
 
     subprocess.run(cmd, check=True, cwd=kwargs.get('run_in','.'))
 
@@ -27,7 +27,7 @@ def set_with_defaults(run_tag:str, **kwargs)-> dict:
 
 
     pth = get_epoch_pth(Path(os.getcwd())/'work_dirs'/run_tag, kwargs.get('pth', 'best'))
-    return {'wrapper': kwargs.get('testing_file','run_safe_test.py'),
+    return {'wrapper': kwargs.get('testing_file', 'wrapper/run_safe_test.py'),
             'config_path': f"configs/{run_tag}.py",
             'checkpoint_path': f"work_dirs/{run_tag}/{pth}"}
 

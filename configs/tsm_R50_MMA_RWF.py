@@ -11,7 +11,8 @@ All_Ann_File = "all.txt"
 Train_File = "train.txt"
 Valid_File = "val.txt"
 
-work_dir = "../../work_dirs/tsm_R50_MMA_RWF"
+# work_dir = "../../work_dirs/tsm_R50_MMA_RWF"
+# work_dir = f"../../work_dirs/tsm_R50_MMA_nc{num_clips}_l{clip_len}b{Batch_sz}"
 
 #* --- Model
 Classes = ['NonFight', 'Fight']
@@ -23,11 +24,11 @@ model = dict(cls_head=dict( num_classes=len(Classes) ))
 # N_Workers = 4
 
 train_dataloader = dict( dataset=dict(type=dataset_type,    #* redundant but explicit
-                                      ann_file=f'{data_root}/train.txt',
+                                      ann_file=f'{data_root}/{Train_File}',
                                       data_prefix=dict(video=data_root))
                         )
 val_dataloader  = dict(dataset=dict(type=dataset_type,
-                                    ann_file=f'{data_root}/val.txt',
+                                    ann_file=f'{data_root}/{Valid_File}',
                                     data_prefix=dict(video=data_root))
                       )
 

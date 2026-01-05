@@ -37,7 +37,21 @@ def main():
     #* Execute tools/test.py in *this* process as __main__
     code = compile(test_file.read_text(encoding="utf-8"), str(test_file), "exec")
     globals_dict = { "__name__": "__main__", "__file__": str(test_file), }
+    #* Add for debugging
+    print("code:\n", code, "globals:\n", globals_dict)
+    # print(globals_dict)
+
     exec(code, globals_dict)
+
+
+def run_train(cfg_f:str|Path, **kwargs):
+
+    cfg_f = Path(kwargs.get('cfg_dir', '../../configs' ))/cfg_f
+    # " python tools/train.py ../../configs/tsm_R50_MMA_RWF.py
+    cmd = [ 'python', 'tools/train.py', str(cfg_f)]
+    subprocess.run(cmd, check=True, cwd=kwargs.get('run_in', "extern/mmaction2"))
+
+
 
 
 def launch_wrapper(**kwargs):
@@ -46,11 +60,11 @@ def launch_wrapper(**kwargs):
     score_file = (prfx/kwargs.get('out_dir', Path(kwargs['checkpoint_path']).parent/'test_eval')/
                        kwargs.get('score_file', "test_scores.pkl"))
 
-    cmd = [ 'python', kwargs.get('wrapper','run_safe_test.py'), #* the wrapper script
+    cmd = [ 'python', kwargs.get('wrapper', 'wrapper/run_safe_test.py'),  #* the wrapper script
             str(prfx/kwargs['config_path']),
             str(prfx/kwargs['checkpoint_path']),
             kwargs.get('pkl_flag', '--dump'), str(score_file),
-            "--launcher", "none",]
+            "--launcher", "none", ]
 
     subprocess.run(cmd, check=True, cwd=kwargs.get('run_in','.'))
 
@@ -58,4 +72,8 @@ def launch_wrapper(**kwargs):
 
 if __name__ == "__main__":
     main()
+    cfg_f = "tsm_R50_MMA_RWF.py"
+    # run_train(cfg_f)
+
+
 #49(2,5,3)

@@ -18,12 +18,21 @@ data_root = Current_Data_Root
 # ann_file_valid = data_root + '/' + Valid_File
 # ann_file_test  = data_root + '/' + All_Ann_File   #* reuse val as test for now
 
-work_dir = '../../work_dirs/tsm_R50_MMA'
+# work_dir = '../../work_dirs'
 
 # -------------------------------------------------------------------------------
 # --- Model: TSM with ResNet50 backbone, 2 classes (violence/ no-violence) -----
 # -------------------------------------------------------------------------------
+
 num_classes  = 2   #*  2 classes (violence / no-violence)
+img_sz = 224
+
+#* clip params
+clip_len = 4
+frame_interval = 1
+num_clips = 2
+
+#* model parmas
 Resnet_Depth = 50
 Out_Layer = 4
 in_channels  = 2048
@@ -31,26 +40,31 @@ dropout = 0.5
 
 model = dict( type='Recognizer2D',
               data_preprocessor=dict(type='ActionDataPreprocessor',
+                            format_shape='NCHW',
                             mean=[123.675, 116.28, 103.53],
                             std =[58.395 ,  57.12, 57.375],
-                            format_shape='NCHW',
                             ),
-              backbone=dict(type='ResNet', depth=Resnet_Depth,  # <-- key difference vs TSN/TRN
+              backbone=dict(# type='ResNet',
+                            type='ResNetTSM',
+                            depth=Resnet_Depth,  # <-- key difference vs TSN/TRN
                             pretrained='torchvision://resnet50',
                             out_indices=(Out_Layer-1,),
                             norm_eval=False,
+                            shift_div=8,
+                            # plugins=[dict(type='TemporalShift', shift_div=8, position='after_conv1')]
                             # style='pytorch',shift_div=8, #* typical TSM setting
                             ),
               cls_head=dict(type='TSMHead',
                             num_classes=num_classes,            # violence / non-violence
                             in_channels=in_channels,
                             spatial_type='avg',
-                            consensus=dict(type='AvgConsensus', dim=1),
+                            # consensus=dict(type='AvgConsensus', dim=1),
                             dropout_ratio=dropout,
                             init_std=0.01,
                             is_shift=True,
                             temporal_pool=False,
-                            # average_clips='prob',
+                            average_clips='score',
+                            topk=(),
                             ),
              )
 
@@ -59,18 +73,16 @@ model = dict( type='Recognizer2D',
 # --- Pipelines
 # ----------------------------------------------------------------------
 
-clip_len = 8
-frame_interval = 1
-n_clips = 1
-img_sz = 224
-
 # dataset_type = 'VideoDataset'
 train_pipeline = [dict(type='DecordInit'),
-                  dict(type='SampleFrames', clip_len=clip_len, frame_interval=frame_interval, num_clips=n_clips),
+                  dict(type='SampleFrames',
+                       clip_len=clip_len,
+                       frame_interval=frame_interval,
+                       num_clips=num_clips),
                   dict(type='DecordDecode'),
                   dict(type='Resize', scale=(-1, 256)),
                   dict(type='RandomResizedCrop'),
-                  dict(type='Resize', scale=(img_sz, img_sz), keep_ratio=False),
+                  #dict(type='Resize', scale=(img_sz, img_sz), keep_ratio=False),
                   dict(type='Flip', flip_ratio=0.5),
                   dict(type='FormatShape', input_format='NCHW'),
                   dict(type='PackActionInputs')
@@ -80,7 +92,7 @@ val_pipeline = [dict(type='DecordInit'),
                 dict(type='SampleFrames',
                      clip_len=clip_len,
                      frame_interval= frame_interval,
-                     num_clips=n_clips,
+                     num_clips=num_clips,
                      test_mode=True),
                 dict(type='DecordDecode'),
                 dict(type='Resize', scale=(-1, 256)),
@@ -97,7 +109,7 @@ test_pipeline = val_pipeline
 # ----------------------------------------------------------------------
 
 #* consts for all dataloaders
-Batch_sz = 16
+Batch_sz = 2
 N_Workers = 4
 
 train_dataloader = dict(batch_size=Batch_sz, num_workers=N_Workers, persistent_workers=True, #)
@@ -129,9 +141,11 @@ Val_Frq = 5         #* run validation every 5 epochs
 ChP_Frq = 10
 
 #* Optimizer wrapper
-optim_wrapper = dict( #* weights update (SGD + lr + momentum).
-                     optimizer=dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0001),)
-                     # clip_grad=None)
+optim_wrapper = dict(type='AmpOptimWrapper',
+                     #* weights update (SGD + lr + momentum).
+                     optimizer=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0001),
+                     loss_scale='dynamic'
+                    ) # clip_grad=None)
 
 # lr_config = dict( policy='step', step=[20, 40] ) #* learning rate schedule (decays at epochs 20 & 40).
 
@@ -173,3 +187,7 @@ default_hooks = dict( # optimizer=dict(type='OptimizerHook', grad_clip=None),
                      logger=dict(type='LoggerHook', interval=20),
                      param_scheduler=dict(type='ParamSchedulerHook'),
                      )
+
+# ----------------------------------------------------------------------
+# work_dir = f"../../work_dirs/tsm_R50_MMA_nc{num_clips}_b{Batch_sz}"
+work_dir = f"../../work_dirs/tsm_R50_MMA_nc{num_clips}-cl{clip_len}-b{Batch_sz}"
