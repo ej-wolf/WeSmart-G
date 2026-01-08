@@ -214,7 +214,9 @@ if __name__ == "__main__":
     rwf_log = "./work_dirs/tsm_R50_MMA_RWF/20251214_094114/20251214_094114.log"
     rwf_log = "/work_dirs/tsm_R50_MMA_RWF/20251215_023321/20251215_023321.log"
     # l =  "./work_dirs/tsm_R50_MMA_JOINT/20251215_041232/20251215_041232.log"
-    l =  "/work_dirs/tsm_R50_MMA_nc2-l4-b4/20251231_104730/20251231_104730.log"
+    l =  "work_dirs/tsm_R50_MMA_nc2-l4-b4-v/20251231_104730/20251231_104730.log"
     # plot_my_log(rlv_log)
+    plot_my_log(rwf_log)
     plot_my_log(l)
+    plot_my_log("/mnt/local-data/Python/Projects/weSmart/work_dirs/tsm_R50_MMA_RWF/20251215_023321/20251215_023321.log")
 
