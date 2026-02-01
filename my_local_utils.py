@@ -66,6 +66,39 @@ def clear_dir(path, missing_ok: bool = False) -> None:
         except Exception as e:
             print(f"clear_dir: failed to remove {child!r}: {e}")
 
+# -----------------------------------------------------------------------------
+# PATH CORRECTION UTIL
+# -----------------------------------------------------------------------------
+# import os
+
+
+def correct_path(path:str|Path, project_root: str|Path|None=None):
+    """  Try to resolve a path defined with relative prefixes (e.g. ../../a/b/c)
+    by matching only its *tail* (a/b/c) somewhere under the project root.
+
+    Rules:
+    - Ignores leading ../ components
+    - Searches recursively under project_root
+    - If exactly one match is found → return corrected Path
+    - If zero or multiple matches → print one-line warning and return None
+    """
+    if path is None:
+        return None
+
+    p = Path(path)
+    tail = Path(*[x for x in p.parts if x not in ('..', '.')])
+
+    root = Path(project_root) if project_root is not None else Path.cwd()
+    matches = list(root.rglob(tail.as_posix()))
+
+    if len(matches) == 1:
+        # return matches[0]
+        return str(matches[0]) if isinstance(path,str) else matches[0]
+    elif len(matches) == 0:
+        print(f"[correct_path] NOT FOUND: {tail}")
+    else:
+        print(f"[correct_path] AMBIGUOUS ({len(matches)} matches): {tail}")
+    return None
 
 " *** Basic Log handling *** "
 def _save_log(lines, log_name, log_type: str | None = None):
@@ -143,6 +176,8 @@ collection = as_collection
 
 
 "*** models related  ***"
+
+
 from pathlib import Path
 
 #*86->63
@@ -223,5 +258,7 @@ def tst_get_pth(tst_path:str=None):
 
 if __name__ == "__main__":
     tst_get_pth()
+
+
 
 #277->

@@ -1,7 +1,7 @@
-# weSmart/utils/torch_safe_load.py
-"""
-Centralized PyTorch >= 2.6 safe-unpickling policy
-Used by ALL scripts that load MMEngine / MMAction checkpoints.
+
+""" torch_safe_load
+    Centralized PyTorch >= 2.6 safe-unpickling policy
+    Used by ALL scripts that load MMEngine / MMAction checkpoints.
 """
 
 from torch.serialization import add_safe_globals
@@ -13,8 +13,6 @@ def enable_checkpoint_loading():
     """  Allowlist all known-safe globals required to load
     MMEngine / MMAction checkpoints created by this project.
     """
-
-
 add_safe_globals([HistoryBuffer,
                   np._core.multiarray._reconstruct,
                   Float64DType, Int64DType,

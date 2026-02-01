@@ -23,7 +23,7 @@ except Exception:
     #* Fallback to the internal path seen in the pickle error
     from numpy._core.multiarray import _reconstruct as np_reconstruct
 
-
+from common.torch_safe_load import enable_checkpoint_loading
 def main():
     """ Wrapper around mmaction2/tools/test.py with robust path handling.
     Design goals:
@@ -38,6 +38,7 @@ def main():
     add_safe_globals([  HistoryBuffer, np_reconstruct, getattr,
                         np.ndarray, np.dtype, np._core.multiarray.scalar,
                         Float64DType, Int64DType  ])
+    # enable_checkpoint_loading()
 
     argv = sys.argv
     launch_cwd = Path.cwd().resolve()

@@ -112,7 +112,8 @@ test_pipeline = val_pipeline
 Batch_sz = 2
 N_Workers = 4
 
-train_dataloader = dict(batch_size=Batch_sz, num_workers=N_Workers, persistent_workers=True, #)
+train_dataloader = dict(batch_size=Batch_sz, num_workers=N_Workers, persistent_workers=True,#)
+                        pin_memory=False,
                         # dataset=dict(type=data)) # to be overridden in child
                         dataset=dict(type=dataset_type,
                                      ann_file='',
@@ -123,6 +124,7 @@ train_dataloader = dict(batch_size=Batch_sz, num_workers=N_Workers, persistent_w
                         )
 
 val_dataloader   = dict(batch_size=Batch_sz, num_workers=N_Workers, persistent_workers=True,
+                        pin_memory=False,
                         dataset=dict(type=dataset_type,
                                      ann_file='',
                                      data_prefix=dict(video=''),
