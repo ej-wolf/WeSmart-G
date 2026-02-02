@@ -1,6 +1,9 @@
 import shutil
 from pathlib import Path
 
+# ----------------------------------------------------------------------------
+# Files and Paths Utils
+# -----------------------------------------------------------------------------
 
 def _make_unique_dir(root, base_name, **kwargs):
     """  Create a unique subdir under root for base_name, adding (2), (3), ... if needed.
@@ -66,16 +69,10 @@ def clear_dir(path, missing_ok: bool = False) -> None:
         except Exception as e:
             print(f"clear_dir: failed to remove {child!r}: {e}")
 
-# -----------------------------------------------------------------------------
-# PATH CORRECTION UTIL
-# -----------------------------------------------------------------------------
-# import os
-
 
 def correct_path(path:str|Path, project_root: str|Path|None=None):
     """  Try to resolve a path defined with relative prefixes (e.g. ../../a/b/c)
     by matching only its *tail* (a/b/c) somewhere under the project root.
-
     Rules:
     - Ignores leading ../ components
     - Searches recursively under project_root
@@ -100,91 +97,13 @@ def correct_path(path:str|Path, project_root: str|Path|None=None):
         print(f"[correct_path] AMBIGUOUS ({len(matches)} matches): {tail}")
     return None
 
-" *** Basic Log handling *** "
-def _save_log(lines, log_name, log_type: str | None = None):
-    """Save log lines to a file; log_type reserved for future formatting tweaks."""
-    if not lines:   return
 
-    # Default: plain text, one line per entry
-    if log_type is None or log_type == "default":
-        log_path = Path(log_name)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w", encoding="utf-8") as lf:
-            for line in lines:
-                lf.write(line + "\n")
-    else:
-        # Placeholder for future formats
-        log_path = Path(log_name)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w", encoding="utf-8") as lf:
-            for line in lines:
-                lf.write(line + "\n")
-
-def _load_log_lines(log_source):
-    """Normalize log source (path or list) into list of stripped lines."""
-    if isinstance(log_source, (str, Path)):
-        lp = Path(log_source)
-        if not lp.is_file():
-            return []
-        with lp.open("r", encoding="utf-8") as f:
-            return [ln.strip() for ln in f if ln.strip()]
-    elif isinstance(log_source, list):
-        return [str(ln).strip() for ln in log_source if str(ln).strip()]
-    return []
-
-" *** Collection casting ***"
-def as_collection(x):
-    """  If x is a collection (list/tuple/set/dict/range/numpy array/torch tensor/etc.)
-    return it as-is. Otherwise, wrap it in a single-element list.
-
-    Strings/bytes are treated as scalars (wrapped).
-    Multi-dim numpy / torch arrays are returned as-is (no special handling).
-    """
-    from collections.abc import Iterable
-    # treat strings/bytes as scalars, not collections
-    if isinstance(x, (str, bytes, bytearray)):
-        return [x]
-
-    # optional numpy / torch support without hard dependency
-    np_types = ()
-    torch_types = ()
-    try:
-        import numpy as np
-        np_types = (np.ndarray,)
-    except Exception:
-        pass
-    try:
-        import torch
-        torch_types = (torch.Tensor,)
-    except Exception:
-        pass
-
-    collection_types = (list, tuple, set, frozenset, range, dict) + np_types + torch_types
-
-    #* common concrete collection types
-    if isinstance(x, collection_types):
-        return x
-
-    #* other iterables (e.g. generators); treat as collections and return as-is
-    if isinstance(x, Iterable):
-        return x
-
-    #* scalar fallback
-    return [x]
-
-collection = as_collection
-
-
-"*** models related  ***"
-
-
-from pathlib import Path
-
+# ***** pth related  ***** #
 #*86->63
-def get_epoch_pth(dir_path:str|Path, epoch:int|str|None='best') -> str:
-    """ Return path to a checkpoint .pth file in dir_path.
-    :param epoch:- int  : desired epoch; if exact file not found, pick the closest
-                            *later* epoch_XX.pth, or the last available if none later.
+def get_epoch_pth(dir_path:str|Path, epoch:int|str|None='best') -> str|None:
+    """ Return path to desired checkpoint (pth file) in dir_path.
+    :param epoch:- int : desired epoch; if exact file not found, pick the closest
+                         *later* epoch_XX.pth, or the last available if none later.
                  - 'best' (default): return a 'best' checkpoint if present
                          (file name containing 'best'). If none, fall back to last
                        epoch_XX.pth and print a warning.
@@ -245,20 +164,97 @@ def get_epoch_pth(dir_path:str|Path, epoch:int|str|None='best') -> str:
     closest_pth, _ = min(epoch_pairs,key=lambda pe: (abs(pe[1] - epoch), -pe[1]), )
     return str(closest_pth)
 
-def tst_get_pth(tst_path:str=None):
-    tst_ls = [None, 'best', 'last', 10, 25, 17, 51, 81, -1]
-    if tst_path is None:
-        d = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/tsm_r50_bbfrm")
+
+# ***** Basic Log handling ***** #
+def _save_log(lines, log_name, log_type: str | None = None):
+    """Save log lines to a file; log_type reserved for future formatting tweaks."""
+    if not lines:   return
+
+    # Default: plain text, one line per entry
+    if log_type is None or log_type == "default":
+        log_path = Path(log_name)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w", encoding="utf-8") as lf:
+            for line in lines:
+                lf.write(line + "\n")
+    else:
+        # Placeholder for future formats
+        log_path = Path(log_name)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w", encoding="utf-8") as lf:
+            for line in lines:
+                lf.write(line + "\n")
+
+def _load_log_lines(log_source):
+    """Normalize log source (path or list) into list of stripped lines."""
+    if isinstance(log_source, (str, Path)):
+        lp = Path(log_source)
+        if not lp.is_file():
+            return []
+        with lp.open("r", encoding="utf-8") as f:
+            return [ln.strip() for ln in f if ln.strip()]
+    elif isinstance(log_source, list):
+        return [str(ln).strip() for ln in log_source if str(ln).strip()]
+    return []
+
+
+# ***** Collection casting ***** #
+def as_collection(x):
+    """  If x is a collection (list/tuple/set/dict/range/numpy array/torch tensor/etc.)
+    return it as-is. Otherwise, wrap it in a single-element list.
+    (*) Strings/bytes are treated as scalars (wrapped).
+    (*) Multi-dim numpy / torch arrays are returned as-is (no special handling).
+    """
+    from collections.abc import Iterable
+
+    if isinstance(x, (str, bytes, bytearray)):
+        return [x]    #* treat strings/bytes as scalars, not collections
+
+    #* optional numpy/torch support without hard dependency
+    np_types = ()
+    torch_types = ()
+    try:
+        import numpy as np
+        np_types = (np.ndarray,)
+    except Exception:
+        pass
+    try:
+        import torch
+        torch_types = (torch.Tensor,)
+    except Exception:
+        pass
+
+    collection_types = (list, tuple, set, frozenset, range, dict) + np_types + torch_types
+
+    #* common concrete collection types
+    if isinstance(x, collection_types):
+        return x
+
+    #* other iterables (e.g. generators); treat as collections and return as-is
+    if isinstance(x, Iterable):
+        return x
+
+    #* scalar fallback
+    return [x]
+
+collection = as_collection
+
+
+# ----------------------------------------------------------------------------
+# Testing
+# -----------------------------------------------------------------------------
+def tst_get_pth(tst_path:str=None, **kwargs):
+
+    tst_ls = kwargs.get('tst_ls', [None, 'best', 'last', 10, 25, 17, 51, 81, -1])
+    d = Path(tst_path)
     for t in tst_ls:
-        # print(t)
         print(get_epoch_pth(d, t))
     d = d.parent
     print(get_epoch_pth(d)),  print(get_epoch_pth(d, epoch=10))
 
 
 if __name__ == "__main__":
-    tst_get_pth()
+    pass
+    # tst_get_pth("/mnt/local-data/Python/Projects/weSmart/work_dirs/tsm_r50_bbfrm")
 
-
-
-#277->
+#277(2,3,2)-> 260

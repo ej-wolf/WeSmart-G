@@ -178,6 +178,4 @@ if __name__ == "__main__":
                  scores_path="work_dirs/tsm_R50_MMA_nc2-l4-b4-v/test-score.pkl") )
 
 
-
-
 #299 -> 292(1,15,10) -> 199(2,1,4) -> 175( ,1,1)

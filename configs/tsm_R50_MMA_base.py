@@ -6,33 +6,25 @@
 default_scope = 'mmaction'
 dataset_type = 'VideoDataset'
 
+train_tag = 'tsm_R50_MMA'
+
 #* Paths (assuming CWD = ./extern/mmaction2)
-Current_Data_Root = '../../data/video'
-# All_Ann_File = "all.txt"
-# Valid_File = "val.txt"
-# Train_File = "train.txt"
+#ToDo - use correct_path from my_local_utils
+Current_Data_Root = "../../data/video"
+Work_Dir_Root = "../../work_dirs/"
 
 data_root = Current_Data_Root
-# data_root_val  = data_root
-# ann_file_train = data_root + '/' + Train_File
-# ann_file_valid = data_root + '/' + Valid_File
-# ann_file_test  = data_root + '/' + All_Ann_File   #* reuse val as test for now
-
-# work_dir = '../../work_dirs'
-
 # -------------------------------------------------------------------------------
 # --- Model: TSM with ResNet50 backbone, 2 classes (violence/ no-violence) -----
 # -------------------------------------------------------------------------------
-
 num_classes  = 2   #*  2 classes (violence / no-violence)
 img_sz = 224
-
 #* clip params
 clip_len = 4
-frame_interval = 1
 num_clips = 2
+frame_interval = 1
 
-#* model parmas
+#* model params
 Resnet_Depth = 50
 Out_Layer = 4
 in_channels  = 2048
@@ -103,7 +95,6 @@ val_pipeline = [dict(type='DecordInit'),
 
 test_pipeline = val_pipeline
 
-
 # ----------------------------------------------------------------------
 # --- DataLoaders (mmengine-style) -------
 # ----------------------------------------------------------------------
@@ -147,23 +138,19 @@ optim_wrapper = dict(type='AmpOptimWrapper',
                      #* weights update (SGD + lr + momentum).
                      optimizer=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0001),
                      loss_scale='dynamic'
-                    ) # clip_grad=None)
+                    )
 
 # lr_config = dict( policy='step', step=[20, 40] ) #* learning rate schedule (decays at epochs 20 & 40).
-
 checkpoint_config = dict(interval=ChP_Frq)    #* checkpoints saving frequency
 
 #* ----- training schedule / runtime settings (you can keep defaults or tweak) -----
-param_scheduler = [dict(type='MultiStepLR',
-                        begin=0, end=Max_Epochs, by_epoch=True,
-                        milestones=[20, 40], gamma=0.1
-                        )]
+param_scheduler = [dict(type='MultiStepLR', begin=0, end=Max_Epochs, by_epoch=True,
+                        milestones=[20, 40], gamma=0.1) ]
 
 #* --- Loops
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=Max_Epochs, val_interval=Val_Frq)
 val_cfg  = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
-
 
 #* --- Evaluation Metrics to compute on val/test
 # evaluation = dict( interval=5,  metrics=['top_k_accuracy', 'mean_class_accuracy'])
@@ -171,6 +158,7 @@ val_evaluator = dict(type='AccMetric',
                      metric_list=('top_k_accuracy',),       #* avoid mean_class_accuracy bug
                      metric_options=dict(top_k_accuracy=dict(topk=(1,)) ) #* top-1 only
                     )
+
 test_evaluator = val_evaluator
 
 # ----------------------------------------------------------------------
@@ -179,8 +167,7 @@ test_evaluator = val_evaluator
 
 log_level = 'INFO'
 log_processor = dict(type='LogProcessor', window_size=20, by_epoch=True)
-vis_backends = [dict(type='LocalVisBackend'),
-                dict(type='TensorboardVisBackend')]
+vis_backends = [dict(type='LocalVisBackend'), dict(type='TensorboardVisBackend')]
 visualizer = dict(type='ActionVisualizer', vis_backends=vis_backends)
 
 # Default hooks (rough equivalent of old log_config, checkpoint_config, etc.)
@@ -192,4 +179,6 @@ default_hooks = dict( # optimizer=dict(type='OptimizerHook', grad_clip=None),
 
 # ----------------------------------------------------------------------
 # work_dir = f"../../work_dirs/tsm_R50_MMA_nc{num_clips}_b{Batch_sz}"
-work_dir = f"../../work_dirs/tsm_R50_MMA_nc{num_clips}-cl{clip_len}-b{Batch_sz}"
+# work_dir = f"../../work_dirs/tsm_R50_MMA_nc{num_clips}-cl{clip_len}-b{Batch_sz}"
+work_dir = f"{Work_Dir_Root}/{train_tag}_nc{num_clips}-cl{clip_len}-b{Batch_sz}"
+#195
