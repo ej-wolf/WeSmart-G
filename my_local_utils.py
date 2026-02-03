@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+import json
 
 # ----------------------------------------------------------------------------
 # Files and Paths Utils
@@ -98,7 +99,15 @@ def correct_path(path:str|Path, project_root: str|Path|None=None):
     return None
 
 
-# ***** pth related  ***** #
+# ***** json handling ***** #x`1
+def load_json_frames(json_path: str | Path):
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    # frames =
+    return data['frames'] # frames
+
+# ***** pth handling ***** #
+
 #*86->63
 def get_epoch_pth(dir_path:str|Path, epoch:int|str|None='best') -> str|None:
     """ Return path to desired checkpoint (pth file) in dir_path.
