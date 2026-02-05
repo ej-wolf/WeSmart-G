@@ -12,7 +12,7 @@ from pathlib import Path
 from json_processing import json_to_box_frames, process_json_folder #, play_frames
 from visual_util import play_frames
 import json_processing as jsn
-from  temporal_segment import  segment_all_clips, make_labels_file, make_train_val_ds
+from  temporal_segment_BB_frames import  segment_all_clips, make_labels_file, make_train_val_ds
 from my_local_utils import collection, clear_dir
 
 
