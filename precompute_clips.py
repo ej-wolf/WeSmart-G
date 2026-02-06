@@ -27,7 +27,7 @@ from analyze_json_motion import compute_motion_sequence, temporal_conv_1d, clip_
 # Defaults (move to config later if needed)
 # --------------------------------------------------
 VAL_RATIO = 0.2
-RANDOM_SEED = 21
+RANDOM_SEED = 42
 
 POOL_MODE = 'max'
 APPLY_TEMPORAL_SMOOTH = True
@@ -36,15 +36,15 @@ TEMP_KERNEL = 3
 # --------------------------------------------------
 # * Split utilities
 # --------------------------------------------------
-def split_json_ds(dir_path:str|Path) -> dict[str, list[Path]]:
-    """ Split a directory of JSON video annotations into train / validation sets.
-        The split is done at the VIDEO level (not clip level).
+def split_json_ds(dir_path:str|Path, **kwargs) -> dict[str, list[Path]]:
+    """ Split a directory of JSON videos into train / validation sets.
     Parameters
         dir_path : directory containing JSON files (one per video)
     Returns
         splits : dict {'train': list of Path objects
                        'val'  : list of Path objects}
     Notes
+        The split is done at the VIDEO level (not clip level).
         Deterministic split (controlled by RANDOM_SEED)
     """
 
@@ -55,16 +55,15 @@ def split_json_ds(dir_path:str|Path) -> dict[str, list[Path]]:
     if not json_files:
         raise RuntimeError(f"No JSON files found in {dir_path}")
 
-    rng = random.Random(RANDOM_SEED)
+    rng = random.Random(kwargs.get('random_seed', RANDOM_SEED))
     rng.shuffle(json_files)
-
     # n_total = len(json_files)
     n_val = max(1, int(VAL_RATIO*len(json_files)) )
 
-    val_files   = json_files[:n_val]
-    train_files = json_files[n_val:]
+    # val_files   = json_files[:n_val]
+    # train_files = json_files[n_val:]
 
-    return {'train': train_files, 'val': val_files,}
+    return {'train': json_files[n_val:], 'val': json_files[:n_val],}
 
 
 def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
@@ -78,8 +77,8 @@ def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for split_name, paths in splits.items():
-        list_path = out_dir/f"{split_name}.txt"
+    for split_group, paths in splits.items():
+        list_path = out_dir/f"{split_group}_videos.txt"
         with open(list_path, 'w') as f:
             for p in paths:
                 f.write(p.name + '\n')
@@ -92,7 +91,7 @@ def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
 # Step A: feature precomputation
 # --------------------------------------------------
 
-def precompute_split_features(
+def precompute_features_cache(   #* changed
                 json_dir: str | Path,
                 list_file: str| Path,
                 out_path: str | Path,
@@ -141,13 +140,14 @@ def precompute_split_features(
     np.savez_compressed(out_path, X=feats, y=labels, meta=np.asarray(meta, dtype=object),)
 
     print(f'Saved {len(labels)} clips to {out_path}')
+    inspect_feature_file(out_path)
 
 
 # --------------------------------------------------
 # Step B: dataset inspection
 # --------------------------------------------------
 
-def inspect_feature_file(npz_path: str | Path):
+def inspect_feature_file(npz_path: str|Path):
     """ Inspect cached clip-level features. """
     npz_path = Path(npz_path)
     data = np.load(npz_path, allow_pickle=True)
@@ -177,10 +177,12 @@ def main():
     parser = argparse.ArgumentParser('precompute_clips')
     parser.add_argument('jsons_dir', type=Path)
     parser.add_argument('cache_dir', type=Path)
-    parser.add_argument('-s', '--split-dir', type=Path, default=None)
+    parser.add_argument('-s', '--split-dir',   type=Path, default=None)
     parser.add_argument('-e', '--allow-empty', type=Path, default=True)
-
+    parser.add_argument('-rs','--random-seed', type=int,  default=RANDOM_SEED)
+    parser.add_argument('-ns', '--new-split', action='store_true', help='Force New split')
     args = parser.parse_args()
+
 
     jsons_dir = args.jsons_dir
     cache_dir = args.cache_dir
@@ -192,17 +194,19 @@ def main():
     train_list = split_dir/"train_videos.txt"
     valid_list = split_dir/"val_videos.txt"
 
-    if train_list.exists() and valid_list.exists():
+    if train_list.exists() and valid_list.exists() and not args.new_split:
         print('[INFO] Using existing train/val split files')
     else:
         print('[INFO] Creating new train/val split')
-        splits = split_json_ds(jsons_dir)
+        #splits = split_json_ds(jsons_dir)
+        print('random seed : ', args.random_seed)
+        splits = split_json_ds(jsons_dir, random_seed=args.random_seed)
         save_vid_lists(splits, split_dir)
 
-    precompute_split_features(jsons_dir, split_dir/'train_videos.txt',
-                                         cache_dir/'train_feats.npz',empty_label=False)
-    precompute_split_features(jsons_dir, split_dir/'val_videos.txt',
-                                         cache_dir/'val_feats.npz', empty_label=False)
+    precompute_features_cache(jsons_dir, split_dir / 'train_videos.txt',
+                              cache_dir/'train_feats.npz', allow_empty_lbl=False)
+    precompute_features_cache(jsons_dir, split_dir / 'val_videos.txt',
+                              cache_dir/'val_feats.npz', allow_empty_lbl=False)
 
 
 # --------------------------------------------------
@@ -211,6 +215,7 @@ def main():
 if __name__ == '__main__':
     pass
     main()
+
 
     # DATA_DIR = Path("./data/json_data")
     # JSON_DIR = DATA_DIR/"full_ann_w_keys"
