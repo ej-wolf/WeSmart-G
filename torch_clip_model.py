@@ -174,38 +174,5 @@ if __name__ == '__main__':
     DATA_DIR = Path("./data/json_data")
     # OUT_DIR = DATA_DIR / 'cache'
     model, hist = run_training(DATA_DIR/'cache')
-    # TRAIN_NPZ = './cached_features/train_feats.npz'
-    # VAL_NPZ = './cached_features/val_feats.npz'
-    #
-    # BATCH_SIZE = 256
-    # EPOCHS = 20
-    # LR = 1e-3
-    #
-    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    #
-    # train_ds = ClipFeatureDataset(TRAIN_NPZ)
-    # val_ds = ClipFeatureDataset(VAL_NPZ)
-    #
-    # train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    # val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
-    #
-    # in_dim = train_ds.X.shape[1]
-    # model = ClipMLP(in_dim).to(device)
-    #
-    # # handle class imbalance (optional)
-    # pos_weight = None
-    # if (train_ds.y == 1).sum() > 0:
-    #     n_pos = (train_ds.y == 1).sum()
-    #     n_neg = (train_ds.y == 0).sum()
-    #     pos_weight = torch.tensor(n_neg / max(n_pos, 1), device=device)
-    #
-    # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-    #
-    # for epoch in range(1, EPOCHS + 1):
-    #     train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-    #     val_loss, preds, targets = eval_one_epoch(model, val_loader, criterion, device)
-    #
-    #     print(f'Epoch {epoch:03d} | train loss: {train_loss:.4f} | val loss: {val_loss:.4f}')
     pass
 #143 (,12,4)

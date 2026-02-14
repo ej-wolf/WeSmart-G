@@ -28,10 +28,13 @@ from analyze_json_motion import compute_motion_sequence, temporal_conv_1d, clip_
 # --------------------------------------------------
 VAL_RATIO = 0.2
 RANDOM_SEED = 42
-
 POOL_MODE = 'max'
 APPLY_TEMPORAL_SMOOTH = True
 TEMP_KERNEL = 3
+
+#* Files formats
+VIDEO_LIST = "_videos.txt"
+CACHE_LIST = "_feats.npz"
 
 # --------------------------------------------------
 # * Split utilities
@@ -60,10 +63,7 @@ def split_json_ds(dir_path:str|Path, **kwargs) -> dict[str, list[Path]]:
     # n_total = len(json_files)
     n_val = max(1, int(VAL_RATIO*len(json_files)) )
 
-    # val_files   = json_files[:n_val]
-    # train_files = json_files[n_val:]
-
-    return {'train': json_files[n_val:], 'val': json_files[:n_val],}
+    return {'train': json_files[n_val:], 'valid': json_files[:n_val],}
 
 
 def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
@@ -77,14 +77,14 @@ def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for split_group, paths in splits.items():
-        list_path = out_dir/f"{split_group}_videos.txt"
+    for grp, paths in splits.items():
+        # list_path = out_dir/f"{split_grp}_videos.txt"
+        list_path = out_dir/f"{grp}{VIDEO_LIST}"
         with open(list_path, 'w') as f:
             for p in paths:
                 f.write(p.name + '\n')
 
         print(f"Written {list_path} ({len(paths)} videos)")
-
 
 
 # --------------------------------------------------
@@ -94,7 +94,7 @@ def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
 def precompute_features_cache(   #* changed
                 json_dir: str | Path,
                 list_file: str| Path,
-                out_path: str | Path,
+                out_dir : str | Path,
                 allow_empty_lbl: bool = False):
     """ Precompute clip-level motion features for a dataset split.
     Parameters
@@ -105,7 +105,7 @@ def precompute_features_cache(   #* changed
     """
     json_dir = Path(json_dir)
     list_file = Path(list_file)
-    out_path = Path(out_path)
+    out_path = Path(out_dir)/list_file.name.replace(VIDEO_LIST, CACHE_LIST)
 
     feats, labels, meta = [], [], []
 
@@ -113,7 +113,7 @@ def precompute_features_cache(   #* changed
         video_names = [ln.strip() for ln in f if ln.strip()]
 
     for vid in video_names:
-        json_path = json_dir / vid
+        json_path = json_dir/vid
         with open(json_path, 'r') as f:
             _ = json.load(f)
 
@@ -183,7 +183,6 @@ def main():
     parser.add_argument('-ns', '--new-split', action='store_true', help='Force New split')
     args = parser.parse_args()
 
-
     jsons_dir = args.jsons_dir
     cache_dir = args.cache_dir
     split_dir = args.split_dir or jsons_dir
@@ -191,44 +190,25 @@ def main():
     cache_dir.mkdir(parents=True, exist_ok=True)
     split_dir.mkdir(parents=True, exist_ok=True)
 
-    train_list = split_dir/"train_videos.txt"
-    valid_list = split_dir/"val_videos.txt"
+    train_list = split_dir/f'train{VIDEO_LIST}'
+    valid_list = split_dir/f'valid{VIDEO_LIST}'
+
 
     if train_list.exists() and valid_list.exists() and not args.new_split:
         print('[INFO] Using existing train/val split files')
     else:
         print('[INFO] Creating new train/val split')
-        #splits = split_json_ds(jsons_dir)
         print('random seed : ', args.random_seed)
         splits = split_json_ds(jsons_dir, random_seed=args.random_seed)
         save_vid_lists(splits, split_dir)
 
-    precompute_features_cache(jsons_dir, split_dir / 'train_videos.txt',
-                              cache_dir/'train_feats.npz', allow_empty_lbl=False)
-    precompute_features_cache(jsons_dir, split_dir / 'val_videos.txt',
-                              cache_dir/'val_feats.npz', allow_empty_lbl=False)
+    precompute_features_cache(jsons_dir, train_list, cache_dir, allow_empty_lbl=False)
+    precompute_features_cache(jsons_dir, valid_list, cache_dir, allow_empty_lbl=False)
 
 
-# --------------------------------------------------
-# Example usage
-# --------------------------------------------------
+
 if __name__ == '__main__':
     pass
     main()
 
-
-    # DATA_DIR = Path("./data/json_data")
-    # JSON_DIR = DATA_DIR/"full_ann_w_keys"
-    # SPLIT_DIR = DATA_DIR # "./json_annotations"
-    # OUT_DIR = DATA_DIR/'cache'
-    #
-    # #OUT_DIR = Path(OUT_DIR)
-    # OUT_DIR.mkdir(exist_ok=True)
-    #
-    # precompute_split_features(JSON_DIR, SPLIT_DIR/"train.txt",
-    #                           OUT_DIR/'train_feats.npz', allow_empty_lbl=False, )
-    #
-    # precompute_split_features(JSON_DIR, SPLIT_DIR/'val.txt', OUT_DIR/'val_feats.npz',allow_empty_lbl=False)
-    #
-    # inspect_feature_file(OUT_DIR / 'train_feats.npz')
-    # inspect_feature_file(OUT_DIR / 'val_feats.npz')
+#235(,,1) -> 250(,,) ->  217

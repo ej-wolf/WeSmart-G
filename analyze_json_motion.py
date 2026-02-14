@@ -20,7 +20,7 @@ def extract_frame_geometry(frame):
     keypoints = []
 
     for bb in frame.get(BB_KP_TAG, []):
-        # bounding box
+        #* bounding box
         x1, y1, x2, y2 = bb[2], bb[3], bb[4], bb[5]
         cx = (x1 + x2)/2
         cy = (y1 + y2)/2
@@ -327,7 +327,6 @@ def crowd_compression_test(scale=0.5, **kwargs): #72
     print("✔ Crowd compression test PASSED\n")
 
 
-
 def generate_static_json(n_frm=100, n_bb=10): #55
     """  Generate a JSON-like dict where all frames are identical.
          Useful for zero-motion sanity checks.
@@ -375,3 +374,4 @@ if __name__ == '__main__':
     test_motion_sequence(json_example, eps=1e-5)
 
     pass
+#377(,,2)

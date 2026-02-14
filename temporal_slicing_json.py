@@ -1,17 +1,19 @@
 import json
 from pathlib import Path
-# from typing import List, Dict
 
 # --------------------------------------------------
-# Temporal slicing of continuous JSON streams
-# Option (i): 1s window, 0.5s stride
+# * Temporal slicing of continuous JSON streams
+# * Option (i): 1s window, 0.5s stride
 # --------------------------------------------------
 
-#* Unit-level defaults (ToDo: later to be loaded from config)
+# * Unit-level defaults (ToDo: later to be loaded from config)
 WINDOW_SEC = 1.0   #* clip duration in seconds (default 1.0)
 STRIDE_SEC = 0.5   #* stride between clips in seconds (default 0.5)
 MIN_EVENTS = 2     #* minimum number of non-zero group_events to mark clip positive
 
+# --------------------------------------------------
+# * main function to be called by other units
+# --------------------------------------------------
 def slice_json_stream(json_path:str|Path,
                       window_sec:float=WINDOW_SEC,
                       stride_sec: float=STRIDE_SEC,
@@ -23,10 +25,12 @@ def slice_json_stream(json_path:str|Path,
     window_sec, stride_sec, min_events : slicing parameters
     allow_empty_lbl: if True , label = None (neither positive nor negative)
                      if False, label = 0 or 1 (fully annotated negatives)
-    Returns
+    Return:
     clips : list of dicts with keys:
         - frames : list of frame dicts belonging to the clip
-        - label  : 1 (violent motion) or None (unknown / ignored)
+        - label  : 1 - violent motion,
+                   0 - non-violent motion
+                   None - unknown/ignore
         - t_start, t_end : temporal bounds of the clip
     """
 
@@ -48,7 +52,6 @@ def slice_json_stream(json_path:str|Path,
     while t + window_sec<= t_max:
         t_start = t
         t_end = t + window_sec
-
         #* select frames inside window
         clip_frames = [frm for frm in frames if t_start <= frm['t'] < t_end]
 
@@ -57,9 +60,6 @@ def slice_json_stream(json_path:str|Path,
             event_count = 0
             for frm in clip_frames:
                 ge = frm.get('group_events', [])
-                # if ge: #* treat any non-zero as event
-                #     if any(e != 0 for e in ge):
-                #         event_count += 1
                 if not ge:  continue
                 #* group_events may contain multiple values
                 has_zero = any(e == 0 for e in ge)
@@ -76,16 +76,12 @@ def slice_json_stream(json_path:str|Path,
                 label = 1
             else:
                 label = None if allow_empty_lbl else 0
-                # label = None  #* unknown/ignore
 
             clips.append({'frames':clip_frames, 'label':label, 't_start':t_start, 't_end':t_end,})
 
         t += stride_sec
 
     return clips
-
-
-
 
 
 def find_events(clips):
@@ -136,10 +132,9 @@ def inspect_clips(clips):
         print("No clips to inspect")
         return
 
-    # total number of clips
-    n_clips = len(clips)
+    n_clips = len(clips) #* total number of clips
 
-    # total video duration
+    #* total video duration
     # total_duration = sum(c["t_end"] - c["t_start"] for c in clips)
     #* original stream duration
     #*               last frame of the last clip  - first frame of the first clip
@@ -168,7 +163,7 @@ def inspect_clips(clips):
             n_events += 1
         prev = cur
 
-    print("==== Clip inspection ====")
+    print("=== Clips info ===")
     print(f"Stream duration : {stream_duration:.2f} s")
     print(f"Window/ Stride  : {WINDOW_SEC:.1f}s / {STRIDE_SEC:.1f}s ")
     print(f"Total clips     : {n_clips}")
@@ -178,30 +173,24 @@ def inspect_clips(clips):
 
 
 def print_events(events:dict):
-     for i, e in events.items():
+    for i, e in events.items():
         # print('\t ', i, e)
-        print('\t ', i, f": from\t  {e['begin']:3.1f} to {e['end']:5.1f} sec")
+        print('\t ', i, f": from\t {e['begin']:3.1f} to {e['end']:6.1f} sec")
 
 def inspect_dir(j_dir:Path):
     for j in j_dir.glob("*.json"):
-        print(f"\n{j.name:s} - {j.stat().st_size:,}")
+        print(f"== File ==========================\n{j.name:s} - {j.stat().st_size:,}")
         inspect_clips(slice_json_stream(j, allow_empty_lbl=False))
         print_events(find_events(slice_json_stream(j)))
+        print("\n") # print("===================================")
 
 
-# --------------------------------------------------
-# Example usage
-# --------------------------------------------------
+
 if __name__ == "__main__":
     data_path = Path("./data/")
-    # json_example = data_path/"usual_jsons_from_events/event_18.json"
-    json_example = data_path/"jsons_w_keys/new_21_1_keypoints.json"
+    json_example = data_path/"json_data/full_ann_w_keys/new_21_1_keypoints.json"
+    # inspect_dir(json_example.parent)
+    inspect_dir(data_path/"json_data/full_ann_w_keys")
 
-    clips = slice_json_stream(json_example, allow_empty_lbl=False)
-    # print(f"Generated {len(clips)} clips")
-    inspect_dir(json_example.parent)
-    inspect_clips(clips)
-    events = find_events(clips)
     pass
-
-#100-107(,,1)
+#207(,7,)->195(,,)
