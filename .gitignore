@@ -28,3 +28,5 @@ dummy_test/rawframes_dummy/
 # OS crap
 .DS_Store
 Thumbs.db
+
+*.pt
