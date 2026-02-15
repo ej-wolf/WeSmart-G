@@ -337,7 +337,9 @@ def process_video(video_path, model_path, out_json, step=5, conf_thresh=0.5, if_
             })
             #print(frame_idx, frame.shape)
             cv2.imshow("head_center_debug", frame)
-            
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:   # ESC to quit
+                break
             frame_idx += 1
         
         #cap.release()
@@ -350,8 +352,8 @@ def process_video(video_path, model_path, out_json, step=5, conf_thresh=0.5, if_
         }
     
         if len(video_paths) > 1:
-            out_json_name = os.path.splitext(os.path.basename(video_path))[0] + 'json'
-            out_json = os.path.join(videos_folder, 'out_jsons',out_json_name)
+            out_json_name = os.path.splitext(os.path.basename(video_path))[0] + '.json'
+            out_json = os.path.join(videos_folder, 'out_jsons', out_json_name)
             out_json = Path(out_json)
         else:
             out_json = Path(out_json)
@@ -361,9 +363,7 @@ def process_video(video_path, model_path, out_json, step=5, conf_thresh=0.5, if_
     
         print(f"Saved {len(frames)} frame records to {out_json}")
             
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27:   # ESC to quit
-            break
+        
         cap.release()
         cv2.destroyAllWindows()
 
@@ -372,7 +372,7 @@ def main():
     parser = argparse.ArgumentParser(description="Simple events JSON from video")
     parser.add_argument("--video", type=Path, required=True, help="Input video path (.mp4, .mkv, ...)")
     parser.add_argument("--model", type=Path, required=True, help="YOLO .pt model path")
-    parser.add_argument("--out", type=Path, required=True, help="Output JSON file path")
+    parser.add_argument("--out", type=Path, required=True, help="Output one JSON file path with name, in case of processing the whole folder, jsons are saved inside this folder in the folder 'out_jsons', ")
     parser.add_argument("--step", type=int, default=5, help="Process every Nth frame (3 or 5, etc.)")
     parser.add_argument("--conf", type=float, default=0.6, help="Global detection confidence threshold")
     parser.add_argument("--if_usual", type=bool, default=False, help="True if there is a folder with usual life")
