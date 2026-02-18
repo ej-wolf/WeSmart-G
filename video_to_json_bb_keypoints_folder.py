@@ -225,7 +225,7 @@ def process_video(video_path, model_path, out_json, step=5, conf_thresh=0.5, if_
                 continue
             
             # run model on current frame
-            results = model(frame, verbose=False)[0]
+            results = model(frame, conf=conf_thresh, verbose=False)[0]
             #print(results.keypoints)
             #heads = []
             detections = []      # for group event selection: list of (cls, conf)
@@ -238,8 +238,8 @@ def process_video(video_path, model_path, out_json, step=5, conf_thresh=0.5, if_
                 for box, kpts_norm, conf_kpts in zip(results.boxes, results.keypoints.xyn, results.keypoints.conf):
                     cls_id = int(box.cls)
                     conf = float(box.conf)
-                    if conf < conf_thresh:
-                        continue
+                    #if conf < conf_thresh:
+                        #continue
         
                     kpts_xyc = torch.cat([kpts_norm, conf_kpts.unsqueeze(-1)], dim=-1)
                     #detections.append((cls_id, conf))
