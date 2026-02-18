@@ -1,10 +1,14 @@
-import json
+# import json
 from pathlib import Path
+from colorama import Fore
+
+#****** local imports
+from my_local_utils import print_color
+from json_utils import  load_json_data
 
 # --------------------------------------------------
 # * Temporal slicing of continuous JSON streams
 # * Option (i): 1s window, 0.5s stride
-# --------------------------------------------------
 
 # * Unit-level defaults (ToDo: later to be loaded from config)
 WINDOW_SEC = 1.0   #* clip duration in seconds (default 1.0)
@@ -14,7 +18,8 @@ MIN_EVENTS = 2     #* minimum number of non-zero group_events to mark clip posit
 # --------------------------------------------------
 # * main function to be called by other units
 # --------------------------------------------------
-def slice_json_stream(json_path:str|Path,
+def slice_json_stream(# json_path:str|Path,
+                      data:dict,
                       window_sec:float=WINDOW_SEC,
                       stride_sec: float=STRIDE_SEC,
                       min_events:int=MIN_EVENTS,
@@ -34,26 +39,25 @@ def slice_json_stream(json_path:str|Path,
         - t_start, t_end : temporal bounds of the clip
     """
 
-    with open(json_path, "r") as f:
-        data = json.load(f)
+    ## with open(json_path, "r") as f:
+    ##     data = json.load(f)
 
-    frames = data.get("frames", [])
+    frames = data.get('frames', [])
     if not frames:
+        print_color("Error - in slice_json_stream",Fore.CYAN)
         return []
 
     #* extract timestamps
-    times = [frame["t"] for frame in frames]
-    t_min = times[0]
-    t_max = times[-1]
+    times = [frm['t'] for frm in frames]
+    t_0, t_max = times[0], times[-1]
 
     clips = []
-    t = t_min
-
-    while t + window_sec<= t_max:
-        t_start = t
-        t_end = t + window_sec
+    t = t_0
+    while t + window_sec <= t_max:
+        t_first = t
+        t_last  = t + window_sec
         #* select frames inside window
-        clip_frames = [frm for frm in frames if t_start <= frm['t'] < t_end]
+        clip_frames = [frm for frm in frames if t_first <= frm['t'] < t_last]
 
         if len(clip_frames) >= 2:
             #* count group events (non-zero)
@@ -67,7 +71,7 @@ def slice_json_stream(json_path:str|Path,
                 #* 0 together with non-zero is considered an error (log and continue)
                 if has_zero and has_nonzero:
                     fidx = frm.get('f', '?')
-                    print(f"[WARNING] mixed zero/non-zero group_events at frame #{fidx}: {ge}")
+                    print_color(f"[WARNING] mixed zero/non-zero group_events at frame #{fidx}: {ge}",Fore.YELLOW)
                 # * treat any non-zero value as positive
                 if has_nonzero:
                     event_count += 1
@@ -77,7 +81,7 @@ def slice_json_stream(json_path:str|Path,
             else:
                 label = None if allow_empty_lbl else 0
 
-            clips.append({'frames':clip_frames, 'label':label, 't_start':t_start, 't_end':t_end,})
+            clips.append({'frames':clip_frames, 'label':label, 't_start':t_first, 't_end':t_last})
 
         t += stride_sec
 
@@ -98,7 +102,7 @@ def find_events(clips):
     event_start = None
 
     for clip in clips:
-        is_pos = (clip.get("label") == 1)
+        is_pos = (clip.get('label') == 1)
 
         if is_pos and not in_event:
             in_event = True
@@ -142,9 +146,9 @@ def inspect_clips(clips):
 
 
     # estimate actual FPS from timestamps (use first clip)
-    frames = clips[0]["frames"]
+    frames = clips[0]['frames']
     if len(frames) >= 2:
-        times = [f["t"] for f in frames]
+        times = [f['t'] for f in frames]
         dt = [(t2 - t1) for t1, t2 in zip(times[:-1], times[1:])]
         mean_dt = sum(dt) / len(dt)
         fps = 1.0 / mean_dt if mean_dt > 0 else 0.0
@@ -180,8 +184,11 @@ def print_events(events:dict):
 def inspect_dir(j_dir:Path):
     for j in j_dir.glob("*.json"):
         print(f"== File ==========================\n{j.name:s} - {j.stat().st_size:,}")
-        inspect_clips(slice_json_stream(j, allow_empty_lbl=False))
-        print_events(find_events(slice_json_stream(j)))
+        sjs = slice_json_stream(load_json_data(j), allow_empty_lbl=False)
+        # inspect_clips(slice_json_stream(sjs, allow_empty_lbl=False))
+        inspect_clips(sjs)
+        # print_events(find_events(slice_json_stream(j)))
+        print_events(find_events(sjs))
         print("\n") # print("===================================")
 
 

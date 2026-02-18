@@ -1,37 +1,51 @@
-import json
+# import json
 # from pathlib import Path
 import numpy as np
 
 
-BB_KP_TAG = 'bbs_list_of_keypoints'
-N_Keypoints = 13
+from json_utils import load_json_data
+from my_local_utils import print_color
+# BB_KP_TAG = 'bbs_list_of_keypoints'
+N_Keypoints = 17
+DEFAULT_VERSION = 2.0
 
 # --------------------------------------------------
 # * Step 1: load JSON and extract frame-level geometry
 # --------------------------------------------------
 
-def extract_frame_geometry(frame):
+def extract_frame_geometry(frame, **kwargs):
     """  From a single frame dict, extract bounding-box and keypoint geometry.
     Returns:  bb_centers: (N, 2)
               bb_sizes:   (N, 2)
               keypoints:  (M, 2)  -- flattened over all people
     """
-    bb_centers, bb_sizes = [], []
+    # vec_kp = 3 if kwargs.get('kp_conf', False) else 2
+    # vec_kp = 3 if kwargs.get('kp_conf', True) else 2
+    vec_kp = kwargs.get('vec_kp', 3 if kwargs.get('kp_conf', True) else 2)
+
+    # vec_kp = 3 if kwargs.get('vec_kp', DEFAULT_V ERSION) > 2.0 else 2
+    # print_color(f" kp vec[{vec_kp}]")
+
+    bb_centers = []
+    bb_sizes = []
     keypoints = []
 
-    for bb in frame.get(BB_KP_TAG, []):
+    # for bb in frame.get(BB_KP_TAG, []):
+    for det in frame.get('detections_list', []):
         #* bounding box
-        x1, y1, x2, y2 = bb[2], bb[3], bb[4], bb[5]
+        ## x1, y1, x2, y2 = bb[2], bb[3], bb[4], bb[5]
+        x1, y1, x2, y2 = det['bbox']
+        w, h = (x2 - x1), (y2 - y1)
         cx = (x1 + x2)/2
         cy = (y1 + y2)/2
-        w, h = (x2 - x1),  (y2 - y1)
 
-        bb_centers.append([cx, cy])
         bb_sizes.append([w, h])
+        bb_centers.append([cx, cy])
 
         #* keypoints (13 points, aligned)
-        kps = bb[6]
-        for i in range(0, len(kps), 2):
+        ## kps = bb[6]
+        kps = det['key_pts']
+        for i in range(0, len(kps), vec_kp):
             x, y = kps[i], kps[i + 1]
             #* JS:0 is treated as missing
             if x == 0 and y == 0:
@@ -39,8 +53,8 @@ def extract_frame_geometry(frame):
             keypoints.append([x, y])
 
     return (np.asarray(bb_centers, dtype=np.float32),
-            np.asarray(bb_sizes , dtype=np.float32),
-            np.asarray(keypoints, dtype=np.float32),)
+            np.asarray(bb_sizes  , dtype=np.float32),
+            np.asarray(keypoints , dtype=np.float32),)
 
 
 # --------------------------------------------------
@@ -115,13 +129,20 @@ def nearest_neighbor_motion(A, B):
     return float(dists.mean()), float(dists.max())
 
 
-def compute_motion_sequence(frames):
+def compute_motion_sequence(frames, j_version:float=DEFAULT_VERSION): # **kwargs):
     """    Converts a list of frames into a T x C motion feature sequence.  """
     frame_feats = []
     raw_points = []
 
-    for frame in frames:
-        bb_centers, bb_sizes, keypoints = extract_frame_geometry(frame)
+    # kp_conf = True if 2.0 <= float(kwargs.get('version', DEFAULT_VERSION) ) else False
+    kp_conf = True if j_version >= 2.0 else False
+
+    for frm in frames:
+        # print_color('***')
+        if len(frm['detections_list']) > 0:
+            pass
+            # print_color(frm)
+        bb_centers, bb_sizes, keypoints = extract_frame_geometry(frm, kp_conf=kp_conf)
         agg = frame_aggregates(bb_centers, bb_sizes, keypoints)
         frame_feats.append(agg)
         raw_points.append((bb_centers, keypoints))
@@ -142,6 +163,7 @@ def compute_motion_sequence(frames):
                                      np.array([bb_mean, bb_max, kp_mean, kp_max], dtype=np.float32),])
         motion_feats.append(motion_vec)
 
+    # print_color("motion_feats"); print_color(np.stack(motion_feats))
     return np.stack(motion_feats)  # (T-1) x C'
 
 
@@ -156,11 +178,11 @@ def clip_pooling(motion_seq, mode='max', **kwargs):
     if len(motion_seq) == 0:
         return None
 
-    if mode == "max":
+    if mode == 'max':
         return motion_seq.max(axis=0)
-    elif mode == "mean":
+    elif mode == 'mean':
         return motion_seq.mean(axis=0)
-    elif mode == "lse":
+    elif mode == 'lse':
         alpha = kwargs.get('alpha', 5.0)
         return (1.0/alpha) * np.log(np.exp(alpha*motion_seq).sum(axis=0))
     else:
@@ -187,42 +209,83 @@ def temporal_conv_1d(motion_seq, kernel_size=3):
 
 
 # --------------------------------------------------
-# * Testing
+# ***  Sanity Testing
 # --------------------------------------------------
 import random
+#* set the type of key points that will be used for the test
+if DEFAULT_VERSION >= 2.0:
+    KP_VEC_TST, KP_CONF_TST  = 3, True
+else:
+    KP_VEC_TST, KP_CONF_TST  = 2, False
 
-def generate_random_frame(n_bb=10):
-    bbs = []
+def get_empty_frame():
+    return {'f': 0, 't': 0.0, 'individual_events': [], 'group_events': [], 'detections_list': []}
+
+def generate_random_frame(n_bb=10, version=DEFAULT_VERSION):
+    """     Generate a synthetic frame in the unified dict format.  """
+    ## bbs = []
+    kp_conf = True if float(version) >= 2.0 else False
+    C_min = 0.3 #* minimal confidence for keypoint
+    detections = []
     for _ in range(n_bb):
-        x1 = random.uniform(0.1, 0.6)
-        y1 = random.uniform(0.1, 0.6)
-        w  = random.uniform(0.1, 0.2)
-        h  = random.uniform(0.1, 0.2)
+        # x1 = random.uniform(0.1, 0.6)
+        # y1 = random.uniform(0.1, 0.6)
+        # w  = random.uniform(0.1, 0.2)
+        # h  = random.uniform(0.1, 0.2)
+        x1, y1 = np.random.rand(2) * 0.6
+        w , h  = np.random.rand(2) * 0.2
         x2 = min(x1 + w, 0.95)
         y2 = min(y1 + h, 0.95)
 
-        keypoints = []
+        key_pts = []
         for _ in range(N_Keypoints):
-            keypoints +=[random.uniform(x1, x2), random.uniform(y1, y2)]
+            key_pts +=[random.uniform(x1, x2), random.uniform(y1, y2)]
+            if kp_conf:
+                key_pts+= [random.uniform(C_min, .9)]
         # * (0) Individual annotation (ignored), (1) confidence
-        bbs += [[0, 0.9, x1, y1, x2, y2, keypoints]]
+        ## bbs += [[0, 0.9, x1, y1, x2, y2, key_pts]]
+        detections += [ {'class': 0, 'conf': 1.0,
+                         'bbox': [float(x1), float(y1), float(x2), float(y2)],
+                         'key_pts': key_pts,}]
 
-    return {'f': 0, 't': 0.0, 'individual_events': [], 'group_events': [], BB_KP_TAG: bbs}
+    # return {'f': 0, 't': 0.0, 'individual_events': [], 'group_events': [], BB_KP_TAG: bbs}
+    return {'f': 0, 't': 0.0, 'group_events': [], 'detections_list': detections }
+
+def shift_frame(frame, dx=0.1, dy=0.1, vec_kp=(3 if DEFAULT_VERSION >= 2.0  else 2)):
+    """ Shift all bounding boxes and keypoints by (dx, dy).  """
+    # shifted = {BB_KP_TAG: []}
+    #
+    # for bb in frame[BB_KP_TAG]:
+    #     x1, y1, x2, y2 = bb[2] + dx, bb[3] + dy, bb[4] + dx, bb[5] + dy
+    #
+    #     kps = bb[6]
+    #     shifted_kps = []
+    #     for i in range(0, len(kps), 2):
+    #         shifted_kps.extend([kps[i] + dx, kps[i + 1] + dy ])
+    #
+    #     shifted[BB_KP_TAG].append([bb[0], bb[1], x1, y1, x2, y2, shifted_kps ])
+    #
+    # return shifted
 
 
-def shift_frame(frame, dx=0.1, dy=0.1):
-    shifted = {BB_KP_TAG: []}
+    shifted = {'f':frame['f'], 't':frame['t'], 'group_events': frame['group_events'], 'detections_list':[]}
 
-    for bb in frame[BB_KP_TAG]:
-        x1, y1, x2, y2 = bb[2] + dx, bb[3] + dy, bb[4] + dx, bb[5] + dy
+    for det in frame.get('detections_list', []):
+        x1, y1, x2, y2 = det['bbox']
+        new_bbox = [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
 
-        kps = bb[6]
-        shifted_kps = []
-        for i in range(0, len(kps), 2):
-            shifted_kps.extend([kps[i] + dx, kps[i + 1] + dy ])
-
-        shifted[BB_KP_TAG].append([bb[0], bb[1], x1, y1, x2, y2, shifted_kps ])
-
+        kps = det['key_pts']
+        new_kps = []
+        for i in range(0, len(kps), vec_kp):
+            # new_kps.extend([kps[i] + dx, kps[i + 1] + dy])
+            new_kps += [kps[i] + dx, kps[i + 1] + dy]
+            if vec_kp == 3:
+                new_kps += [kps[i+2]]
+        shifted['detections_list'].append({'class': det['class'],
+                                           'conf': det['conf'],
+                                           'bbox': new_bbox,
+                                           'key_pts': new_kps,
+                                           })
     return shifted
 
 
@@ -231,9 +294,10 @@ def controlled_motion_test(dx=0.1, dy=0.1, eps=1e-5, **kwargs):
     frame_0 = generate_random_frame(n_bb=kwargs.get('n_bb',10))
     frame_1 = shift_frame(frame_0, dx=dx, dy=dy)
 
+    # kp_conf = True if DEFAULT_ VERSION >= 2.0 else False
     #* --- geometry extraction ---
-    bb0, _, _ = extract_frame_geometry(frame_0)
-    bb1, _, _ = extract_frame_geometry(frame_1)
+    bb0, _, _ = extract_frame_geometry(frame_0, kp_conf=KP_CONF_TST)
+    bb1, _, _ = extract_frame_geometry(frame_1, kp_conf=KP_CONF_TST)
     #* --- aggregate check ---
     agg0 = frame_aggregates(bb0, np.zeros_like(bb0), np.zeros((0, 2)))
     agg1 = frame_aggregates(bb1, np.zeros_like(bb1), np.zeros((0, 2)))
@@ -266,52 +330,81 @@ def controlled_motion_test(dx=0.1, dy=0.1, eps=1e-5, **kwargs):
 
     print("✔ Controlled motion test PASSED\n")
 
-def crowd_compression_test(scale=0.5, **kwargs): #72
+def crowd_compression_test(scl=0.5, **kwargs): #72
     """ Sanity check for crowd compression (no global translation).
         People move toward their centroid, reducing pairwise distances.
     """
 
     frame_0 = generate_random_frame(n_bb=kwargs.get('n_bb', 10))
     #* extract centers
-    bb0, _, _ = extract_frame_geometry(frame_0)
+    # bb0, _, _ = extract_frame_geometry(frame_0)
+    bb0, bb_sizes0, kp0 = extract_frame_geometry(frame_0)
     centroid = bb0.mean(axis=0)
     #* build compressed frame
-    compressed = {'f': frame_0.get('f', 0),
-                  't': frame_0.get('t', 0.0),
-                  'individual_events': [],
-                  'group_events': [],
-                   BB_KP_TAG: []}
+    # compressed = {'f': frame_0.get('f', 0),
+    #               't': frame_0.get('t', 0.0),
+    #               'individual_events': [],
+    #               'group_events': [],
+    #               'detections_list': []}
+    compressed = get_empty_frame()
+    compressed['f'] =  frame_0.get('f', 0)
+    compressed['t'] =  frame_0.get('t', 0)
 
-    for bb in frame_0[BB_KP_TAG]:
-        x1, y1, x2, y2 = bb[2], bb[3], bb[4], bb[5]
+    ## for bb in frame_0[BB_KP_TAG]:
+    ##     x1, y1, x2, y2 = bb[2], bb[3], bb[4], bb[5]
+    for det in frame_0['detections_list']:
+        x1, y1, x2, y2 = det['bbox']
         cx = (x1 + x2)/2
         cy = (y1 + y2)/2
 
         #* move center toward centroid
-        new_cx = centroid[0] + scale*(cx - centroid[0])
-        new_cy = centroid[1] + scale*(cy - centroid[1])
+        new_cx = centroid[0] + scl*(cx - centroid[0])
+        new_cy = centroid[1] + scl*(cy - centroid[1])
         w = x2 - x1
         h = y2 - y1
 
         nx1, ny1 = (new_cx - w/2), (new_cy - h/2)
         nx2, ny2 = (new_cx + w/2), (new_cy + h/2)
 
-        # shift keypoints accordingly
+        #* shift keypoints accordingly
+        # shifted_kps = []
+        # # for i in range(0, len(det[6]), 2):
+        # #     kx, ky = det[6][i], det[6][i + 1]
+        # for kp in range(0, len(det['key_pts']), 2):
+        #     kx, ky = det[6][i], det[6][i + 1]
+        #     dkx = kx - cx
+        #     dky = ky - cy
+        #     shifted_kps.extend([new_cx + scale*dkx,  new_cy + scale*dky ])
+        # compressed['detections_list'].append([det[0], det[1], nx1, ny1, nx2, ny2, shifted_kps])
+
+        #* shift keypoints consistently with bbox scaling toward centroid
+        # vec_kp = (3 if DEFAULT_ VERSION >= 2.0 else 2)
+
         shifted_kps = []
-        for i in range(0, len(bb[6]), 2):
-            kx, ky = bb[6][i], bb[6][i + 1]
+        kps = det.get('key_pts', [])
+        for i in range(0, len(kps), KP_VEC_TST):
+            kx, ky = kps[i], kps[i + 1]
             dkx = kx - cx
             dky = ky - cy
-            shifted_kps.extend([new_cx + scale*dkx,  new_cy + scale*dky ])
-        compressed[BB_KP_TAG].append([bb[0], bb[1], nx1, ny1, nx2, ny2, shifted_kps])
+            shifted_kps.extend([new_cx + scl*dkx, new_cy + scl*dky,])
+            if KP_CONF_TST:
+                shifted_kps+= [kps[i+1]]
 
-    bb1, _, _ = extract_frame_geometry(compressed)
+        compressed['detections_list']+= [{'class': det['class'], 'conf': det['conf'],
+                                          'bbox': [nx1, ny1, nx2, ny2],
+                                          'key_pts': shifted_kps,}]
 
-    agg0 = frame_aggregates(bb0, np.zeros_like(bb0), np.zeros((0, 2)))
-    agg1 = frame_aggregates(bb1, np.zeros_like(bb1), np.zeros((0, 2)))
+    # bb1, _, _ = extract_frame_geometry(compressed)
+    # agg0 = frame_aggregates(bb0, np.zeros_like(bb0), np.zeros((0, 2)))
+    # agg1 = frame_aggregates(bb1, np.zeros_like(bb1), np.zeros((0, 2)))
+
+    bb1, bb_sizes1, kp1 = extract_frame_geometry(compressed, vec_kp=KP_VEC_TST)
+
+    agg0 = frame_aggregates(bb0, bb_sizes0, kp0)
+    agg1 = frame_aggregates(bb1, bb_sizes1, kp1)
 
     mean_pairwise_idx = 8
-    var_pairwise_idx = 9
+    # var_pairwise_idx = 9
 
     delta_mean_center = agg1[0:2] - agg0[0:2]
 
@@ -340,24 +433,29 @@ def generate_static_json(n_frm=100, n_bb=10): #55
         frame['t'] = i/3  #* 0.33*i
         frames.append(frame)
 
-    return {'video': "static_test", 'fps': 15.0, 'step': 5, 'frames': frames}
+    # return {'video': "static_test", 'fps': 15.0, 'step': 5, 'frames': frames}
+    return {'video_file':"static_test", 'fps':15, 'sampling': 5, 'version': '2.0',
+            'frames': frames}
 
-def test_motion_sequence(json_tst_file, eps= 1e-5):
+def test_motion_sequence(tst_json:dict, eps= 1e-5):
 
     # * load the example file
-    with open(json_tst_file, 'r') as f:
-        data = json.load(f)
-    frames = data['frames']
-    motion_seq = compute_motion_sequence(frames)
+    ## with open(json_tst_file, 'r') as f:
+    ##     data = json.load(f)
+    # data = load_json_data(tst_json)
+    # info = tst_json['header']
+    frames = tst_json['frames']
+    j_version = float(tst_json['header']['version'])
+    motion_seq = compute_motion_sequence(frames, j_version=j_version)
     # * check (1): shape is stable
     print(f"Number of frames: {len(frames)}\nMotion Shape: {motion_seq.shape}")
     print(f"Correct shape:",  len(frames) - 1 ==  motion_seq.shape[0])
     # print(motion_seq.shape)
     # * check (2): calculation  consistency
-    ms2 = compute_motion_sequence(frames)
+    ms2 = compute_motion_sequence(frames, j_version=j_version)
     assert np.allclose(motion_seq, ms2)
     # * check (3): Static (Zero motion)
-    static_example = generate_static_json()
+    # static_example = generate_static_json()
     # json.dump(static_example, static_json_)
     ms_0 = compute_motion_sequence(generate_static_json()['frames'])
     #* print("Zero motion test:", ms_0)
@@ -368,10 +466,15 @@ def test_motion_sequence(json_tst_file, eps= 1e-5):
 
 
 if __name__ == '__main__':
-    json_example = "/mnt/local-data/Projects/Wesmart/data/usual_jsons_from_events/event_18.json"
+    # json_example = "/mnt/local-data/Projects/Wesmart/data/usual_jsons_from_events/event_18.json"
+    json_example = "data/json_data/full_ann_w_keys/new_21_1_keypoints.json"
+    json_newfrmt = "data/json_data/jsons_nf/cam3_5_4.json"
     static_json_ = "/mnt/local-data/Python/Projects/weSmart/data/json_data/static_clip.json"
 
-    test_motion_sequence(json_example, eps=1e-5)
+    test_motion_sequence(load_json_data(json_example), eps=1e-5)
+    print_color("✔✔✔ Old Format OK !\n", 'g')
+    test_motion_sequence(load_json_data(json_newfrmt, j_type='2'), eps=1e-5)
+    print_color("✔✔✔ New Format OK !\n", 'g')
 
     pass
 #377(,,2)

@@ -20,6 +20,8 @@ import numpy as np
 from pathlib import Path
 
 # ---- import your existing pipeline ----
+from json_utils import  load_json_data
+from my_local_utils import print_color
 from temporal_slicing_json import slice_json_stream
 from analyze_json_motion import compute_motion_sequence, temporal_conv_1d, clip_pooling
 
@@ -35,7 +37,7 @@ TEMP_KERNEL = 3
 #* Files formats
 VIDEO_LIST = "_videos.txt"
 CACHE_LIST = "_feats.npz"
-
+DEFAULT_TYPE = 'type_1'
 # --------------------------------------------------
 # * Split utilities
 # --------------------------------------------------
@@ -95,7 +97,8 @@ def precompute_features_cache(   #* changed
                 json_dir: str | Path,
                 list_file: str| Path,
                 out_dir : str | Path,
-                allow_empty_lbl: bool = False):
+                allow_empty_lbl: bool = False,
+                **kwargs):
     """ Precompute clip-level motion features for a dataset split.
     Parameters
         json_dir : directory with JSON files
@@ -114,15 +117,18 @@ def precompute_features_cache(   #* changed
 
     for vid in video_names:
         json_path = json_dir/vid
-        with open(json_path, 'r') as f:
-            _ = json.load(f)
+        # with open(json_path, 'r') as f:
+        #     _ = json.load(f)
 
-        clips = slice_json_stream(json_path, allow_empty_lbl=allow_empty_lbl)
+        ## clips = slice_json_stream(json_path, allow_empty_lbl=allow_empty_lbl)
+        # print_color(f" file: {json_path.name} --  {json_path.is_file()}", 'b')
+        json_data = load_json_data(json_path, j_type=kwargs.get('json_type', DEFAULT_TYPE))
+        clips = slice_json_stream(json_data, allow_empty_lbl=allow_empty_lbl)
 
         for clip in clips:
             if clip['label'] is None:
                 continue
-
+            # print_color(clip['frames'])
             motion_seq = compute_motion_sequence(clip['frames'])
 
             if APPLY_TEMPORAL_SMOOTH:
@@ -136,6 +142,7 @@ def precompute_features_cache(   #* changed
 
     feats = np.stack(feats) if feats else np.zeros((0,))
     labels = np.asarray(labels, dtype=np.int64)
+    print_color(feats.shape)
 
     np.savez_compressed(out_path, X=feats, y=labels, meta=np.asarray(meta, dtype=object),)
 
@@ -211,4 +218,4 @@ if __name__ == '__main__':
     pass
     main()
 
-#235(,,1) -> 250(,,) ->  217
+#235(,,1) -> 250(,,) ->  213

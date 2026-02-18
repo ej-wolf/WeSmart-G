@@ -2,6 +2,19 @@ import shutil
 from pathlib import Path
 import json
 
+
+from colorama import Fore, Style
+# B, U, R = '\033[1m', '\033[4m', '\033[0m'
+# RED, GREEN, BLUE = Fore.RED, Fore.GREEN, Fore.BLUE
+# RESET = Style.RESET_ALL
+def print_color(msg:str, clr=Fore.RED):
+    if   clr in ['RED',' Red', 'red', 'r']      :  clr = Fore.RED
+    elif clr in ['BLUE', 'Blue', 'blue', 'b']   :  clr = Fore.BLUE
+    elif clr in ['YELLOW', 'yellow', 'y']       :  clr = Fore.YELLOW
+    elif clr in ['BLUE', 'Blue', 'blue', 'r']   :  clr = Fore.BLUE
+    elif clr in ['GREEN', 'Green', 'green', 'g']:  clr = Fore.GREEN
+    print( f"{clr}{msg}{Style.RESET_ALL}")
+
 # ----------------------------------------------------------------------------
 # Files and Paths Utils
 # -----------------------------------------------------------------------------
