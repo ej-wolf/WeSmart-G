@@ -42,7 +42,7 @@ def _make_unique_dir(root, base_name, **kwargs):
     return clip_dir, clip_name
 
 
-def clear_dir(path, missing_ok: bool = False) -> None:
+def clear_dir(path, missing_ok:bool = False) -> None:
     """  Delete all files and subdirectories inside `path`, but keep `path` itself.
     Any error (nonexistent path, not a directory, permissions, etc.)
     is printed and swallowed, so it won't stop the program.

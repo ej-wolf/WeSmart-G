@@ -1,18 +1,16 @@
-# import json
+""" * Temporal slicing of continuous JSON streams """
 from pathlib import Path
 from colorama import Fore
 
-#****** local imports
+#* Local imports
 from my_local_utils import print_color
 from json_utils import  load_json_data
 
 # --------------------------------------------------
-# * Temporal slicing of continuous JSON streams
-# * Option (i): 1s window, 0.5s stride
-
 # * Unit-level defaults (ToDo: later to be loaded from config)
-WINDOW_SEC = 1.0   #* clip duration in seconds (default 1.0)
-STRIDE_SEC = 0.5   #* stride between clips in seconds (default 0.5)
+# * Option (i): 1s window, 0.5s stride
+WINDOW_SEC = 1.0   #* clip duration in seconds
+STRIDE_SEC = 0.5   #* stride between clips in seconds
 MIN_EVENTS = 2     #* minimum number of non-zero group_events to mark clip positive
 
 # --------------------------------------------------
@@ -21,12 +19,11 @@ MIN_EVENTS = 2     #* minimum number of non-zero group_events to mark clip posit
 def slice_json_stream(# json_path:str|Path,
                       data:dict,
                       window_sec:float=WINDOW_SEC,
-                      stride_sec: float=STRIDE_SEC,
+                      stride_sec:float=STRIDE_SEC,
                       min_events:int=MIN_EVENTS,
                       allow_empty_lbl:bool = True):
     """  Slice a continuous JSON stream into overlapping temporal clips.
-    Parameters :
-    json_path : path to JSON file
+    :param data: json raw data
     window_sec, stride_sec, min_events : slicing parameters
     allow_empty_lbl: if True , label = None (neither positive nor negative)
                      if False, label = 0 or 1 (fully annotated negatives)
@@ -38,9 +35,6 @@ def slice_json_stream(# json_path:str|Path,
                    None - unknown/ignore
         - t_start, t_end : temporal bounds of the clip
     """
-
-    ## with open(json_path, "r") as f:
-    ##     data = json.load(f)
 
     frames = data.get('frames', [])
     if not frames:
@@ -145,7 +139,7 @@ def inspect_clips(clips):
     stream_duration = clips[-1]['frames'][-1]['t'] - clips[0]['frames'][0]['t']
 
 
-    # estimate actual FPS from timestamps (use first clip)
+    #* estimate actual FPS from timestamps (use first clip)
     frames = clips[0]['frames']
     if len(frames) >= 2:
         times = [f['t'] for f in frames]
@@ -155,11 +149,11 @@ def inspect_clips(clips):
     else:
         fps = 0.0
 
-    # count True labels
+    #* count True labels
     labels = [c["label"] == 1 for c in clips]
     n_true = sum(labels)
 
-    # count events (consecutive True = one event)
+    #* count events (consecutive True = one event)
     n_events = 0
     prev = False
     for cur in labels:
@@ -178,7 +172,6 @@ def inspect_clips(clips):
 
 def print_events(events:dict):
     for i, e in events.items():
-        # print('\t ', i, e)
         print('\t ', i, f": from\t {e['begin']:3.1f} to {e['end']:6.1f} sec")
 
 def inspect_dir(j_dir:Path):
@@ -192,7 +185,6 @@ def inspect_dir(j_dir:Path):
         print("\n") # print("===================================")
 
 
-
 if __name__ == "__main__":
     data_path = Path("./data/")
     json_example = data_path/"json_data/full_ann_w_keys/new_21_1_keypoints.json"
@@ -200,4 +192,4 @@ if __name__ == "__main__":
     inspect_dir(data_path/"json_data/full_ann_w_keys")
 
     pass
-#207(,7,)->195(,,)
+#202(,6,)->195(,,)
