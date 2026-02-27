@@ -8,6 +8,7 @@ from datetime import datetime
 from my_local_utils import _make_unique_dir, _save_log
 
 FRAME_H, FRAME_W = 256, 256
+
 CENTER_SIZE = 0.2
 
 
