@@ -185,7 +185,7 @@ def process_video(input_path: Path | str,
                   tension_intervals=[], fight_intervals=[], fall_intervals=[],
                   **kwargs):
     """
-    Process one video file or all video files inside a directory.
+    Process video file/dir of files.
 
     Parameters:
     :param Path input_path: file or dir
@@ -200,6 +200,9 @@ def process_video(input_path: Path | str,
             - None            → create 'jsons' subdir and enumerate
             - directory       → enumerate inside directory
             - file path       → enumerate using its stem (e.g. train_001.json)
+    :param  default_group_tag, default_individual_tag:
+            - Assign default group/individual event to all frames by default
+            - Interval-based tags (tension/fight/fall) override them
     """
 
 
@@ -285,7 +288,7 @@ def process_video(input_path: Path | str,
 
         frames = []
         #detections = []
-        frame_idx = 0v
+        frame_idx = 0
         #HEAD_IDX      = [0, 1, 2, 3, 4]  # первые 5: голова / лиц        #SHOULDER_IDX  = [5, 6]           # левое и правое плечо
         THRESH = 0.5
         while True:
@@ -460,7 +463,7 @@ def process_video(input_path: Path | str,
         # json_path.parent.mkdir(parents=True, exist_ok=True)
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"Saved::{len(frames)} frame to {json_path}\n -------------\n\)
+        print(f"Saved::{len(frames)} frame to {json_path}\n -------------\n\n'")
 
         cap.release()
         cv2.destroyAllWindows()
