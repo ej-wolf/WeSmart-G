@@ -1,4 +1,4 @@
-import shutil
+import shutil, re
 from pathlib import Path
 import json
 
@@ -110,6 +110,40 @@ def correct_path(path:str|Path, project_root: str|Path|None=None):
     else:
         print(f"[correct_path] AMBIGUOUS ({len(matches)} matches): {tail}")
     return None
+
+
+def get_unique_name(file_name: str | Path, n: int = 3) -> Path:
+    """ Return a unique file name.
+    Rules:  If file does not exist → return as is.
+    If exists:  my_file.txt      -> my_file_001.txt  (padding = n)
+                my_file_01.txt   -> my_file_02.txt   (padding preserved = 2)
+                my_file_45.txt   -> my_file_46.txt   (padding preserved = 2)
+    """
+
+    file_path = Path(file_name)
+    if not file_path.exists():
+        return file_path
+
+    parent, stem, suffix = file_path.parent, file_path.stem, file_path.suffix
+
+    match = re.search(r'_(\d+)$', stem)
+
+    if match:
+        base = stem[:match.start()]
+        num_str = match.group(1)
+        counter = int(num_str) + 1
+        padding = len(num_str)  # preserve existing padding
+    else:
+        base = stem
+        counter = 1
+        padding = n  # use default padding
+
+    while True:
+        new_name = f"{base}_{counter:0{padding}d}{suffix}"
+        new_path = parent / new_name
+        if not new_path.exists():
+            return new_path
+        counter += 1
 
 
 # ***** json handling ***** #x`1
