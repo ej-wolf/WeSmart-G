@@ -244,6 +244,7 @@ def process_video(input_path: Path | str,
 
     json_dir.mkdir(parents=True, exist_ok=True)
 
+    """ gree nline should be ready earlier """
     default_group_tag = collection(default_group_tag)  # []
     default_individual_tag = collection(default_individual_tag)
 
@@ -459,7 +460,7 @@ def process_video(input_path: Path | str,
         # json_path.parent.mkdir(parents=True, exist_ok=True)
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"Saved::{len(frames)} frame to {json_path}\n -------------\n")
+        print(f"Saved::{len(frames)} frame to {json_path}\n -------------\n\)
 
         cap.release()
         cv2.destroyAllWindows()
