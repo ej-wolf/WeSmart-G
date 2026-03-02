@@ -1,4 +1,4 @@
-import shutil, re
+import shutil, re, random
 from pathlib import Path
 import json
 
@@ -153,8 +153,87 @@ def load_json_frames(json_path: str | Path):
     # frames =
     return data['frames'] # frames
 
-# ***** pth handling ***** #
 
+def json_equal(f1, f2, keys=None):
+# def json_equal(f1, f2, ignore_header=False):
+    with open(f1) as a, open(f2) as b:
+        # if ignore_header:
+        #     return json.load(a).get('frames') == json.load(b).get('frames')
+        if keys:
+            j1, j2 = json.load(a), json.load(b)
+            found = [j1.get(k) == j2.get(k)  for k in collection(keys)]
+            return  all (found)
+            return json.load(a).get('frames') == json.load(b).get('frames')
+        return json.load(a) == json.load(b)
+
+def compare_json_dirs(d1, d2, soft_compare=False):
+    """ Compare two JSON directories;
+        in soft mode only common filenames are checked."""
+    d1, d2 = Path(d1),  Path(d2)
+
+    files1 = {p.name: p for p in d1.rglob('*.json')}
+    files2 = {p.name: p for p in d2.rglob('*.json')}
+
+    if not soft_compare:
+        #* Strict mode: file sets must match exactly
+        if set(files1.keys()) != set(files2.keys()):
+            return False, 'Different file sets'
+        compare_list = files1.keys()
+    else:
+        #* Soft mode: compare only common names
+        compare_list = set(files1.keys()) & set(files2.keys())
+
+        if not compare_list:
+            return False, 'No common JSON files to compare'
+
+    for name in compare_list:
+        if not json_equal(files1[name], files2[name]):
+            return False, f'Mismatch in {name}'
+
+    return True, 'Directories identical (based on comparison mode)' #24
+
+
+def compare_json_samples(l1, l2, smp, **kwargs):
+    """Randomly compare JSON samples between two lists/dirs and print match statistics."""
+
+    list1 = list(Path(l1).rglob('*.json')) if isinstance(l1, (str, Path)) else l1
+    list2 = list(Path(l2).rglob('*.json')) if isinstance(l2, (str, Path)) else l2
+
+    if not list1:
+        print('No files in first input')
+        return
+
+    # Determine number of samples
+    if isinstance(smp, float) and (0 <= smp <= 1):
+        n_draw = max(1, int(len(list1) * smp)) if smp > 0 else 0
+    elif isinstance(smp, int) and 0 < smp :
+        n_draw = min(int(smp), len(list1))
+    else:
+        raise ValueError('smp must a float between 0 and 1 or positive int ')
+
+    sampled = random.sample(list1, n_draw) if n_draw > 0 else []
+    # Map list2 by filename
+    map2 = {p.name: p for p in list2}
+
+    if kwargs.get('print_list', False):
+        print("\t File: \t\t |\tFound\t|\tEqual ")
+    found,identical = 0, 0
+    for p1 in sampled:
+        p2 = map2.get(Path(p1).name)
+        if p2:
+            found += 1
+            eql = json_equal(p1, p2)
+            if eql:
+                identical += 1
+        if kwargs.get('print_list', False):
+            print(f"{Path(p1).name:20}- {'Yes' if p2 else '---'}\t{eql} ")
+
+    percent = 100*(identical/found) if found > 0 else 0
+    print(f"\nComparison result:\n {n_draw} files drawn\n"
+          f" {found} found in second set\n  {identical} identical ({percent:.1f}%)")
+
+
+# ***** pth handling ***** #
 #*86->63
 def get_epoch_pth(dir_path:str|Path, epoch:int|str|None='best') -> str|None:
     """ Return path to desired checkpoint (pth file) in dir_path.
@@ -312,5 +391,10 @@ def tst_get_pth(tst_path:str=None, **kwargs):
 if __name__ == "__main__":
     pass
     # tst_get_pth("/mnt/local-data/Python/Projects/weSmart/work_dirs/tsm_r50_bbfrm")
+    f1 = Path("/home/ejwolf/clouds/erez.wolfson/wesmart-share/data/json/RWF-2000/train_pos/cy1gi3ZJb_c_4.json")
+    f2 = Path("/home/ejwolf/clouds/erez.wolfson/wesmart-share/data/json/test/pos_004.json")
+    print(f2.parent.is_dir())
+    print(json_equal(f1, f2))
+    print(json_equal(f1, f2, keys=['frames','fps', 'step']))
 
 #277(2,3,2)-> 260
