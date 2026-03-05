@@ -15,7 +15,7 @@
       -s/--step     STEP      sampling rate. (default: 5)
       -c/--conf     CONF      YOLO detection confidence threshold (default: 0.6)
       -t/--tension  TENSION   Tension interval(s) in format START-END, e.g. 00:01:00-00:01:30, -00:00:40, 00:05:00- (default:[])
-      -f/--fight    FIGH      Fight interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00- (default: [])
+      -f/--fight    FIGHT     Fight interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00- (default: [])
       -fa/--fall    FALL      Fall interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00- (default: [])
       -g/--group-ann    [GROUP_ANN ...]  Default annotation for group event (default: [])
       -i/--indiv-ann    [INDIV_ANN ...] Default annotation for individual event (default: [])

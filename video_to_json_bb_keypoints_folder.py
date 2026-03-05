@@ -105,9 +105,9 @@ def parse_interval(s):
 #*  --- Main function, to be used from other unit ---------------------------------------
 def process_video(input_path: Path | str,
                   model_path:Path|str=None,
-                  output_path  : Path | str=None,
-                  step=5, conf_thresh=0.5,  # if_usual=False, videos_folder='',
-                  default_group_tag=[], default_individual_tag=[],
+                  output_path: Path | str=None,
+                  step=5, conf_thresh=0.6,  # if_usual=False, videos_folder='',
+                  default_group_tag=None, default_individual_tag=None,
                   tension_intervals=[], fight_intervals=[], fall_intervals=[],
                   **kwargs):
     """
@@ -224,7 +224,7 @@ def process_video(input_path: Path | str,
             fps = 25.0  # fallback if metadata is broken
 
         frames = []
-        #detections = []
+        #detections = [
         frame_idx = 0
         #HEAD_IDX      = [0, 1, 2, 3, 4]  # первые 5: голова / лиц        #SHOULDER_IDX  = [5, 6]           # левое и правое плечо
         THRESH = 0.5
@@ -265,6 +265,16 @@ def process_video(input_path: Path | str,
                         continue
 
             time_sec = frame_idx/fps
+
+            #* ---- Per-frame event logic ----
+            #* Set defaults
+            # group_default = list(default_group_tag)
+            # individual_default = list(default_individual_tag)
+            # Interval overrides (cumulative between intervals,
+            # but override defaults if any interval is active)
+            group_events = []
+            individual_events = []
+
             # if in_any_interval(time_sec, fall_intervals_sec, video_duration_sec):
             if in_any_interval(time_sec, fall_intervals_sec):
                 individual_events.append(TAG_FALL)
@@ -280,9 +290,12 @@ def process_video(input_path: Path | str,
                 print(fight_intervals_sec)
                 #print('4 added to events', event_grouped)
 
+            group_tags = group_events if group_events else  list(default_group_tag)
+            individual_tags = individual_events if individual_events else list(default_individual_tag)
+
             frames.append({'f': frame_idx, 't': time_sec,
-                           'individual_events': individual_events,
-                            'group_events': sorted(group_events, reverse=True),
+                           'individual_events': individual_tags,
+                            'group_events': sorted(group_tags, reverse=True),
                             'detection_list': detection_list,}
                           )
             #print(frame_idx, frame.shape)
