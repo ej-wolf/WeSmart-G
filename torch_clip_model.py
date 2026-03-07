@@ -13,6 +13,12 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
+# --------------------------------------------------
+# * Configuration   (ToDo: move to or sync with general configs )
+# --------------------------------------------------
+TRAIN_NPZ = 'train_feats.npz'
+VALID_NPZ = 'valid_feats.npz'
+
 
 # --------------------------------------------------
 # * Dataset
@@ -98,8 +104,8 @@ def run_training(cache_dir:str|Path, **kwargs):
 
     # * work/run dirs and files
     cache_dir = Path(cache_dir)
-    train_npz = cache_dir/'train_feats.npz'
-    val_npz = cache_dir/'val_feats.npz'
+    train_npz = cache_dir/TRAIN_NPZ
+    valid_npz = cache_dir/VALID_NPZ
 
     work_dir = Path(kwargs.get('work_dir', "work_dirs/json_model"))
     # ts = datetime.now().strftime('%y%m%d-%H%M')
@@ -119,10 +125,10 @@ def run_training(cache_dir:str|Path, **kwargs):
 
     #* # datasets & loaders
     train_ds = ClipFeatureDataset(train_npz)
-    valid_ds = ClipFeatureDataset(val_npz)
+    valid_ds = ClipFeatureDataset(valid_npz)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    valid_loader   = DataLoader(valid_ds, batch_size=batch_size, shuffle=False)
+    valid_loader = DataLoader(valid_ds, batch_size=batch_size, shuffle=False)
 
     # in_dim = train_ds.X.shape[1]
     model = ClipMLP(train_ds.X.shape[1], hidden_dim=hidden_dim).to(device)
@@ -150,7 +156,7 @@ def run_training(cache_dir:str|Path, **kwargs):
     #* save artifacts
     model_path   = run_dir/'model.pt'
     history_path = run_dir/'history.json'
-    cfg_path     =  run_dir/'run_config.json'
+    cfg_path     = run_dir/'run_config.json'
 
     torch.save(model.state_dict(), model_path)
 
@@ -171,8 +177,8 @@ def run_training(cache_dir:str|Path, **kwargs):
 
 if __name__ == '__main__':
     pass
-    DATA_DIR = Path("./data/json_data")
+    # DATA_DIR = Path("./data/json_data")
     # OUT_DIR = DATA_DIR / 'cache'
-    model, hist = run_training(DATA_DIR/'cache')
+    model, hist = run_training('work_dirs/cache')
     pass
 #143 (,12,4)

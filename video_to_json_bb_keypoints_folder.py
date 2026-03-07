@@ -31,6 +31,7 @@ from pathlib import Path
 from ultralytics import YOLO
 #* import from my utils
 from my_local_utils import get_unique_name, collection, print_color
+MODELS_DIR = 'models/'
 
 #* Events Thresholds  -------------------------------------------------------------------
 SINGLE_THRESHOLDS = { 0: 0.5,   #* normal
@@ -39,40 +40,44 @@ SINGLE_THRESHOLDS = { 0: 0.5,   #* normal
                       5: 0.9,}  #* kick
 GROUPED_THRESHOLDS = {3: 0.7,   #* tension
                       4: 0.7,}  #* violence
+DETECTION_THRESHOLD = 0.5
+STEP = 5
 #* Events flags
 TAG_NO_EVENT = 0
 TAG_FALL     = 2
 TAG_TENSION  = 3
 TAG_FIGHT    = 4
 
-DEFAULT_YOLO = "yolo11x-pose.pt" # "yolov8s.pt"
+
+
+DEFAULT_YOLO = MODELS_DIR + "yolo26x-pose.pt"
+    # "yolo26x-pose.pt" / "yolo11x-pose.pt" / "yolov8s.pt"
 DEFAULT_JSON_DIR = 'jsons'
+
 def parse_sec_str(t):
     """ Convert 'HH:MM:SS' or 'MM:SS' or 'SS' to seconds"""
     if t is None:
         return None
     t = t.strip()
-    if t == "":
+    if t == '':
         return None
 
-    parts = t.split(":")
+    parts = t.split(':')
     parts = [int(p) for p in parts]
-    #print(parts)
-    if len(parts) == 3:
+    # print(parts)
+    if   len(parts) == 3:
         h, m, s = parts
     elif len(parts) == 2:
         h = 0
         m, s = parts
-    else:  # seconds only
-        h = 0
-        m = 0
+    else:  #* seconds only
+        h,m = 0, 0
         s = parts[0]
     return h * 3600 + m * 60 + s
 
 
 def parse_interval(s):
-    """
-    Parses 'start-end' where start or end can be empty.
+    """ Parses 'start-end' where start or end can be empty.
     Examples:
         '00:01:00-00:02:00'
         '00:03:00-'
@@ -93,7 +98,6 @@ def parse_interval(s):
         start = parse_sec_str(s)
         end = None
         return start, end
-
     start_str, end_str = s.split("-", 1)
 
     start = parse_sec_str(start_str) if start_str.strip() != "" else None
@@ -103,11 +107,11 @@ def parse_interval(s):
 
 
 #*  --- Main function, to be used from other unit ---------------------------------------
-def process_video(input_path: Path | str,
-                  model_path:Path|str=None,
-                  output_path  : Path | str=None,
-                  step=5, conf_thresh=0.5,  # if_usual=False, videos_folder='',
-                  default_group_tag=[], default_individual_tag=[],
+def process_video(input_path: Path|str,
+                  output_path:Path|str=None,
+                  # model_path:Path|str=None,
+                  step=STEP, conf_thresh=DETECTION_THRESHOLD,  # if_usual=False, videos_folder='',
+                  default_group_tag=None, default_individual_tag=None,
                   tension_intervals=[], fight_intervals=[], fall_intervals=[],
                   **kwargs):
     """
@@ -137,8 +141,7 @@ def process_video(input_path: Path | str,
         - Assign default group/individual event to all frames by default
         - Interval-based tags (tension/fight/fall) override them
     """
-    print(f"{input_path}: {input_path.is_file()}")
-    # print_color(default_group_tag)
+
     #* local helpers sub-fucntion
     def in_any_interval(t, intervals):
         """ Return True if time_sec falls inside any valid interval.
@@ -155,12 +158,8 @@ def process_video(input_path: Path | str,
                 return True
         return False
 
-
-    if model_path and Path(model_path).is_file():
-        model = YOLO(str(model_path))
-    else:
-        print("Using default YOLO model\n")
-        model = YOLO(DEFAULT_YOLO)
+    model_path = kwargs.get('model_path', None) or DEFAULT_YOLO
+    model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
 
     input_path = Path(input_path)
     if input_path.is_dir(): #* former video_path
@@ -186,17 +185,21 @@ def process_video(input_path: Path | str,
 
     json_dir.mkdir(parents=True, exist_ok=True)
 
+    detector_info = {'model':Path(model_path).stem, 'version':model.ckpt['version'], 'threshold':conf_thresh}
+    # detector_info = {'model':Path(model_path).stem, 'threshold':conf_thresh}
+    print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {detector_info['threshold']}", 'b')
+    print(f"Default group event: {default_group_tag}\n"
+          f"Default individual event: {default_individual_tag}\n")
+
     """ gree online should be ready earlier """
-    default_group_tag = collection(default_group_tag)  # []
-    default_individual_tag = collection(default_individual_tag)
+    # default_group_tag = collection(default_group_tag)  # []
+    # default_individual_tag = collection(default_individual_tag)
 
     for vid_path in vid_list:
         cap = cv2.VideoCapture(str(vid_path))
         if not cap.isOpened():
             print(f"[WARN] Cannot open video (probably corrupted): {vid_path}")
             continue #return
-        # '''if not cap.isOpened():
-        #     raise RuntimeError(f"Cannot open video {video_path}")'''
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
@@ -208,10 +211,10 @@ def process_video(input_path: Path | str,
         video_duration_sec = frame_count/fps
         print(f"*** Converting {vid_path.name},{(w, h)}p {video_duration_sec} s")
 
-        group_events = default_group_tag  # []
-        individual_events = default_individual_tag
-        print(f"Default group event: {default_group_tag}\n"
-              f"Default individual event: {default_individual_tag}\n")
+        # group_events = default_group_tag  # []
+        # individual_events = default_individual_tag
+        # print(f"Default group event: {default_group_tag}\n"
+        #       f"Default individual event: {default_individual_tag}\n")
 
         tension_intervals_sec = [parse_interval(s) for s in tension_intervals if s and s.strip()]
         fight_intervals_sec   = [parse_interval(s) for s in fight_intervals   if s and s.strip()]
@@ -224,7 +227,6 @@ def process_video(input_path: Path | str,
             fps = 25.0  # fallback if metadata is broken
 
         frames = []
-        #detections = []
         frame_idx = 0
         #HEAD_IDX      = [0, 1, 2, 3, 4]  # первые 5: голова / лиц        #SHOULDER_IDX  = [5, 6]           # левое и правое плечо
         THRESH = 0.5
@@ -245,8 +247,6 @@ def process_video(input_path: Path | str,
                 for box, kpts_norm, conf_kpts in zip(results.boxes, results.keypoints.xyn, results.keypoints.conf):
                     cls_id = int(box.cls)
                     conf = float(box.conf)
-                    #if conf < conf_thresh:
-                    #continue
 
                     kpts_xyc = torch.cat([kpts_norm, conf_kpts.unsqueeze(-1)], dim=-1)
 
@@ -265,6 +265,16 @@ def process_video(input_path: Path | str,
                         continue
 
             time_sec = frame_idx/fps
+
+            #* ---- Per-frame event logic ----
+            #* Set defaults
+            # group_default = list(default_group_tag)
+            # individual_default = list(default_individual_tag)
+            # Interval overrides (cumulative between intervals,
+            # but override defaults if any interval is active)
+            group_events = []
+            individual_events = []
+
             # if in_any_interval(time_sec, fall_intervals_sec, video_duration_sec):
             if in_any_interval(time_sec, fall_intervals_sec):
                 individual_events.append(TAG_FALL)
@@ -280,12 +290,15 @@ def process_video(input_path: Path | str,
                 print(fight_intervals_sec)
                 #print('4 added to events', event_grouped)
 
+            group_tags = group_events if group_events else list(default_group_tag)
+            individual_tags = individual_events if individual_events else list(default_individual_tag)
+
             frames.append({'f': frame_idx, 't': time_sec,
-                           'individual_events': individual_events,
-                            'group_events': sorted(group_events, reverse=True),
+                           'individual_events': individual_tags,
+                            'group_events': sorted(group_tags, reverse=True),
                             'detection_list': detection_list,}
                           )
-            #print(frame_idx, frame.shape)
+
             if kwargs.get('show', False):
                 cv2.imshow("head_center_debug", frame)
             key = cv2.waitKey(1) & 0xFF
@@ -298,21 +311,22 @@ def process_video(input_path: Path | str,
         data = {'video': str(vid_path),
                 'fps': fps,
                 'step': step,
-                'frames': frames
+                'detector': detector_info,
+                'frames': frames,
                 }
 
         #Todo: resolve case, when video_path is dir while out_json is a file name
         # Done !!! (01/03/26)
-
-
-        json_path = get_unique_name(json_dir/f"{json_name if json_name else vid_path.stem}.json")
+        json_path = get_unique_name(json_dir/f"{json_name if json_name else vid_path.stem}.json",4)
 
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"Saved::{len(frames)} frame to {json_path}\n -------------\n\n'")
+        # print(f"Saved::{len(frames)} frame to {json_path}\n -------------\n\n'")
+        print_color(f"Saved::{len(frames)} frame to {json_path}\n----------------\n'",'b')
 
         cap.release()
         cv2.destroyAllWindows()
+
 #195 -> 272 ->252->  220
 
 
@@ -325,8 +339,7 @@ def local_runner(tst_path, **kwargs):
 if __name__ == "__main__":
     pass
     local_runner("/mnt/local-data/Projects/Wesmart/datasets/RWF-2000/train/Train_Fight",
-                 out_json = "data/json_files/RWF-2000/train_pos/",
-                 conf_thresh=0.4,default_group_tag=TAG_FIGHT )
+                 out_json = "data/json_files/RWF-2000/train_pos/", conf_thresh=0.4,default_group_tag=TAG_FIGHT )
     local_runner("/mnt/local-data/Projects/Wesmart/datasets/RWF-2000/train/Train_NonFight",
                  out_json = "data/json_files/RWF-2000/train_neg/", conf_thresh=0.4, default_group_tag=TAG_NO_EVENT)
 
