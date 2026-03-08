@@ -15,7 +15,7 @@
     options:
       -h, --help                    : Show help message and exit
       -s/--split-dir [path]         : Path for the train/val list files
-      -e/--allow-empty              : Allow empty (None) labeling (default: True)
+      -e/--allow`preP-empty              : Allow empty (None) labeling (default: True)
       -rs/--random-seed RANDOM_SEED : set the random seed (42)
       -ns/--new-split               : Force New split (default: False)
       -r/--valid-ratio VALID_RATIO  : Validation split ratio (default: 0.2)
@@ -26,7 +26,7 @@ import random, argparse, numpy as np
 from pathlib import Path
 
 # ---- import your existing pipeline ----
-from json_utils import  load_json_data
+from json_utils import load_json_data
 from my_local_utils import print_color
 from temporal_slicing_json import slice_json_stream
 from analyze_json_motion import extract_motion_features, _temporal_conv_1d, _clip_pooling
@@ -100,7 +100,7 @@ def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
 def precompute_features_cache(   #* changed
                 json_dir: str | Path,
                 list_file: str| Path,
-                out_dir : str | Path,
+                out_path : str | Path,
                 allow_empty_lbl: bool = False,
                 **kwargs):
     """ Precompute clip-level motion features for a dataset split.
@@ -112,7 +112,8 @@ def precompute_features_cache(   #* changed
     """
     json_dir = Path(json_dir)
     list_file = Path(list_file)
-    out_path = Path(out_dir)/list_file.name.replace(VIDEO_LIST, CACHE_LIST)
+    out_path = Path(out_path).with_suffix('.npz')
+    #  / list_file.name.replace(VIDEO_LIST, CACHE_LIST)
 
     feats, labels, meta = [], [], []
 
@@ -145,9 +146,10 @@ def precompute_features_cache(   #* changed
     labels = np.asarray(labels, dtype=np.int64)
     print_color(feats.shape)
 
+    print()
     np.savez_compressed(out_path, X=feats, y=labels, meta=np.asarray(meta, dtype=object),)
 
-    print(f'Saved {len(labels)} clips to {out_path}')
+    print_color(f'Saved {len(labels)} clips to {out_path}', 'b')
     inspect_feature_file(out_path)
 
 
@@ -187,14 +189,15 @@ def main():
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('jsons_dir', type=Path, help="dir containing JSONs")
     parser.add_argument('cache_dir', type=Path, help="path for the cached NPZ feature files")
-    parser.add_argument('-s', '--split-dir',   type=Path, default=None, help="path for the train_videos.txt / val_videos.txt ")
+    parser.add_argument('-s', '--split-dir',   type=Path, default=None, help="path for the train_videos.txt/val_videos.txt")
+    parser.add_argument('-cn','--cache-name',  type=Path, default=None, help="tags/ names for the created npz")
     parser.add_argument('-e', '--allow-empty', type=Path, default=True, help="'Allow empty (None) labeling")
     parser.add_argument('-rs','--random-seed', type=int,  default=RANDOM_SEED)
     parser.add_argument('-ns', '--new-split', action='store_true', help='Force New split')
     parser.add_argument('-r',  '--valid-ratio', type=float, default=VAL_RATIO, help='Validation split ratio')
     args = parser.parse_args()
 
-    jsons_dir = args.jsons_.dir
+    jsons_dir = args.jsons_dir
     cache_dir = args.cache_dir
     split_dir = args.split_dir or jsons_dir
 
@@ -205,15 +208,16 @@ def main():
     valid_list = split_dir/f'valid{VIDEO_LIST}'
 
     if train_list.exists() and valid_list.exists() and not args.new_split:
-        print('[INFO] Using existing train/val split files')
+        print('[INFO] Usin  g existing train/val split files')
     else:
         print('[INFO] Creating new train/val split')
         print('random seed : ', args.random_seed)
         splits = split_json_ds(jsons_dir, random_seed=args.random_seed, val_ratio=args.valid_ratio)
         save_vid_lists(splits, split_dir)
 
-    precompute_features_cache(jsons_dir, train_list, cache_dir, allow_empty_lbl=False)
-    precompute_features_cache(jsons_dir, valid_list, cache_dir, allow_empty_lbl=False)
+    npz_name = args.cache_name or jsons_dir.name
+    precompute_features_cache(jsons_dir, train_list, cache_dir/f"{npz_name}_train", allow_empty_lbl=False)
+    precompute_features_cache(jsons_dir, valid_list, cache_dir/f"{npz_name}_valid", allow_empty_lbl=False)
 
 
 
