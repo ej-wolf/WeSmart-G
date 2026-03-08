@@ -101,12 +101,25 @@ def parse_interval(s):
 
     return start, end
 
+    
+def format_intervals_for_txt(title, raw_list, sec_list):
+    raw = ", ".join(raw_list) if raw_list else "-"
+    if sec_list:
+        def _fmt(a, b):
+            a_s = "" if a is None else str(a)
+            b_s = "" if b is None else str(b)
+            return f"{a_s}-{b_s}"
+        sec = ", ".join(_fmt(a, b) for a, b in sec_list)
+    else:
+        sec = "-"
+    return f"{title}\n  raw: {raw}\n  sec: {sec}\n"
 
+    
 #*  --- Main function, to be used from other unit ---------------------------------------
 def process_video(input_path: Path | str,
                   model_path:Path|str=None,
                   output_path  : Path | str=None,
-                  step=5, conf_thresh=0.5,  # if_usual=False, videos_folder='',
+                  step=None, conf_thresh=0.5,  # if_usual=False, videos_folder='',
                   default_group_tag=[], default_individual_tag=[],
                   tension_intervals=[], fight_intervals=[], fall_intervals=[],
                   **kwargs):
@@ -131,7 +144,7 @@ def process_video(input_path: Path | str,
             - directory       → enumerate inside directory
             - file path       → enumerate using its stem (e.g. train_001.json)
     Convertion related parameters:
-    :param step:                sampling rate (or fps)
+    :param step:                sample every N frames. If None, computed from target_hz.
     :param conf_thresh:         YOLO detection confidence threshold
     :param  default_group_tag, default_individual_tag:
         - Assign default group/individual event to all frames by default
@@ -223,6 +236,16 @@ def process_video(input_path: Path | str,
         if fps <= 0:
             fps = 25.0  # fallback if metadata is broken
 
+        target_hz = float(kwargs.get('target_hz', 5.0))
+        if step is None:
+            if target_hz <= 0:
+                raise ValueError(f"target_hz must be > 0, got {target_hz}")
+            cur_step = max(1, int(round(fps / target_hz)))
+        else:
+            cur_step = max(1, int(step))
+        actual_hz = fps / cur_step
+        print(f"Sampling setup: fps={fps:.3f}, step={cur_step}, target_hz={target_hz:.3f}, actual_hz={actual_hz:.3f}")
+
         frames = []
         #detections = []
         frame_idx = 0
@@ -233,7 +256,7 @@ def process_video(input_path: Path | str,
             if not ret:
                 break
             frame = cv2.resize(frame, (w, h))
-            if frame_idx % step != 0:
+            if frame_idx % cur_step != 0:
                 frame_idx += 1
                 continue
 
@@ -264,7 +287,7 @@ def process_video(input_path: Path | str,
                     else:
                         continue
 
-            time_sec = frame_idx/fps
+            '''time_sec = frame_idx/fps
             # if in_any_interval(time_sec, fall_intervals_sec, video_duration_sec):
             if in_any_interval(time_sec, fall_intervals_sec):
                 individual_events.append(TAG_FALL)
@@ -278,7 +301,25 @@ def process_video(input_path: Path | str,
             if in_any_interval(time_sec, fight_intervals_sec):
                 group_events.append(TAG_FIGHT)
                 print(fight_intervals_sec)
-                #print('4 added to events', event_grouped)
+                #print('4 added to events', event_grouped)'''
+            
+            time_sec = frame_idx / fps
+
+            # fresh per-frame tags (DO NOT reuse the same list across frames)
+            individual_events = list(default_individual_tag)
+            group_events = list(default_group_tag)
+            
+            if in_any_interval(time_sec, fall_intervals_sec):
+                individual_events.append(TAG_FALL)
+                
+            if in_any_interval(time_sec, tension_intervals_sec):
+                group_events.append(TAG_TENSION)
+                
+            if in_any_interval(time_sec, fight_intervals_sec):
+                group_events.append(TAG_FIGHT)
+                
+            individual_events = sorted(set(individual_events), reverse=True)
+            group_events = sorted(set(group_events), reverse=True)
 
             frames.append({'f': frame_idx, 't': time_sec,
                            'individual_events': individual_events,
@@ -286,19 +327,28 @@ def process_video(input_path: Path | str,
                             'detection_list': detection_list,}
                           )
             #print(frame_idx, frame.shape)
-            if kwargs.get('show', False):
+            show = kwargs.get("show", False)
+            if show:
                 cv2.imshow("head_center_debug", frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:   # ESC to quit
-                break
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:   # ESC to quit
+                    break
             frame_idx += 1
 
         #cap.release()
-
+        #print(tension_intervals)
+        #print(fight_intervals)
         data = {'video': str(vid_path),
                 'fps': fps,
-                'step': step,
-                'frames': frames
+                'step': cur_step,
+                'target_hz': target_hz,
+                'actual_hz': actual_hz,
+                'event_intervals': {
+                    'tension': {'raw': tension_intervals, 'sec': tension_intervals_sec},
+                    'fight':   {'raw': fight_intervals,   'sec': fight_intervals_sec},
+                    'fall':    {'raw': fall_intervals,    'sec': fall_intervals_sec},
+                 }, 
+                'frames': frames,
                 }
 
         #Todo: resolve case, when video_path is dir while out_json is a file name
@@ -310,9 +360,22 @@ def process_video(input_path: Path | str,
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         print(f"Saved::{len(frames)} frame to {json_path}\n -------------\n\n'")
-
+        events_txt = (
+                        f"video: {vid_path.name}\n"
+                        f"fps: {fps}\n"
+                        f"step: {cur_step}\n"
+                        f"target_hz: {target_hz}\n"
+                        f"actual_hz: {actual_hz}\n\n"
+                        + format_intervals_for_txt("TENSION", tension_intervals, tension_intervals_sec)
+                        + format_intervals_for_txt("FIGHT", fight_intervals, fight_intervals_sec)
+                        + format_intervals_for_txt("FALL", fall_intervals, fall_intervals_sec)
+                    )
+        events_path = json_path.with_suffix(".txt")  # same stem as json
+        events_path.write_text(events_txt, encoding="utf-8")
+        
         cap.release()
-        cv2.destroyAllWindows()
+        if show:
+            cv2.destroyAllWindows()
 #195 -> 272 ->252->  220
 
 

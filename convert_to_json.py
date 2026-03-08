@@ -33,7 +33,10 @@ def main():
     # parser.add_argument('--out',   type=Path, required=True, help="JSON output name or path for output directory")
     parser.add_argument( '-m', '--model',type=Path, help="Path to YOLO___.pt model")
     parser.add_argument( '-o', '--out',  type=Path, help="Path to output JSON file or output directory")
-    parser.add_argument( '-s', '--step', type=int, default=5, help="sampling rate. ")
+    parser.add_argument('-s', '--step', type=int, default=None,
+                        help="sample every N frames (overrides --target-hz)")
+    parser.add_argument('--target-hz', type=float, default=5.0,
+                        help="target sampling rate in samples per second")
     parser.add_argument( '-c', '--conf', type=float, default=0.6, help="YOLO detection confidence threshold")
 
     parser.add_argument( '-g', '--group-ann', type=int, nargs='+', default=[], help="Default annotation for group event")
@@ -41,7 +44,7 @@ def main():
     parser.add_argument( '-t', '--tension', action="append", default=[], help="Tension interval(s) in format START-END, e.g. 00:01:00-00:01:30, -00:00:40, 00:05:00-")
     parser.add_argument( '-f', '--fight', action="append", default=[], help="Fight interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
     parser.add_argument( '-fa','--fall', action="append", default=[], help="Fall interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
-
+    parser.add_argument('--show', action='store_true', help="Preview processed frames with keypoints")
 
     args = parser.parse_args()
     print_color(args.conf)
@@ -52,6 +55,7 @@ def main():
                   model_path=args.model,
                   output_path=args.out,
                   step=args.step,
+                  target_hz=args.target_hz,
                   conf_thresh=args.conf,
                   # if_usual=args.if_usual,
                   # videos_folder=args.videos_folder,
@@ -60,7 +64,8 @@ def main():
                   default_individual_tag=args.indiv_ann,
                   tension_intervals=args.tension,
                   fight_intervals=args.fight,
-                  fall_intervals=args.fall
+                  fall_intervals=args.fall,
+                  show=args.show
                   )
 
 if __name__ == "__main__":
