@@ -112,7 +112,7 @@ def correct_path(path:str|Path, project_root: str|Path|None=None):
     return None
 
 
-def get_unique_name(file_name: str | Path, n: int = 3) -> Path:
+def get_unique_name(file_name:str|Path, n:int=3) -> Path:
     """ Return a unique file name.
     Rules:  If file does not exist → return as is.
     If exists:  my_file.txt      -> my_file_001.txt  (padding = n)

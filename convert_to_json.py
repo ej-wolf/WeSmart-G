@@ -35,7 +35,6 @@ def main():
     parser.add_argument( '-o', '--out',  type=Path, help="Path to output JSON file or output directory")
     parser.add_argument( '-s', '--step', type=int, default=5, help="sampling rate. ")
     parser.add_argument( '-c', '--conf', type=float, default=0.6, help="YOLO detection confidence threshold")
-
     parser.add_argument( '-g', '--group-ann', type=int, nargs='+', default=[], help="Default annotation for group event")
     parser.add_argument( '-i', '--indiv-ann', type=int, nargs='+', default=[], help="Default annotation for individual event")
     parser.add_argument( '-t', '--tension', action="append", default=[], help="Tension interval(s) in format START-END, e.g. 00:01:00-00:01:30, -00:00:40, 00:05:00-")
@@ -45,22 +44,18 @@ def main():
 
     args = parser.parse_args()
     print_color(args.conf)
-    # print(args.video); print(Path(args.video).is_file())
-
 
     process_video(input_path=args.video,
-                  model_path=args.model,
                   output_path=args.out,
+                  # model_path=args.model,
                   step=args.step,
                   conf_thresh=args.conf,
-                  # if_usual=args.if_usual,
-                  # videos_folder=args.videos_folder,
-                  # out_jsoons_folder=args.out_jsons_folder,
                   default_group_tag= args.group_ann,
                   default_individual_tag=args.indiv_ann,
                   tension_intervals=args.tension,
                   fight_intervals=args.fight,
-                  fall_intervals=args.fall
+                  fall_intervals=args.fall,
+                  model_path = args.model,
                   )
 
 if __name__ == "__main__":
