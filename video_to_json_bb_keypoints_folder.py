@@ -13,8 +13,8 @@
             'frames':[
                     {'f': 15,               #* frame index
                      't': 0.6,              #* time from start in seconds
-                     'event_single': 2,     #* 0,1,2,5 or -1
-                     'event_grouped': 3,    #* 3,4 or -1
+                     'individual_events':2, #* 0,1,2,5 or -1
+                     'group_events': 3,     #* 3,4 or -1
                      'detection_list':[     #* list of YOLO detections (human)
                               {'class':     #* normal,  fall ...
                                'conf':      #* confidence of 'class'
@@ -41,7 +41,9 @@ SINGLE_THRESHOLDS = { 0: 0.5,   #* normal
 GROUPED_THRESHOLDS = {3: 0.7,   #* tension
                       4: 0.7,}  #* violence
 DETECTION_THRESHOLD = 0.5
+DEFAULT_SAMPELING = 5
 STEP = 5
+
 #* Events flags
 TAG_NO_EVENT = 0
 TAG_FALL     = 2
@@ -49,9 +51,8 @@ TAG_TENSION  = 3
 TAG_FIGHT    = 4
 
 
-
 DEFAULT_YOLO = MODELS_DIR + "yolo26x-pose.pt"
-    # "yolo26x-pose.pt" / "yolo11x-pose.pt" / "yolov8s.pt"
+#* "yolo26x-pose.pt" / "yolo11x-pose.pt" / "yolov8s.pt"
 DEFAULT_JSON_DIR = 'jsons'
 
 def parse_sec_str(t):
@@ -98,6 +99,7 @@ def parse_interval(s):
         start = parse_sec_str(s)
         end = None
         return start, end
+
     start_str, end_str = s.split("-", 1)
 
     start = parse_sec_str(start_str) if start_str.strip() != "" else None
@@ -110,7 +112,9 @@ def parse_interval(s):
 def process_video(input_path: Path|str,
                   output_path:Path|str=None,
                   # model_path:Path|str=None,
-                  step=STEP, conf_thresh=DETECTION_THRESHOLD,  # if_usual=False, videos_folder='',
+                  # sample_rate = SAMPELING_RATE,
+                  # step=STEP,
+                  conf_thresh=DETECTION_THRESHOLD,  # if_usual=False, videos_folder='',
                   default_group_tag=None, default_individual_tag=None,
                   tension_intervals=[], fight_intervals=[], fall_intervals=[],
                   **kwargs):
@@ -136,6 +140,7 @@ def process_video(input_path: Path|str,
             - file path       → enumerate using its stem (e.g. train_001.json)
     Convertion related parameters:
     :param step:                sampling rate (or fps)
+    :param sample_rate:         Sampling rate for json conversion rate (in Hz)
     :param conf_thresh:         YOLO detection confidence threshold
     :param  default_group_tag, default_individual_tag:
         - Assign default group/individual event to all frames by default
@@ -188,13 +193,9 @@ def process_video(input_path: Path|str,
     detector_info = {'model':Path(model_path).stem, 'version':model.ckpt['version'], 'threshold':conf_thresh}
     # detector_info = {'model':Path(model_path).stem, 'threshold':conf_thresh}
     print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {detector_info['threshold']}", 'b')
-    print(f"Default group event: {default_group_tag}\n"
-          f"Default individual event: {default_individual_tag}\n")
+    print(f" Default group event: {default_group_tag}\n Default individual event: {default_individual_tag}\n")
 
-    """ gree online should be ready earlier """
-    # default_group_tag = collection(default_group_tag)  # []
-    # default_individual_tag = collection(default_individual_tag)
-
+    #* start loop over video files
     for vid_path in vid_list:
         cap = cv2.VideoCapture(str(vid_path))
         if not cap.isOpened():
@@ -211,20 +212,23 @@ def process_video(input_path: Path|str,
         video_duration_sec = frame_count/fps
         print(f"*** Converting {vid_path.name},{(w, h)}p {video_duration_sec} s")
 
-        # group_events = default_group_tag  # []
-        # individual_events = default_individual_tag
-        # print(f"Default group event: {default_group_tag}\n"
-        #       f"Default individual event: {default_individual_tag}\n")
-
         tension_intervals_sec = [parse_interval(s) for s in tension_intervals if s and s.strip()]
         fight_intervals_sec   = [parse_interval(s) for s in fight_intervals   if s and s.strip()]
         fall_intervals_sec    = [parse_interval(s) for s in fall_intervals    if s and s.strip()]
-        # print(tension_intervals_sec)
-        # print(fight_intervals_sec)
-        # print(fall_intervals_sec)
 
         if fps <= 0:
             fps = 25.0  # fallback if metadata is broken
+
+        # target_hz = float(kwargs.get('target_hz', 5.0))
+        sampling_rate_Hz = float(kwargs.get('sample_rate', DEFAULT_SAMPELING))
+        if sampling_rate_Hz <= 0 or sampling_rate_Hz > fps  :
+            raise ValueError(f"Invalid sampling rate frq={sampling_rate_Hz}")
+        step = max(1, int(round(fps/sampling_rate_Hz)))
+
+        effective_hz = fps/step
+
+        print(f"Sampling setup: Video fps={fps:.3f}, Sampling rate={sampling_rate_Hz:.3f} Hz,"
+              f" Step= {step} frames -> effective rate ={effective_hz:.3f} Hz")
 
         frames = []
         frame_idx = 0
@@ -239,7 +243,7 @@ def process_video(input_path: Path|str,
                 frame_idx += 1
                 continue
 
-            # run model on current frame
+            #* run model on current frame
             results = model(frame, conf=conf_thresh, verbose=False)[0]
 
             detection_list = []
@@ -267,51 +271,48 @@ def process_video(input_path: Path|str,
             time_sec = frame_idx/fps
 
             #* ---- Per-frame event logic ----
-            #* Set defaults
-            # group_default = list(default_group_tag)
-            # individual_default = list(default_individual_tag)
-            # Interval overrides (cumulative between intervals,
-            # but override defaults if any interval is active)
             group_events = []
             individual_events = []
 
-            # if in_any_interval(time_sec, fall_intervals_sec, video_duration_sec):
             if in_any_interval(time_sec, fall_intervals_sec):
                 individual_events.append(TAG_FALL)
                 print(fall_intervals_sec)
-            # if in_any_interval(time_sec, tension_intervals_sec, video_duration_sec):
             if in_any_interval(time_sec, tension_intervals_sec):
                 group_events.append(TAG_TENSION)
                 print(tension_intervals_sec)
-                #print('3 added to events', event_grouped)
-            # if in_any_interval(time_sec, fight_intervals_sec, video_duration_sec):
             if in_any_interval(time_sec, fight_intervals_sec):
                 group_events.append(TAG_FIGHT)
                 print(fight_intervals_sec)
-                #print('4 added to events', event_grouped)
 
             group_tags = group_events if group_events else list(default_group_tag)
             individual_tags = individual_events if individual_events else list(default_individual_tag)
 
             frames.append({'f': frame_idx, 't': time_sec,
                            'individual_events': individual_tags,
-                            'group_events': sorted(group_tags, reverse=True),
-                            'detection_list': detection_list,}
+                           'group_events': sorted(group_tags, reverse=True),
+                           'detection_list': detection_list,}
                           )
 
-            if kwargs.get('show', False):
+            show = kwargs.get('show', False)
+            if show:
                 cv2.imshow("head_center_debug", frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:   # ESC to quit
-                break
+                #Todo: Anna should add keypoints
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:   # ESC to quit
+                    break
             frame_idx += 1
 
-        #cap.release()
+        event_intervals = {'tension': {'raw': tension_intervals, 'sec': tension_intervals_sec},
+                           'fight': {'raw': fight_intervals,   'sec': fight_intervals_sec},
+                           'fall': {'raw': fall_intervals,    'sec': fall_intervals_sec},
+                           },
 
         data = {'video': str(vid_path),
                 'fps': fps,
+                'sampling rate': effective_hz,
                 'step': step,
                 'detector': detector_info,
+                'event_intervals':event_intervals,
                 'frames': frames,
                 }
 
@@ -321,12 +322,12 @@ def process_video(input_path: Path|str,
 
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        # print(f"Saved::{len(frames)} frame to {json_path}\n -------------\n\n'")
+
         print_color(f"Saved::{len(frames)} frame to {json_path}\n----------------\n'",'b')
 
         cap.release()
-        cv2.destroyAllWindows()
-
+        if show:
+            cv2.destroyAllWindows()
 #195 -> 272 ->252->  220
 
 

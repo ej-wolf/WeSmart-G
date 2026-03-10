@@ -198,6 +198,8 @@ def compare_json_samples(l1, l2, smp, **kwargs):
 
     list1 = list(Path(l1).rglob('*.json')) if isinstance(l1, (str, Path)) else l1
     list2 = list(Path(l2).rglob('*.json')) if isinstance(l2, (str, Path)) else l2
+    # print_color(list1);
+    print_color(list2, 'b')
 
     if not list1:
         print('No files in first input')
@@ -212,6 +214,7 @@ def compare_json_samples(l1, l2, smp, **kwargs):
         raise ValueError('smp must a float between 0 and 1 or positive int ')
 
     sampled = random.sample(list1, n_draw) if n_draw > 0 else []
+    print_color(sampled);
     # Map list2 by filename
     map2 = {p.name: p for p in list2}
 

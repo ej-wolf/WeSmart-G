@@ -34,6 +34,8 @@ def main():
     parser.add_argument( '-m', '--model',type=Path, help="Path to YOLO___.pt model")
     parser.add_argument( '-o', '--out',  type=Path, help="Path to output JSON file or output directory")
     parser.add_argument( '-s', '--step', type=int, default=5, help="sampling rate. ")
+    parser.add_argument( '-fq','--', type=int, default=5, help="sampling rate, in fps (Hz) ")
+    #ToDo: replace step with frequncy parma in Hz
     parser.add_argument( '-c', '--conf', type=float, default=0.6, help="YOLO detection confidence threshold")
     parser.add_argument( '-g', '--group-ann', type=int, nargs='+', default=[], help="Default annotation for group event")
     parser.add_argument( '-i', '--indiv-ann', type=int, nargs='+', default=[], help="Default annotation for individual event")
