@@ -100,18 +100,55 @@ def parse_interval(s):
         return start, end
     start_str, end_str = s.split("-", 1)
 
-    start = parse_sec_str(start_str) if start_str.strip() != "" else None
-    end   = parse_sec_str(end_str)   if end_str.strip()   != "" else None
-
+    start = parse_sec_str(start_str) if start_str.strip() != '' else None
+    end   = parse_sec_str(end_str)   if end_str.strip()   != '' else None
     return start, end
 
+
+def parse_annotation_file(ann_file):
+    """ Parse an annotation text file into event intervals by flag.
+        Expected row format:
+        start_time,\t   end_time,\t event_flag
+        '#' Lines starting with '#' are ignored.
+    """
+    event_intervals = {TAG_FALL: [], TAG_TENSION: [], TAG_FIGHT: []}
+    ann_path     = Path(ann_file)
+
+    with ann_path.open("r", encoding="utf-8") as f:
+        for line_no, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            parts = [part.strip() for part in line.split(",\t")]
+            if len(parts) != 3:
+                parts = [part.strip() for part in line.split("\t")]
+
+            if len(parts) != 3:
+                print(f"[WARN] Invalid annotation row at {ann_path}:{line_no}: {raw_line.rstrip()}")
+                continue
+
+            start_str, end_str, flag_str = parts
+            try:
+                event_flag = int(flag_str)
+            except ValueError:
+                print(f"[WARN] Invalid event flag at {ann_path}:{line_no}: {flag_str}")
+                continue
+
+            if event_flag not in event_intervals:
+                continue
+
+            event_intervals[event_flag].append((parse_sec_str(start_str), parse_sec_str(end_str)))
+
+    return event_intervals
 
 #*  --- Main function, to be used from other unit ---------------------------------------
 def process_video(input_path: Path|str,
                   output_path:Path|str=None,
                   # model_path:Path|str=None,
                   step=STEP, conf_thresh=DETECTION_THRESHOLD,  # if_usual=False, videos_folder='',
-                  default_group_tag=None, default_individual_tag=None,
+                  ann_file=None,
+                  default_group_tag=None,
                   tension_intervals=[], fight_intervals=[], fall_intervals=[],
                   **kwargs):
     """
@@ -137,12 +174,38 @@ def process_video(input_path: Path|str,
     Convertion related parameters:
     :param step:                sampling rate (or fps)
     :param conf_thresh:         YOLO detection confidence threshold
-    :param  default_group_tag, default_individual_tag:
-        - Assign default group/individual event to all frames by default
-        - Interval-based tags (tension/fight/fall) override them
+    :param default_group_tag:
+        - Assign default events to all frames by default
+        - individual_events is kept in the output only for compatibility
+    :param ann_file:
+        Optional annotation text file with rows:
+        start_time,\\tend_time,\\tevent_flag
+        Supported event flags: 2 (fall), 3 (tension), 4 (fight)
+        Precedence:
+        defaults < ann_file intervals < explicit *_intervals arguments
+        If ann_file is None, the code will look next to each video for:
+        <video_stem>.txt, <video_stem>.ann, or <video_stem>
     """
 
     #* local helpers sub-fucntion
+    def find_annotation_file(video_path):
+        """Find a sibling annotation file matching the video stem."""
+        video_path = Path(video_path)
+        candidates = (video_path.with_suffix(".txt"),
+                      video_path.with_suffix(".ann"),
+                      video_path.with_suffix(""))
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def as_event_list(tags):
+        if tags is None:
+            return []
+        if isinstance(tags, (list, tuple, set)):
+            return list(tags)
+        return [tags]
+
     def in_any_interval(t, intervals):
         """ Return True if time_sec falls inside any valid interval.
             Supports open intervals (None bounds) """
@@ -157,6 +220,7 @@ def process_video(input_path: Path|str,
             if start <= t <= stop:
                 return True
         return False
+
 
     model_path = kwargs.get('model_path', None) or DEFAULT_YOLO
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
@@ -188,12 +252,12 @@ def process_video(input_path: Path|str,
     detector_info = {'model':Path(model_path).stem, 'version':model.ckpt['version'], 'threshold':conf_thresh}
     # detector_info = {'model':Path(model_path).stem, 'threshold':conf_thresh}
     print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {detector_info['threshold']}", 'b')
-    print(f"Default group event: {default_group_tag}\n"
-          f"Default individual event: {default_individual_tag}\n")
+    print(f"Default group event: {default_group_tag}\n")
 
     """ gree online should be ready earlier """
     # default_group_tag = collection(default_group_tag)  # []
-    # default_individual_tag = collection(default_individual_tag)
+
+    ann_intervals = parse_annotation_file(ann_file) if ann_file else None
 
     for vid_path in vid_list:
         cap = cv2.VideoCapture(str(vid_path))
@@ -212,13 +276,21 @@ def process_video(input_path: Path|str,
         print(f"*** Converting {vid_path.name},{(w, h)}p {video_duration_sec} s")
 
         # group_events = default_group_tag  # []
-        # individual_events = default_individual_tag
-        # print(f"Default group event: {default_group_tag}\n"
-        #       f"Default individual event: {default_individual_tag}\n")
 
-        tension_intervals_sec = [parse_interval(s) for s in tension_intervals if s and s.strip()]
-        fight_intervals_sec   = [parse_interval(s) for s in fight_intervals   if s and s.strip()]
-        fall_intervals_sec    = [parse_interval(s) for s in fall_intervals    if s and s.strip()]
+        video_ann_intervals = ann_intervals
+        if video_ann_intervals is None:
+            auto_ann_file = find_annotation_file(vid_path)
+            if auto_ann_file is not None:
+                print(f"Using annotation file: {auto_ann_file}")
+                video_ann_intervals = parse_annotation_file(auto_ann_file)
+
+        tension_intervals_sec = list(video_ann_intervals[TAG_TENSION]) if video_ann_intervals is not None else []
+        fight_intervals_sec = list(video_ann_intervals[TAG_FIGHT]) if video_ann_intervals is not None else []
+        fall_intervals_sec = list(video_ann_intervals[TAG_FALL]) if video_ann_intervals is not None else []
+
+        tension_intervals_sec.extend(parse_interval(s) for s in tension_intervals if s and s.strip())
+        fight_intervals_sec.extend(parse_interval(s) for s in fight_intervals if s and s.strip())
+        fall_intervals_sec.extend(parse_interval(s) for s in fall_intervals if s and s.strip())
         # print(tension_intervals_sec)
         # print(fight_intervals_sec)
         # print(fall_intervals_sec)
@@ -267,35 +339,28 @@ def process_video(input_path: Path|str,
             time_sec = frame_idx/fps
 
             #* ---- Per-frame event logic ----
-            #* Set defaults
-            # group_default = list(default_group_tag)
-            # individual_default = list(default_individual_tag)
-            # Interval overrides (cumulative between intervals,
-            # but override defaults if any interval is active)
+            #* All event types are emitted through group_events.
+            #* individual_events stays empty for output compatibility.
             group_events = []
-            individual_events = []
 
             # if in_any_interval(time_sec, fall_intervals_sec, video_duration_sec):
             if in_any_interval(time_sec, fall_intervals_sec):
-                individual_events.append(TAG_FALL)
-                print(fall_intervals_sec)
+                group_events.append(TAG_FALL)
             # if in_any_interval(time_sec, tension_intervals_sec, video_duration_sec):
             if in_any_interval(time_sec, tension_intervals_sec):
                 group_events.append(TAG_TENSION)
-                print(tension_intervals_sec)
                 #print('3 added to events', event_grouped)
             # if in_any_interval(time_sec, fight_intervals_sec, video_duration_sec):
             if in_any_interval(time_sec, fight_intervals_sec):
                 group_events.append(TAG_FIGHT)
-                print(fight_intervals_sec)
                 #print('4 added to events', event_grouped)
 
-            group_tags = group_events if group_events else list(default_group_tag)
-            individual_tags = individual_events if individual_events else list(default_individual_tag)
+            default_tags = as_event_list(default_group_tag)
+            group_tags = group_events if group_events else default_tags
 
             frames.append({'f': frame_idx, 't': time_sec,
-                           'individual_events': individual_tags,
-                            'group_events': sorted(group_tags, reverse=True),
+                           'individual_events': [],
+                            'group_events': sorted(set(group_tags), reverse=True),
                             'detection_list': detection_list,}
                           )
 
@@ -307,6 +372,12 @@ def process_video(input_path: Path|str,
             frame_idx += 1
 
         #cap.release()
+        if frame_idx == 0:
+            print(f"[WARN] Skipping video with no decodable frames: {vid_path} "
+                  f"(unsupported codec/container or corrupted file)")
+            cap.release()
+            cv2.destroyAllWindows()
+            continue
 
         data = {'video': str(vid_path),
                 'fps': fps,
@@ -336,11 +407,15 @@ def local_runner(tst_path, **kwargs):
 
         process_video(tst_path, **kwargs)
 
+
+def test_process_video():
+    process_video(
+        "/mnt/local-data/Projects/Wesmart/Video-datasets/test_ds/tst_conv",
+        output_path="/mnt/local-data/Python/Projects/weSmart/data/json_files/tst_conv",
+    )
+
+
 if __name__ == "__main__":
-    pass
-    local_runner("/mnt/local-data/Projects/Wesmart/datasets/RWF-2000/train/Train_Fight",
-                 out_json = "data/json_files/RWF-2000/train_pos/", conf_thresh=0.4,default_group_tag=TAG_FIGHT )
-    local_runner("/mnt/local-data/Projects/Wesmart/datasets/RWF-2000/train/Train_NonFight",
-                 out_json = "data/json_files/RWF-2000/train_neg/", conf_thresh=0.4, default_group_tag=TAG_NO_EVENT)
+    test_process_video()
 
 #534(5,19,27) -> 333(5,7,6)
