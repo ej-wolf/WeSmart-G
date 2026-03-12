@@ -166,10 +166,13 @@ def json_equal(f1, f2, keys=None):
             return json.load(a).get('frames') == json.load(b).get('frames')
         return json.load(a) == json.load(b)
 
-def compare_json_dirs(d1, d2, soft_compare=False):
+def compare_json_dirs(d1, d2, soft_compare=False, **kwargs):
     """ Compare two JSON directories;
         in soft mode only common filenames are checked."""
     d1, d2 = Path(d1),  Path(d2)
+
+    if not d1.is_dir(): return False, f"can't find 1st path: {d1.name}"
+    if not d2.is_dir(): return False, f"can't find 2nd path: {d2.name}"
 
     files1 = {p.name: p for p in d1.rglob('*.json')}
     files2 = {p.name: p for p in d2.rglob('*.json')}
@@ -183,14 +186,23 @@ def compare_json_dirs(d1, d2, soft_compare=False):
         #* Soft mode: compare only common names
         compare_list = set(files1.keys()) & set(files2.keys())
 
-        if not compare_list:
-            return False, 'No common JSON files to compare'
+    if not compare_list:
+        return False, 'No common JSON files to compare'
 
+    unequal_count =0
     for name in compare_list:
-        if not json_equal(files1[name], files2[name]):
-            return False, f'Mismatch in {name}'
+        print(f"Comparing {name} ")
+        if  json_equal(files1[name], files2[name]):
+            print_color(f"\r - equal ", 'b')
+        else:
+            print_color(f"\r - differ")
+            unequal_count += 1
+            if kwargs.get('break',False):
+                return False, f'Mismatch in {name}'
+    if unequal_count > 0:
+        return False, f" {len(compare_list) - unequal_count} out of {len(compare_list)} are equal"
 
-    return True, 'Directories identical (based on comparison mode)' #24
+    return True, "Directories identical (based on comparison mode)" #24
 
 
 def compare_json_samples(l1, l2, smp, **kwargs):

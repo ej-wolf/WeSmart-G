@@ -149,7 +149,7 @@ def process_video(input_path: Path|str,
                   output_path:Path|str=None,
                   # model_path:Path|str=None,
                   sample_rate=DEFAULT_SAMPELING,
-                  step=STEP,
+                  # step=STEP,
                   conf_thresh=DETECTION_THRESHOLD,  # if_usual=False, videos_folder='',
                   ann_file=None,
                   default_group_tag=None,
@@ -307,17 +307,17 @@ def process_video(input_path: Path|str,
             fps = 25.0  # fallback if metadata is broken
 
         # target_hz = float(kwargs.get('target_hz', 5.0))
-        sampling_rate_Hz = float(kwargs.get('sample_rate', DEFAULT_SAMPELING))
-        if sampling_rate_Hz <= 0 or sampling_rate_Hz > fps  :
+        target_sampling = float(kwargs.get('sample_rate', DEFAULT_SAMPELING))
+        if target_sampling <= 0 or target_sampling > fps  :
         #* i.e    0 <= sampling_rate_Hz <= fps
-            raise ValueError(f"Invalid sampling rate: {sampling_rate_Hz} Hz")
+            raise ValueError(f"Invalid sampling rate: {target_sampling} Hz")
 
-        step = max(1, int(round(fps/sampling_rate_Hz)))
-        print_color(f"sampling = {sampling_rate_Hz} Hz -> step = {step}")
-        effective_hz = fps/step
+        step = max(1, int(round(fps/target_sampling)))
+        effective_sampling = fps/step
+        print_color(f"effective sampling = {effective_sampling} Hz -> step = {step}")
 
-        print(f"Sampling setup: Video fps={fps:.3f}, Sampling rate={sampling_rate_Hz:.3f} Hz,"
-              f" Step= {step} frames -> effective rate ={effective_hz:.3f} Hz")
+        print(f"Sampling setup: Video fps={fps:.3f}, Sampling rate={target_sampling:.3f} Hz,"
+              f" Step= {step} frames -> effective rate ={effective_sampling:.3f} Hz")
 
         frames = []
         frame_idx = 0
@@ -415,10 +415,10 @@ def process_video(input_path: Path|str,
         #cap.release()
         data = {'video': str(vid_path),
                 'fps': fps,
-                # 'sampling rate': effective_hz,
+                'sampling rate': {'target':target_sampling, 'effective':effective_sampling},
                 'step': step,
                 'detector': detector_info,
-                # 'event_intervals':event_intervals,
+                'event_intervals':event_intervals,
                 'frames': frames,
                 }
 
@@ -456,8 +456,7 @@ if __name__ == "__main__":
     # local_runner("/mnt/local-data/Projects/Wesmart/datasets/RWF-2000/train/Train_NonFight",
     #              out_json = "data/json_files/RWF-2000/train_neg/", conf_thresh=0.4, default_group_tag=TAG_NO_EVENT)
     local_runner("/mnt/local-data/Projects/Wesmart/Video-datasets/test_ds/tst_conv",
-                output_path="/mnt/local-data/Python/Projects/weSmart/data/json_files/tst_conv/try_02",
+                output_path="/mnt/local-data/Python/Projects/weSmart/data/json_files/tst_conv/try_04",
                 )
 
-
-#534(5,19,27) -> 333(5,7,6)
+#534(5,19,27) -> 333(5,7,6)- 460(4,8,8)
