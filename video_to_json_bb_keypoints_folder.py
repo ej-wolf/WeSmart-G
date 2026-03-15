@@ -221,7 +221,8 @@ def process_video(input_path: Path|str,
 
     model_path = kwargs.get('model_path', None) or DEFAULT_YOLO
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
-
+    show = kwargs.get('show', False)
+    
     input_path = Path(input_path)
     if input_path.is_dir():
         vid_list = [p for p in input_path.iterdir() if p.is_file()]
@@ -352,7 +353,6 @@ def process_video(input_path: Path|str,
                             'detection_list': detection_list,}
                           )
 
-            show = kwargs.get('show', False)
             if show:
                 cv2.imshow("head_center_debug", frame)
                 #Todo: Anna should add keypoints

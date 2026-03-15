@@ -39,7 +39,7 @@ def main():
     parser.add_argument( '-t', '--tension', action="append", help="Tension interval(s) in format START-END, e.g. 00:01:00-00:01:30, -00:00:40, 00:05:00-")
     parser.add_argument( '-f', '--fight', action="append", help="Fight interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
     parser.add_argument( '-fa','--fall', action="append", help="Fall interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
-
+    parser.add_argument('--show', action='store_true', help='Show video during processing')
 
     args = parser.parse_args()
     if args.conf is not None:
@@ -52,7 +52,8 @@ def main():
                           tension_intervals=args.tension,
                           fight_intervals=args.fight,
                           fall_intervals=args.fall,
-                          model_path=args.model)
+                          model_path=args.model,
+                          show=args.show)
     if args.sample_rate is not None:
         process_kwargs['sample_rate'] = args.sample_rate
     if args.conf is not None:
