@@ -13,7 +13,7 @@
       VIDEO                       Path to input video or dir of videos (.mp4, .mkv, ...)
       -m/--model MODEL            Path to YOLO___.pt model
       -o/--out OUT                Path to output JSON file or output directory
-      -s/--sample-rate RATE       Sampling rate in Hz
+      -s/--sample-rate RATE       Target saved frames per second (Hz)
       -c/--conf CONF              YOLO detection confidence threshold
       -g/--group-ann [GROUP_ANN ...]  Default annotation for group event
       -a/--ann-file ANN_FILE      Optional annotation text file
@@ -32,7 +32,7 @@ def main():
     parser.add_argument('video', type=Path, help="Path to input video or dir of videos ( .mp4, .mkv, ...)")
     parser.add_argument( '-m', '--model',type=Path, help="Path to YOLO___.pt model")
     parser.add_argument( '-o', '--out',  type=Path, help="Path to output JSON file or output directory")
-    parser.add_argument( '-s', '--sample-rate', type=float, help="Sampling rate in Hz")
+    parser.add_argument( '-s', '--sample-rate', type=float, help="Target saved frames per second (Hz), e.g. 5 keeps ~5 JSON frames/sec")
     parser.add_argument( '-c', '--conf', type=float, help="YOLO detection confidence threshold")
     parser.add_argument( '-g', '--group-ann', type=int, nargs='+', help="Default annotation for group event")
     parser.add_argument( '-a', '--ann-file', type=Path, help="Optional annotation text file")
@@ -40,6 +40,8 @@ def main():
     parser.add_argument( '-f', '--fight', action="append", help="Fight interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
     parser.add_argument( '-fa','--fall', action="append", help="Fall interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
     parser.add_argument('--show', action='store_true', help='Show video during processing')
+    parser.add_argument('--allow-incomplete', action='store_true',
+                        help='Write JSON even if decoder stops before the metadata frame count')
 
     args = parser.parse_args()
     if args.conf is not None:
@@ -53,7 +55,8 @@ def main():
                           fight_intervals=args.fight,
                           fall_intervals=args.fall,
                           model_path=args.model,
-                          show=args.show)
+                          show=args.show,
+                          allow_incomplete=args.allow_incomplete)
     if args.sample_rate is not None:
         process_kwargs['sample_rate'] = args.sample_rate
     if args.conf is not None:

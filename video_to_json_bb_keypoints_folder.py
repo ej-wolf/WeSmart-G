@@ -215,9 +215,13 @@ def process_video(input_path: Path|str,
                 return True
         return False
 
+    def write_incomplete_marker(marker_path: Path, lines: list[str]):
+        marker_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     tension_intervals = tension_intervals or []
     fight_intervals = fight_intervals or []
     fall_intervals = fall_intervals or []
+    allow_incomplete = bool(kwargs.get('allow_incomplete', False))
 
     model_path = kwargs.get('model_path', None) or DEFAULT_YOLO
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
@@ -260,10 +264,15 @@ def process_video(input_path: Path|str,
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        meta_frame_count = int(round(frame_count)) if frame_count > 0 else None
+        print('frame_count', frame_count)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print('frame_size', w, h)
         if w != 1920:
             h = int(w*1080/1920)
+        if fps <= 0:
+            fps = 25.0  # fallback if metadata is broken
         video_duration_sec = frame_count/fps
         print(f"*** Converting {vid_path.name},{(w, h)}p {video_duration_sec} s")
         video_ann_intervals = ann_intervals
@@ -281,35 +290,55 @@ def process_video(input_path: Path|str,
         fight_intervals_sec.extend(parse_interval(s) for s in fight_intervals if s and s.strip())
         fall_intervals_sec.extend(parse_interval(s) for s in fall_intervals if s and s.strip())
 
-        if fps <= 0:
-            fps = 25.0  # fallback if metadata is broken
-
-        target_sampling = float(kwargs.get('sample_rate', DEFAULT_SAMPELING))
+        target_sampling = float(kwargs.get('sample_rate', sample_rate))
         if target_sampling <= 0 or target_sampling > fps  :
         #* i.e    0 <= sampling_rate_Hz <= fps
             raise ValueError(f"Invalid sampling rate: {target_sampling} Hz")
 
-        step = max(1, int(round(fps/target_sampling)))
-        effective_sampling = fps/step
-        print_color(f"effective sampling = {effective_sampling} Hz -> step = {step}")
+        sample_period = 1.0 / target_sampling
+        legacy_step = max(1, int(round(fps/target_sampling)))
+        frame_time_tolerance = 0.5 / fps
+        print_color(
+            f"target sampling = {target_sampling:.3f} Hz -> sample period = {sample_period:.3f} s "
+            f"(legacy approx step = {legacy_step})"
+        )
 
-        print(f"Sampling setup: Video fps={fps:.3f}, Sampling rate={target_sampling:.3f} Hz,"
-              f" Step= {step} frames -> effective rate ={effective_sampling:.3f} Hz")
+        print(
+            f"Sampling setup: Video fps={fps:.3f}, Sampling rate={target_sampling:.3f} Hz,"
+            f" sample period={sample_period:.3f} s, legacy approx step={legacy_step} frames"
+        )
 
         frames = []
         frame_idx = 0
+        decode_stop_idx = None
+        decode_stop_pos = None
+        next_sample_time = 0.0
         THRESH = 0.5
         while True:
             ret, frame = cap.read()
             if not ret:
+                decode_stop_idx = frame_idx
+                decode_stop_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                print(f"[INFO] cv2.VideoCapture.read() returned False at frame_idx={frame_idx}, cap_pos={decode_stop_pos}")
                 break
+            if frame is None:
+                decode_stop_idx = frame_idx
+                decode_stop_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                print(f"[WARN] Decoder returned an empty frame at frame_idx={frame_idx}, cap_pos={decode_stop_pos}")
+                break
+
             frame = cv2.resize(frame, (w, h))
-            if frame_idx % step != 0:
+            time_sec = frame_idx / fps
+            if time_sec + frame_time_tolerance < next_sample_time:
                 frame_idx += 1
                 continue
 
             #* run model on current frame
-            results = model(frame, conf=conf_thresh, verbose=False)[0]
+            try:
+                results = model(frame, conf=conf_thresh, verbose=False)[0]
+            except Exception as exc:
+                print(f"[ERROR] YOLO inference failed at frame_idx={frame_idx}: {exc}")
+                raise
 
             detection_list = []
             if results.boxes:
@@ -333,8 +362,6 @@ def process_video(input_path: Path|str,
                     else:
                         continue
 
-            time_sec = frame_idx/fps
-
             #* ---- Per-frame event logic ----
             group_events = []
             if in_any_interval(time_sec, fall_intervals_sec):
@@ -353,6 +380,10 @@ def process_video(input_path: Path|str,
                             'detection_list': detection_list,}
                           )
 
+            next_sample_time += sample_period
+            while next_sample_time <= time_sec + frame_time_tolerance:
+                next_sample_time += sample_period
+
             if show:
                 cv2.imshow("head_center_debug", frame)
                 #Todo: Anna should add keypoints
@@ -360,23 +391,60 @@ def process_video(input_path: Path|str,
                 if key == 27:   #* ESC to quit
                     break
             frame_idx += 1
-
+            
         if frame_idx == 0:
             print(f"[WARN] Skipping video with no decodable frames: {vid_path} "
                   f"(unsupported codec/container or corrupted file)")
             cap.release()
             cv2.destroyAllWindows()
             continue
-
+        decoded_frame_count = frame_idx
+        decode_incomplete = (
+            meta_frame_count is not None
+            and decode_stop_idx is not None
+            and decoded_frame_count + 1 < meta_frame_count
+        )
+        incomplete_reason = None
+        marker_path = json_dir / f"{json_name if json_name else vid_path.stem}.incomplete.txt"
+        if decode_incomplete:
+            incomplete_reason = (
+                f"Decoder stopped before metadata frame count: decoded={decoded_frame_count}, "
+                f"metadata={meta_frame_count}, cap_pos={decode_stop_pos}"
+            )
+            print(f"[WARN] {incomplete_reason}. This usually means a truncated file, bad frames near the end, or incorrect container metadata.")
+        print(
+            f"Decoded frames: {decoded_frame_count}; sampled frames saved: {len(frames)}; "
+            f"metadata frame count: {meta_frame_count if meta_frame_count is not None else 'unknown'}"
+        )
+        if incomplete_reason is not None and not allow_incomplete:
+            write_incomplete_marker(
+                marker_path,
+                [
+                    f"video={vid_path}",
+                    incomplete_reason,
+                    f"sample_rate_hz={target_sampling:.6f}",
+                    "action=skipped_json_write",
+                ],
+            )
+            print(f"[WARN] Skipping JSON write for incomplete decode. Marker saved to {marker_path}")
+            cap.release()
+            if show:
+                cv2.destroyAllWindows()
+            continue
         event_intervals = {'tension': {'raw': tension_intervals, 'sec': tension_intervals_sec},
                            'fight': {'raw': fight_intervals,   'sec': fight_intervals_sec},
                            'fall': {'raw': fall_intervals,    'sec': fall_intervals_sec},
                            },
         data = {'video': str(vid_path),
                 'fps': fps,
-                'sampling rate': {'target':target_sampling, 'effective':effective_sampling},
-                'step': step,
+                'sampling rate': {'target': target_sampling,
+                                  'effective': len(frames)/max(frames[-1]['t'] - frames[0]['t'], 1.0/fps) if len(frames) > 1 else target_sampling,
+                                  'mode': 'time_hz'},
+                'step': legacy_step,
                 'detector': detector_info,
+                'decoded_frame_count': decoded_frame_count,
+                'metadata_frame_count': meta_frame_count,
+                'decode_complete': incomplete_reason is None,
                 'event_intervals':event_intervals,
                 'frames': frames,
                 }
@@ -387,7 +455,10 @@ def process_video(input_path: Path|str,
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-        print_color(f"Saved::{len(frames)} frame to {json_path}\n----------------\n'",'b')
+        if marker_path.exists():
+            marker_path.unlink()
+
+        print_color(f"Saved::{len(frames)} sampled frames to {json_path}\n----------------\n'",'b')
 
         cap.release()
         if show:
