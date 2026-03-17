@@ -1,21 +1,24 @@
-import cv2
-import json
-import numpy as np
+"""     Converting detector JSON into a sequence of box-frame images.
+    Each frame is rendered on an H×W monochrome canvas using the normalized TL/BR
+    bounding boxes in data["frames"][i]["bbs"].
+    The convertion itself done in the main function
+    json_to_box_frames
+"""
+
+import cv2, json, numpy as np
 from pathlib import Path
 from datetime import datetime
-
 #* imports from this project
 from my_local_utils import _make_unique_dir, _save_log
 
 FRAME_H, FRAME_W = 256, 256
-
 CENTER_SIZE = 0.2
-
 
 def json_to_box_frames( json_path, out_root, H:int=FRAME_H, W:int=FRAME_W, **kwargs):
     """  Convert detector JSON into a sequence of box-frame images. #176- 146
     Each frame is rendered on an H×W monochrome canvas using the
     normalized TL/BR bounding boxes in data["frames"][i]["bbs"].
+    :param H:
     :param json_path: Path to detector JSON.
     :param out_root: Root directory for the output clip folder.
     :param H, W: Output frame height and width in pixels.
@@ -31,7 +34,7 @@ def json_to_box_frames( json_path, out_root, H:int=FRAME_H, W:int=FRAME_W, **kwa
     frames = data["frames"]
     title = data.get("video", "")
 
-    # If no frames, return empty info
+    #* If no frames, return empty info
     if not frames:
         return None, {'Duration': 0.0, 'Frames': 0, 'Events': 0, 'T_evn': 0.0, 'stat': {},}
 
@@ -57,7 +60,7 @@ def json_to_box_frames( json_path, out_root, H:int=FRAME_H, W:int=FRAME_W, **kwa
     stat: dict[int, int] = {}
 
     for idx, fr in enumerate(frames, start=1):
-        # White background
+        #* White background
         img = np.full((H, W), 255, dtype=np.uint8)
         bb_ls = fr.get('bbs',[]) or fr.get('bbs_list_of_keypoints', [])
         for bb in bb_ls:
@@ -98,7 +101,6 @@ def json_to_box_frames( json_path, out_root, H:int=FRAME_H, W:int=FRAME_W, **kwa
                     cv2.circle(img, (cx, cy), radius, int(intensity), thickness=-1)
 
         frame_num = fr.get('f', idx)
-        # time_ms = int(fr.get("t", 0) * 1000)
         t = float(fr.get('t', 0.0))
         time_ms = int(t*1000)
         times_s += [t]
@@ -135,7 +137,6 @@ def json_to_box_frames( json_path, out_root, H:int=FRAME_H, W:int=FRAME_W, **kwa
     if event_lines:  #* Write event log if any
         _save_log(event_lines, clip_dir / f"{clip_name}_events.log")
 
-
     #*** crate clip_info ***
     if times_s:
         duration = max(times_s) - min(times_s)
@@ -153,15 +154,12 @@ def json_to_box_frames( json_path, out_root, H:int=FRAME_H, W:int=FRAME_W, **kwa
         prev = cur
 
     clip_info = {'Duration': max(times_s),  # float(total_time),
-                 'Frames': len(frames),
-                 'Events': events_count,
-                 'T_evn': float(t_event),
-                 'stat': stat,}
+                 'Frames': len(frames), 'Events': events_count, 'T_evn': float(t_event), 'stat': stat,}
 
     return clip_name, clip_info
 
 
-def process_json_folder_(json_root, out_root, H:int=256, W:int= 256, **kwargs):
+def process_json_folder_(json_root, out_root, H:int=FRAME_H, W:int= FRAME_W, **kwargs):
     """ Process all JSON files in a folder into box-frame clips.
     :param json_root: Folder containing detector JSON files (recursively).
     :param out_root: Root folder for all generated clips.
@@ -198,7 +196,7 @@ def process_json_folder(json_root, data_root, H: int = FRAME_H, W: int = FRAME_W
     data_root = Path(data_root)
     data_root.mkdir(parents=True, exist_ok=True)
 
-    # # Control whether to start a new clips-stat log or append to the latest one
+    # Control whether to start a new clips-stat log or append to the latest one
 
     results = []
     for json_path in sorted(json_root.rglob("*.json")):
@@ -255,4 +253,3 @@ def process_json_folder(json_root, data_root, H: int = FRAME_H, W: int = FRAME_W
 
     return results
 
-#288(0,4,4)->255(0,4,1)

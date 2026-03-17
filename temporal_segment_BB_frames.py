@@ -1,9 +1,8 @@
-import os
-import random
+""" * Temporal slicing (or segmentation of JSON BB frames  """
+import os, random
 from pathlib import Path
 
 VIOLENCE_FLAGS = {3, 4}
-
 WIN_LEN = 20
 STRIDE = 10
 MIN_FOR_EVENT = 1
@@ -12,14 +11,12 @@ MIN_FOR_EVENT = 1
 TRAIN_VAL_RATIO = 0.8
 RANDOM_SEED = 42
 
-
-#* file name
-#ToDo: use config files
+#* file name ToDo: use config files
 SEGMENTS_DIR = "data/cache"
 LABELS_FILE = "all_label.txt"
 
 def load_events_log(log_path: Path):
-    """Parse <clip>_events.log into a set of frames that contain violence."""
+    """  Parse <clip>_events.log into a set of frames that contain violence."""
     violence_frames = set()
 
     if not log_path or not log_path.is_file():
