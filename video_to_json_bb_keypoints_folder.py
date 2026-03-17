@@ -181,7 +181,7 @@ def process_video(input_path: Path|str,
                                <video_stem>.txt, <video_stem>.ann, or <video_stem>
     """
 
-    #* local helpers sub-function
+    #* local sub-function (helpers)
     def find_annotation_file(video_path):
         """  Find a sibling annotation file matching the video stem."""
         video_path = Path(video_path)
@@ -215,26 +215,33 @@ def process_video(input_path: Path|str,
                 return True
         return False
 
+    #* normalize arguments
+    input_path = Path(input_path)
+    output_path = Path(output_path) if output_path else None
+    model_path = kwargs.get('model_path', None) or DEFAULT_YOLO
+    show = kwargs.get('show', False)
     tension_intervals = tension_intervals or []
     fight_intervals = fight_intervals or []
     fall_intervals = fall_intervals or []
 
-    model_path = kwargs.get('model_path', None) or DEFAULT_YOLO
+    #* load model
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
 
-    input_path = Path(input_path)
+    #* handel and set input/output pathes
     if input_path.is_dir():
+        input_dir = input_path
         vid_list = [p for p in input_path.iterdir() if p.is_file()]
-    else:
+    elif input_path.is_file():
+        input_dir = input_path.parent
         vid_list = [input_path]
-
-    output_path = Path(output_path) if output_path else None
+    else:
+        raise ("Error, can't find input path")
 
     if output_path is None:
         json_dir = input_path if input_path.is_dir() else input_path.parent
         json_name = None
     elif output_path.suffix == '.json':
-        json_dir = output_path.parent if output_path.parent.is_dir() else input_path
+        json_dir = output_path.parent if output_path.parent.is_dir() else input_dir
         json_name = output_path.stem
     elif output_path.is_dir():
         json_dir = output_path
@@ -243,15 +250,17 @@ def process_video(input_path: Path|str,
         #ToDo: handle it
         json_dir = output_path
         json_name = None
-
     json_dir.mkdir(parents=True, exist_ok=True)
 
+    #* detection info for header
     detector_info = {'model':Path(model_path).stem, 'version':model.ckpt['version'], 'threshold':conf_thresh}
+
     print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {detector_info['threshold']}", 'b')
     print(f"Default group event: {default_group_tag}\n")
 
     ann_intervals = parse_annotation_file(ann_file) if ann_file else None
     for vid_path in vid_list:
+        #* open
         cap = cv2.VideoCapture(str(vid_path))
         if not cap.isOpened():
             print(f"[WARN] Cannot open video (probably corrupted): {vid_path}")
@@ -261,8 +270,12 @@ def process_video(input_path: Path|str,
         frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # * fallbacks for broken metadata
+        if fps <= 0:
+            fps = 25.0
         if w != 1920:
             h = int(w*1080/1920)
+
         video_duration_sec = frame_count/fps
         print(f"*** Converting {vid_path.name},{(w, h)}p {video_duration_sec} s")
         video_ann_intervals = ann_intervals
@@ -280,10 +293,9 @@ def process_video(input_path: Path|str,
         fight_intervals_sec.extend(parse_interval(s) for s in fight_intervals if s and s.strip())
         fall_intervals_sec.extend(parse_interval(s) for s in fall_intervals if s and s.strip())
 
-        if fps <= 0:
-            fps = 25.0  # fallback if metadata is broken
 
-        target_sampling = float(kwargs.get('sample_rate', DEFAULT_SAMPELING))
+        # target_sampling = float(kwargs.get('sample_rate', DEFAULT_SAMPELING))
+        target_sampling = sample_rate or  DEFAULT_SAMPELING
         if target_sampling <= 0 or target_sampling > fps  :
         #* i.e    0 <= sampling_rate_Hz <= fps
             raise ValueError(f"Invalid sampling rate: {target_sampling} Hz")
@@ -297,7 +309,7 @@ def process_video(input_path: Path|str,
 
         frames = []
         frame_idx = 0
-        THRESH = 0.5
+        # dTHRESH = 0.5
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -352,7 +364,6 @@ def process_video(input_path: Path|str,
                             'detection_list': detection_list,}
                           )
 
-            show = kwargs.get('show', False)
             if show:
                 cv2.imshow("head_center_debug", frame)
                 #Todo: Anna should add keypoints
@@ -392,6 +403,8 @@ def process_video(input_path: Path|str,
         cap.release()
         if show:
             cv2.destroyAllWindows()
+
+    return True
 
 
 #* ------  local runner (wrapper) -----------------------------
