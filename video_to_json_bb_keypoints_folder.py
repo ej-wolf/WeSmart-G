@@ -215,6 +215,9 @@ def process_video(input_path: Path|str,
                 return True
         return False
 
+    def write_incomplete_marker(marker_path: Path, lines: list[str]):
+        marker_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     #* normalize arguments
     input_path = Path(input_path)
     output_path = Path(output_path) if output_path else None
@@ -223,6 +226,7 @@ def process_video(input_path: Path|str,
     tension_intervals = tension_intervals or []
     fight_intervals = fight_intervals or []
     fall_intervals = fall_intervals or []
+    allow_incomplete = bool(kwargs.get('allow_incomplete', False))
 
     #* load model
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)

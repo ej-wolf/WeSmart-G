@@ -42,7 +42,7 @@ TEMP_KERNEL = 3
 #* Files formats
 VIDEO_LIST = "_videos.txt"
 CACHE_LIST = "_feats.npz"
-DEFAULT_TYPE = 'type_1'
+DEFAULT_TYPE = 'type_2'
 
 def split_json_ds(dir_path:str|Path, **kwargs) -> dict[str, list[Path]]:
     """ Split a directory of JSON videos into train / validation sets.
