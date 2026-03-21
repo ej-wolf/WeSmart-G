@@ -1,6 +1,7 @@
 import numpy as np
 from json_utils import load_json_data
-from my_local_utils import print_color
+from common.my_local_utils import print_color
+
 # BB_KP_TAG = 'bbs_list_of_keypoints'
 N_Keypoints = 17
 DEFAULT_VERSION = 2.0
