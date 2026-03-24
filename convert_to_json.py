@@ -24,7 +24,7 @@
 import argparse
 from pathlib import Path
 from video_to_json_bb_keypoints_folder import process_video
-from my_local_utils import print_color
+from common.my_local_utils import print_color
 
 def main():
     parser = argparse.ArgumentParser(description="Convert video to JSON data file",

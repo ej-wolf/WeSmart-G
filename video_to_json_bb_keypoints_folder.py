@@ -34,12 +34,11 @@ import cv2, json, torch
 from pathlib import Path
 from ultralytics import YOLO
 #* import from my utils
-from my_local_utils import get_unique_name, print_color
+from common.my_local_utils import get_unique_name, print_color
 
 #* Defaults and constants  -------------------------------------------------------------------
 DETECTION_THRESHOLD = 0.5
 DEFAULT_SAMPELING = 5
-# STEP = 5
 
 #* Events flags
 TAG_NO_EVENT = 0

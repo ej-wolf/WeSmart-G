@@ -53,6 +53,11 @@ if __name__ == "__main__":
                    'checkpoint_path': "work_dirs/tsm_R50_MMA_RLVS/best_acc_top1_epoch_5.pth",
                    }
 
+    import precompute_clips as pc
+    tst_cache = "data/cache/RWF_valid.npz"
+    # tst_cache = "data/j-cache/train_feats.npz"
+    inf = pc.cache_info(tst_cache, details=True, sort='duration', sample=12)
+
     # test_params = set_with_defaults('tsm_r50_bbfrm')
 
     # launch_wrapper (**test_params)

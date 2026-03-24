@@ -27,22 +27,14 @@
     >> precompute_clips.py info npz_path [-h] [--list] [--details] [--sort SORT]
                                         [--sample SAMPLE] [-rs RANDOM_SEED]
     positional arguments:
-      npz_path                          : dir containing JSONs
+      npz_path                      : dir containing JSONs
     options:
-      -h/ --help                        : Show help message and exit
-      -l/ --list                        : print video names.
-      -d/ --details                     : print per-video table.
-      -sr/--sort                        : options [duration, duration_rev]
-      -sm/--smaple                      : sample size for list/details.
-      -rs/--random-seed RANDOM_SEED     : seed for random sampling (default: 42)
-
-
-list (bool)    : print video names.
-
-
-        sort (str|None): duration, duration_rev, clips, clips_rev.
-        random_seed (int):
-
+      -h/ --help                    : Show help message and exit
+      -l/ --list                    : print video names.
+      -d/ --details                 : print per-video table.
+      -sr/--sort SORT               : (str) options [duration, duration_rev] or None
+      -sm/--sample SAMPLE           : (int/float) sample size/portion for printing
+      -rs/--random-seed             : (int) seed for random sampling (default: 42)
 """
 
 # import json
@@ -56,12 +48,13 @@ from temporal_slicing_json import slice_json_stream
 from analyze_json_motion import extract_motion_features, _temporal_conv_1d, _clip_pooling
 
 
-#* Defaults (move to config later if needed)
+#* Defaults (ToDo config later if needed)
 VAL_RATIO = 0.2
 RANDOM_SEED = 42
 POOL_MODE = 'max'
 TEMPORAL_SMOOTHING = True
 TEMP_KERNEL = 3
+MIN_ERROR = 1e-7
 
 #* Files formats
 VIDEO_LIST = "_videos.txt"
@@ -121,7 +114,7 @@ def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
 # Step A: feature precomputation
 # --------------------------------------------------
 
-def precompute_features_cache(   #* changed
+def precompute_features_cache(  #* changed
                 json_dir: str | Path,
                 list_file: str| Path,
                 out_path : str | Path,
@@ -137,7 +130,7 @@ def precompute_features_cache(   #* changed
     json_dir = Path(json_dir)
     list_file = Path(list_file)
     out_path = Path(out_path).with_suffix('.npz')
-    #  / list_file.name.replace(VIDEO_LIST, CACHE_LIST)
+    # / list_file.name.replace(VIDEO_LIST, CACHE_LIST)
 
     feats, labels, meta = [], [], []
 
@@ -147,7 +140,7 @@ def precompute_features_cache(   #* changed
     for vid in video_names:
         json_path = json_dir/vid
 
-        ## clips = slice_json_stream(json_path, allow_empty_lbl=allow_empty_lbl)
+        # clips = slice_json_stream(json_path, allow_empty_lbl=allow_empty_lbl)
         # print_color(f" file: {json_path.name} --  {json_path.is_file()}", 'b')
         json_data = load_json_data(json_path, j_type=kwargs.get('json_type', DEFAULT_TYPE))
         clips = slice_json_stream(json_data, allow_empty_lbl=allow_empty_lbl)
@@ -204,22 +197,6 @@ def inspect_feature_file(npz_path: str|Path):
         print(f'Feature min/max : {X.min():.4f} / {X.max():.4f}')
 
 
-def _sample_count(sample_val, n_total: int)->int:
-
-    if   sample_val is None:
-        return n_total
-    elif isinstance(sample_val, int):
-        n = sample_val
-    elif isinstance(sample_val, float):
-        if 0 <= sample_val <= 1:
-            n = round(sample_val*n_total)
-        elif sample_val.is_integer() and sample_val > 1:
-            n = int(sample_val)
-        else:
-            n = 0
-    if n > 0:
-        return max(0, min(n, n_total))
-    raise ValueError("sample has wrong value, Use whole number (e.g. 5)  or ratio in [0,1] (e.g. 0.3)")
 
 def cache_info(path: str|Path, **kwargs):
     """ Summarize a cached NPZ and optionally print per-video list/details.
@@ -232,24 +209,21 @@ def cache_info(path: str|Path, **kwargs):
         sort (str|None): duration, duration_rev, clips, clips_rev.
         random_seed (int): seed for random sampling.
     """
-    # def _sample_count(sample_val, n_total: int) -> int:
-    #     if sample_val is None:
-    #         return n_total
-    #     if isinstance(sample_val, bool):
-    #         raise ValueError("sample must be int/float, not bool")
-    #     if isinstance(sample_val, int):
-    #         return max(0, min(sample_val, n_total))
-    #     if isinstance(sample_val, float):
-    #         if 0 <= sample_val <= 1:
-    #             return max(0, min(int(round(sample_val * n_total)), n_total))
-    #         if sample_val > 1:
-    #             if sample_val.is_integer():
-    #                 return max(0, min(int(sample_val), n_total))
-    #             raise ValueError(
-    #                 "sample>1 with fraction is invalid. Use whole number (e.g. 5 or 5.0) "
-    #                 "or ratio in [0,1]."
-    #             )
-    #     raise ValueError("sample must be int or float")
+
+    def _sample_count(sample_val, n_total: int) -> int:
+
+        if sample_val is None:
+            return n_total
+        elif isinstance(sample_val, int):
+            n = sample_val
+        elif isinstance(sample_val, float):
+            if 0 <= sample_val <= 1:
+                n = round(sample_val * n_total)
+            elif sample_val.is_integer() and sample_val > 1:
+                n = int(sample_val)
+            else:
+                raise ValueError("sample has wrong value, Use whole number (e.g. 5)  or ratio in [0,1] (e.g. 0.3)")
+        return max(0, min(n, n_total))
 
     def _sort_names(name_list):
         sort_mode = kwargs.get('sort', None)
@@ -264,25 +238,31 @@ def cache_info(path: str|Path, **kwargs):
             reverse = (sort_mode == 'duration')  # large -> small
             if reverse:
                 return sorted(name_list,
-                              key=lambda n: (-max(0.0, per_video[n]['max_t'] - per_video[n]['min_t']), n))
+                              key=lambda n: (-max(0.0, video_info[n]['max_t'] - video_info[n]['min_t']), n))
             else:
                 return sorted(name_list,
-                              key=lambda n: (max(0.0, per_video[n]['max_t'] - per_video[n]['min_t']), n))
+                              key=lambda n: (max(0.0, video_info[n]['max_t'] - video_info[n]['min_t']), n))
 
         reverse = (sort_mode == 'clips')  # large -> small
         if reverse:
-            return sorted(name_list, key=lambda n: (-per_video[n]['n_clips'], n))
-        return sorted(name_list, key=lambda n: (per_video[n]['n_clips'], n))
+            return sorted(name_list, key=lambda n: (-video_info[n]['n_clips'], n))
+        return sorted(name_list, key=lambda n: (video_info[n]['n_clips'], n))
 
     path = Path(path)
     data = np.load(path, allow_pickle=True)
     meta = data['meta']
-    n_clips = int(len(meta))
+    n_clips = len(meta)
+
+    if n_clips == 0:
+        print_color(f"Empty cache file:  {path}")
+        return {'path': str(path), 'n_videos': 0}
 
     # Build per-video aggregates from clip-level metadata.
-    per_video = {}
+    video_info = {}
     clip_durations = []
     stride_values = []
+    valid_rows = 0
+
     for item in meta:
         if not isinstance(item, dict):
             continue
@@ -292,70 +272,73 @@ def cache_info(path: str|Path, **kwargs):
         if vid is None or t_start is None or t_end is None:
             continue
 
-        t_start, t_end = float(t_start), float(t_end)
-        dur = max(0.0, t_end - t_start)
-        clip_durations.append(dur)
+        try:
+            t_start, t_end = float(t_start), float(t_end)
+        except (TypeError, ValueError):
+            continue
 
-        rec = per_video.setdefault(str(vid),
-                                   {'min_t': t_start, 'max_t': t_end, 'n_clips': 0, 'clip_time': 0.0, 'starts': []},
-                                   )
+        if t_end < t_start:
+            continue
+
+        dur = t_end - t_start
+        clip_durations.append(dur)
+        valid_rows += 1
+
+        rec = video_info.setdefault(str(vid),
+                                   {'min_t': t_start, 'max_t': t_end, 'n_clips': 0, 'clip_time': 0.0, 'starts': []},)
         rec['min_t'] = min(rec['min_t'], t_start)
         rec['max_t'] = max(rec['max_t'], t_end)
         rec['n_clips'] += 1
         rec['clip_time'] += dur
         rec['starts'].append(t_start)
 
-    for rec in per_video.values():
+    for rec in video_info.values():
         starts = sorted(set(rec['starts']))
         if len(starts) >= 2:
             stride_values.extend([b - a for a, b in zip(starts[:-1], starts[1:]) if (b - a) > 0])
 
-    n_videos = len(per_video)
-    total_video_time = sum(max(0.0, rec['max_t'] - rec['min_t']) for rec in per_video.values())
+    n_videos = len(video_info)
+    if n_videos == 0:
+        print_color(f"[ERROR] Malformed meta data")
+        return {'path': str(path), 'n_videos': 0, 'n_clips': 0, }
+
+    total_video_time = sum(max(0.0, rec['max_t'] - rec['min_t']) for rec in video_info.values())
+    avg_video_time  = (total_video_time/n_videos)
     total_clip_time = sum(clip_durations)
-    avg_clip_time = (total_clip_time/n_clips) if n_clips > 0 else 0.0
+    # avg_clip_time = (total_clip_time/n_clips)
 
     # Infer window/stride from clip durations and clip start deltas.
-    window_msg = "N/A"
-    if clip_durations:
-        w_med = float(np.median(clip_durations))
-        w_min = float(np.min(clip_durations))
-        w_max = float(np.max(clip_durations))
-        if abs(w_max - w_min) < 1e-9:
-            window_msg = f"{w_med:.3f}s"
-        else:
-            window_msg = f"~{w_med:.3f}s (range {w_min:.3f}-{w_max:.3f}s)"
+    w_mean = np.mean(clip_durations)
+    w_std  = np.std(clip_durations)
+    if w_std < MIN_ERROR :
+        window_msg = f"{w_mean:.2f}s"
+    else:
+        window_msg = f"{w_mean:.2f}s ({w_std:.3f})"
 
-    stride_msg = "N/A"
-    if stride_values:
-        s_med = float(np.median(stride_values))
-        s_min = float(np.min(stride_values))
-        s_max = float(np.max(stride_values))
-        if abs(s_max - s_min) < 1e-9:
-            stride_msg = f"{s_med:.3f}s"
-        else:
-            stride_msg = f"~{s_med:.3f}s (range {s_min:.3f}-{s_max:.3f}s)"
+    s_mean = np.median(stride_values)
+    s_std  = np.std(stride_values)
+    if s_std < MIN_ERROR:
+        stride_msg = f"{s_mean:.2f}s"
+    else:
+        stride_msg = f"~{s_mean:.2f}s ({s_std:.2f}"
 
-    # print("==== Cache info ====")
-    # print(f"File: {path}")
-    # print(f"Number of videos: {n_videos}")
-    # print(f"Number of clips: {n_clips}")
-    # print(f"Total video time: {total_video_time:.2f} sec")
-    # print(f"Total clip time: {total_clip_time:.2f} sec")
-    # print(f"Average clip time: {avg_clip_time:.3f} sec")
-    # print(f"Window / stride settings (inferred): {window_msg} / {stride_msg}")
+    if valid_rows < n_clips:
+        print_color(f"[WARN] Malformed meta: {n_clips - valid_rows} rows skipped", 'r')
 
-    print(f"\n==== \"{path.stem}\" - Cache info ====")
+    print(f"\n==== \"{path.stem}\" - Cache info ==== new !!!")
     print(f"Full path       : {path}\n"
           f"Number of videos: {n_videos}\n"
-          f"Number of clips : {n_clips}\n"
+          f"Number of clips : {n_clips }\n"
           f"Total video time: {total_video_time:.2f} s\n"
+          f"Avg. video Time : {avg_video_time:.2f} s\n"
           f"Total clip time : {total_clip_time:.2f} s\n"
-          f"Avg. clip time  : {avg_clip_time:.2f} s\n"
-          f"Window/ stride  : {window_msg}/ {stride_msg} (inferred)")
+          # f"Avg. clip time  : {avg_clip_time:.2f} s\n"
+          f"Window/ stride  : {window_msg}/ {stride_msg} (inferred)\n"
+          f"Features number : {data['X'].shape[1] }"
+          )
 
     # Resolve sample size from int/ratio conventions.
-    names = sorted(per_video.keys())
+    names = sorted(video_info.keys())
     if kwargs.get('list', False) or kwargs.get('details', False):
         sample = kwargs.get('sample', None)
         n_sample = _sample_count(sample, n_videos)
@@ -374,18 +357,18 @@ def cache_info(path: str|Path, **kwargs):
         print(f"{'#':>3} | {'video name':40} | {'Duration (s)':^12} | {'#clips':^6} | {'Total duration(s)':>16} | {'...':>3}")
         print("-"*124)
         for i, name in enumerate(names, start=1):
-            rec = per_video[name]
+            rec = video_info[name]
             v_time = max(0.0, rec['max_t'] - rec['min_t'])
             print(f"{i:>3} | {name[:40]:40} | {v_time:^12.2f} | {rec['n_clips']:^6d} | {rec['clip_time']:15.2f} | {'':>3}")
-    print("\n")
+    print()
     return {'path': str(path),
             'n_videos': n_videos,
             'n_clips' : n_clips,
             'total_video_time': total_video_time,
+            'avg_video_time'  : avg_video_time,
             'total_clip_time': total_clip_time,
-            'avg_clip_time'  : avg_clip_time,
-            'window_inferred': window_msg,
-            'stride_inferred': stride_msg,
+            'window': w_mean, 'window_std': w_std,
+            'stride': s_mean, 'stride_std':s_std,
             'sample_size': len(names),
             }
 #165
@@ -414,7 +397,7 @@ def _run_build(args):
                                allow_empty_lbl=args.allow_empty,
                                json_type=args.json_type,
                                temp_smooth=(not args.no_temp_smooth),
-                                )
+                               )
     precompute_features_cache( jsons_dir, valid_list, cache_dir/f"{npz_name}_valid",
                                allow_empty_lbl=args.allow_empty,
                                json_type=args.json_type,
@@ -423,12 +406,10 @@ def _run_build(args):
 
 
 def _run_info(args):
-    print(args)
-    kwargs = vars(args).copy()
-    # kwrags.pop('cmd', None)
-    cache_info(args.npz_path, **kwargs)
-    # cache_info(args.npz_path, list=args.list, details=args.details, sample=args.sample,
-    #     sort=args.sort,random_seed=args.random_seed, )
+    cache_info(args.npz_path, **vars(args))
+    # print(args)
+
+    # kwargs = vars(args).copy();  # kwargs.pop('cmd', None);  # cache_info(args.npz_path, **kwargs)
 
 
 # --------------------------------------------------
@@ -440,7 +421,7 @@ def main():
     parser = argparse.ArgumentParser('precompute_clips',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter,
                                      description='Build clip-feature caches from JSON files or JSON streams',
-                                    )
+                                     )
     sub = parser.add_subparsers(dest='cmd')
 
     build_p = sub.add_parser('build', help='build train/valid cache files from JSON directory')
@@ -481,4 +462,4 @@ if __name__ == '__main__':
     pass
     main()
 
-#444(,2,)
+#444(,2,) -> 482(1,4,4)
