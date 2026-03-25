@@ -8,12 +8,17 @@ from colorama import Fore, Style
 # RED, GREEN, BLUE = Fore.RED, Fore.GREEN, Fore.BLUE
 # RESET = Style.RESET_ALL
 
+def rgb(r, g, b):
+    return f"\033[38;2;{r};{g};{b}m"
+
 def print_color(msg:str, clr=Fore.RED):
     if   clr in ['RED',' Red', 'red', 'r']      :  clr = Fore.RED
     elif clr in ['BLUE', 'Blue', 'blue', 'b']   :  clr = Fore.BLUE
     elif clr in ['YELLOW', 'yellow', 'y']       :  clr = Fore.YELLOW
     elif clr in ['BLUE', 'Blue', 'blue', 'r']   :  clr = Fore.BLUE
     elif clr in ['GREEN', 'Green', 'green', 'g']:  clr = Fore.GREEN
+    elif clr in ['ORANGE', 'orange', 'o']       :  clr = rgb(255, 165, 0)
+
     print( f"{clr}{msg}{Style.RESET_ALL}")
 
 # ----------------------------------------------------------------------------

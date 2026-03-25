@@ -14,9 +14,13 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, Subset, random_split
 
+#* Project import
+from common.my_local_utils import print_color
+from evaluation_tools import analyze_test_results, print_test_report, plot_roc_curve
+
 #* config constants ToDo: make proper config file
 DEFAULT_WORKDIR = "work_dirs/json_models"
-LOCAL_CONFIG    = "run_config.json"
+LOCAL_CONFIG    = "config.json"
 LOCAL_LOG       = "log.json"
 
 DEFAULT_BATCH_SIZE = 256
@@ -55,7 +59,8 @@ class ClipMLP(nn.Module):
         self.net = nn.Sequential(nn.Linear(in_dim, hidden_dim),
                                  nn.ReLU(inplace=True),
                                  nn.Linear(hidden_dim, 1),
-                                )
+                                 )
+
     def forward(self, x):
         return self.net(x).squeeze(1)
 
@@ -106,7 +111,7 @@ def eval_one_epoch(model, loader, criterion, device):
 
 
 def _labels_from_dataset(ds) -> np.ndarray:
-    """Return labels array for Dataset or Subset(ClipFeatureDataset)."""
+    """ Return labels array for Dataset or Subset(ClipFeatureDataset)."""
     if hasattr(ds, 'y'):
         return ds.y
     if isinstance(ds, Subset) and hasattr(ds.dataset, 'y'):
@@ -125,7 +130,8 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     train_npz = Path(train_cache)
     valid_npz = Path(valid_cache) if valid_cache is not None else None
     work_dir = Path(kwargs.get('work_dir', DEFAULT_WORKDIR))
-    run_dir = work_dir/f"train_{datetime.now().strftime('%y%m%d-%H%M')}_{kwargs.get('tag','')}"
+    #run_dir = work_dir/f"train_{datetime.now().strftime('%y%m%d-%H%M')}_{kwargs.get('tag','')}"
+    run_dir = work_dir/f"{datetime.now().strftime('%y%m%d-%H%M')}_{kwargs.get('tag','')}"
     run_dir.mkdir(parents=True, exist_ok=True)
     #* training params
     lr = kwargs.get('lr', DEFAULT_LR)
@@ -199,28 +205,25 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
 
     print(f"Training complete\n Files saved to {run_dir} ")
 
-    return model, train_log
+    return run_dir
+    # return model, train_log
 
 
-def run_testing(test_cache:str|Path, tst_model: str|Path, **kwargs):
+def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
     """ Run model inference on a cached NPZ file and save raw per-clip results as NPZ."""
     test_npz = Path(test_cache)
-    model_path = Path(tst_model)
-    # work_ dir = Path(kwargs.get('work_ dir', DEFAULT_WORKDIR))
-    # work_ dir.mkdir(parents=True, exist_ok=True)
+    model_path = Path(test_model)
 
     batch_size = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
     threshold = float(kwargs.get('threshold', 0.5))
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # device = kwargs.get('device', DEFAULT_DEVICE)
-    # if not isinstance(device, torch.device):
-    #     device = torch.device(device)
 
     #* Resolve hidden_dim strictly from run_config.json.
     cfg_path = model_path.parent/LOCAL_CONFIG
     if not cfg_path.is_file():
-        raise FileNotFoundError(f"{LOCAL_CONFIG} is missing")
+        # raise FileNotFoundError(f"{LOCAL_CONFIG} is missing")
+        print_color(f"{LOCAL_CONFIG} is missing",'o')
+        return None
     try:
         with cfg_path.open('r') as f:
             cfg = json.load(f)
@@ -228,23 +231,7 @@ def run_testing(test_cache:str|Path, tst_model: str|Path, **kwargs):
     except Exception as e:
         raise ValueError(f"Invalid hidden_dim value in run_config.json: {cfg.get('hidden_dim')}") from e
 
-    # if not cfg_path.is_file():
-    #     raise FileNotFoundError(f"run_config.json not found near model: {cfg_path}")
-    # try:
-    #     with cfg_path.open('r') as f:
-    #         cfg = json.load(f)
-    # except Exception as e:
-    #     raise ValueError(f"Failed to parse run_config.json: {cfg_path}") from e
-    #
-    # if 'hidden_dim' not in cfg:
-    #     raise KeyError(f"'hidden_dim' not found in run_config.json: {cfg_path}")
-    # try:
-    #     hidden_dim = int(cfg['hidden_dim'])
-    # except Exception as e:
-    #     raise ValueError(f"Invalid hidden_dim value in run_config.json: {cfg.get('hidden_dim')}") from e
-
     state = torch.load(model_path, map_location=device)
-
     test_ds = ClipFeatureDataset(test_npz)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
@@ -271,49 +258,85 @@ def run_testing(test_cache:str|Path, tst_model: str|Path, **kwargs):
     y_pred = y_pred.astype(np.int64)
 
     #* saving the result
-    # out_name = kwargs.get('out_name', None)
-    # if out_name is None:
-    #     out_name = f"test_result_{model_path.stem}_{test_npz.stem}.npz"
     out_name = kwargs.get('out_name', f"{model_path.stem}_{test_npz.stem}-test.npz")
     out_path = Path(kwargs.get('out_dir', model_path.parent))/str(out_name)
     out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
 
-    save_payload = {'cache_index': cache_index, 'y_true': y_true, 'y_pred': y_pred,}
+    save_payload = {'cache_index':cache_index, 'y_true':y_true, 'y_pred':y_pred, 'y_prob':y_prob}
     np.savez_compressed(out_path, **save_payload)
-    #
-    # results = {'path': str(out_path),
-    #            'num_samples': len(y_true),
-    #            'cache_index': cache_index,
-    #            'y_true': y_true, 'y_pred': y_pred,}
-    print(f"Testing complete\n Raw results saved to {out_path}")
-    # return results
+
+    print(f'Testing run complete\npredictions saved to "{out_path}" ')
+    #* return results
     return {'path': str(out_path), **save_payload}
 
-
-def run_test(test_cache: str | Path, tst_model: str | Path, **kwargs):
-    """Alias for run_testing."""
-    from  evaluation_tools import analyze_test_results, print_test_report
-    # return run_testing(test_cache, tst_model, **kwargs)
-    res = run_testing(test_cache, tst_model, **kwargs)
-    report = analyze_test_results(res, out_path=tst_model.parent)
-    print_test_report(report)
-    analyze_test_results(res['path'])
-
-
 # --------------------------------------------------
-# Example training script
+#* Training scripts and unit testing
 # --------------------------------------------------
+
+def test_test(test_cache: str | Path, test_model: str | Path, **kwargs):
+    """ Alias for run_testing."""
+    # from  evaluation_tools import analyze_test_results, print_test_report, plot_roc_curve
+    #* return run_testing(test_cache, tst_model, **kwargs)
+    res = run_testing(test_cache, test_model, **kwargs)
+    if res is not None:
+        report = analyze_test_results(res['path'], show_roc=kwargs.get('show',False))
+        print_test_report(report)
+
+
+def train_rwd_n_rlvs():
+    d = Path("data/cache/")
+    #* train on RWF data
+    output_path = run_training(d/"RWF_train.npz", tag="TMS-18f_RW", split_ratio=0.85, split_seed=21)
+    #* Test on RWF test-set
+    res = run_testing(d/'RWF_test.npz', output_path/'model.pt')
+    if res is not None:
+        report = analyze_test_results(res['path'], show_roc=True, print=True)
+    # * Test on RLVS train-set
+    res = run_testing(d/'RLVS_train.npz', output_path/'model.pt')
+    if res is not None:
+        report = analyze_test_results(res['path'], show_roc=True)
+
+    #* train on RLVS data
+    output_path = run_training(d/"RLVS_train.npz", tag="TMS-18f_RLVS", split_ratio=0.85, split_seed=21)
+    #* Test on RLVS test-set
+    res = run_testing(d/'RLVS_test.npz', output_path/'model.pt')
+    if res is not None:
+        report = analyze_test_results(res['path'], show_roc=True, print=True)
+    # * Test on RLVS train-set
+    res = run_testing(d/'RWF_train.npz', output_path/'model.pt')
+    if res is not None:
+        report = analyze_test_results(res['path'], show_roc=True)
+
+
+def train_joint():
+    from  precompute_clips import merge_cache_npz, cache_info
+    d = Path("data/cache/")
+    #* train on RWF data
+    tr_1, tst_1 = d/"RWF_train.npz",  d/"RWF_test.npz"
+    tr_2, tst_2 = d/"RLVS_train.npz", d/"RLVS_test.npz"
+    tr_j, tst_j = d/"Joint_RWFLV_train.npz", d/"Joint_RWFLV_test.npz"
+
+    print(f"all data sets exists {tr_j.is_file() and tst_1.is_file() and tr_2.is_file() and tst_2.is_file()}")
+
+    merge_cache_npz([tr_1 , tr_2 ], tr_j)
+    merge_cache_npz([tst_1, tst_2], tst_j)
+    # cache_info(tr_1)
+    # cache_info(tr_2)
+    cache_info(tr_j)
+    output_path = run_training(tr_j, tag="TMS-18f_Jn", split_ratio=0.85, split_seed=42)
+    #* Test on RWF test-set
+    res = run_testing(tst_j, output_path/'model.pt')
+    if res is not None:
+        report = analyze_test_results(res['path'], show_roc=True, print=True)
+
 
 if __name__ == '__main__':
     pass
-
     # Example:
     # model, hist = run_training('data/cache/RWF_train.npz', 'data/cache/RWF_valid.npz')
     # model, hist = run_training('data/cache/RWF_train.npz', split_ratio=0.85, split_seed=42)
-    d = Path("data/cache/")
-    # m, l = run_training("data/cache/RWF_train.npz", tag='RWF_tms_f18' )
-    tst_model = Path("work_dirs/json_models/train_260323-0314_RWF_tms_f18/model.pt")
-    run_test(d/'RWF_valid.npz', tst_model)
 
-#143 (,12,4)
-# 184(,5,3)
+    # train_rwd_n_rlvs()
+    train_joint()
+
+# 318(2,4,2)->
