@@ -57,8 +57,11 @@ TEMP_KERNEL = 3
 MIN_ERROR = 1e-7
 
 #* Files formats
+SPLIT_LISTS = {'train': "train_videos.txt",
+               'valid': "valid_videos.txt",
+               'test' : "test_videos.txt"}
 VIDEO_LIST = "_videos.txt"
-CACHE_LIST = "_feats.npz"
+# CACHE_LIST = "_feats.npz"
 DEFAULT_TYPE = 'type_2'
 
 def split_json_ds(dir_path:str|Path, **kwargs) -> dict[str, list[Path]]:
@@ -438,17 +441,22 @@ def cache_info(path: str|Path, **kwargs):
 #165
 
 def _run_build(args):
-    jsons_dir = args.jsons_dir
-    cache_dir = args.cache_dir
-    split_dir = args.split_dir or jsons_dir
+    jsons_dir:Path = args.jsons_dir
+    cache_dir:Path = args.cache_dir
+    split_dir:Path = args.split_dir or jsons_dir
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     split_dir.mkdir(parents=True, exist_ok=True)
 
-    train_list = split_dir/f'train{VIDEO_LIST}'
-    valid_list = split_dir/f'valid{VIDEO_LIST}'
+    # train_list = split_dir/f'train{VIDEO_LIST}'
+    # valid_list = split_dir/f'valid{VIDEO_LIST}'
+    train_list = split_dir/SPLIT_LISTS['train']
+    valid_list = split_dir/SPLIT_LISTS['valid']
+    test_list  = split_dir/SPLIT_LISTS['test']
+    #* ToDo: change valid to test
 
-    if train_list.exists() and valid_list.exists() and not args.new_split:
+    # if train_list.exists() and valid_list.exists() and not args.new_split:
+    if not args.new_split and train_list.exists() and (valid_list.exists() or test_list.exists()):
         print('[INFO] Using existing train/val split files')
     else:
         print('[INFO] Creating new train/val split')
@@ -462,7 +470,7 @@ def _run_build(args):
                                json_type=args.json_type,
                                temp_smooth=(not args.no_temp_smooth),
                                )
-    precompute_features_cache( jsons_dir, valid_list, cache_dir/f"{npz_name}_valid",
+    precompute_features_cache( jsons_dir, test_list, cache_dir/f"{npz_name}_test",   # f"{npz_name}_valid",
                                allow_empty_lbl=args.allow_empty,
                                json_type=args.json_type,
                                temp_smooth=(not args.no_temp_smooth),

@@ -275,6 +275,7 @@ def process_video(input_path: Path|str,
         if w != 1920:
             h = int(w*1080/1920)
 
+        img_sz = (h, w)
         video_duration_sec = frame_count/fps
         print(f"*** Converting {vid_path.name},{(w, h)}p {video_duration_sec} s")
         video_ann_intervals = ann_intervals
@@ -323,7 +324,7 @@ def process_video(input_path: Path|str,
 
             #* run model on current frame
             try:
-                results = model(frame, conf=conf_thresh, verbose=False)[0]
+                results = model(frame, conf=conf_thresh, verbose=False,  imgsz=img_sz)[0]
             except Exception as exc:
                 print(f"[ERROR] YOLO inference failed at frame_idx={frame_idx}: {exc}")
                 raise

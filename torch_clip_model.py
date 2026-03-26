@@ -1,9 +1,11 @@
-"""
-    Minimal PyTorch Dataset + classifier for cached clip-level features.
-    Assumes cached .npz files created by `precompute_clip_features` with keys:
-    - 'X'    : (N, C) float features
-    - 'y'    : (N, ) int labels {0,1}
-    - 'meta' : optional metadata (ignored here)
+""" Train and test a clip-level MLP classifier from cached NPZ features.
+    Expected cache format:
+    - `X`: float array with shape (N, C)
+    - `y`: int labels with shape (N,), values in {0, 1}
+    - `meta`: clip metadata (necessary for video-wise testing)
+    Main API:
+    - run_training(...) trains and saves model/config/log files.
+    - run_testing(...) runs inference and saves raw predictions to NPZ.
 """
 
 from pathlib import Path
@@ -64,9 +66,7 @@ class ClipMLP(nn.Module):
     def forward(self, x):
         return self.net(x).squeeze(1)
 
-# --------------------------------------------------
-# * Training / evaluation utilities
-# --------------------------------------------------
+# * Local helpers  --------------------------------------------------
 
 def train_one_epoch(model, loader, optimizer, criterion, device):
     model.train()
@@ -111,7 +111,7 @@ def eval_one_epoch(model, loader, criterion, device):
 
 
 def _labels_from_dataset(ds) -> np.ndarray:
-    """ Return labels array for Dataset or Subset(ClipFeatureDataset)."""
+    """Return label array for ClipFeatureDataset or Subset(ClipFeatureDataset)."""
     if hasattr(ds, 'y'):
         return ds.y
     if isinstance(ds, Subset) and hasattr(ds.dataset, 'y'):
@@ -119,54 +119,61 @@ def _labels_from_dataset(ds) -> np.ndarray:
         return ds.dataset.y[idx]
     raise ValueError("Unsupported dataset type for class-balance computation")
 
+# --------------------------------------------------
+# * main/ API functions
+# --------------------------------------------------
 
 def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs):
-    """ Run training on cached clip-level features and save artifacts.
-        If `valid_cache` is None, split `train_cache` into train/valid for this run only.
+    """ Train a clip classifier from cached features and save run artifacts.
+        Path to the run directory that contains `model.pt`, `config.json`, and `log.json`.
+        :param train_cache  : path to train cache NPZ.
+        :param valid_cache  : optional validation cache NPZ. If omitted, runtime split is applied.
+        :param kwargs:
+            work_dir, tag   : directory for output files and their tag, by default
+                              both work dir & tag are generated from the cache and model properties
+            lr, epochs, batch_size, hidden_dim :
+                             Training params, if passed they overwrite the defaults/config settings
+            split_ratio, split_seed : ratio and seed for runtime splitting (if relevant)
+        :return:              path for the effective work_dir
     """
 
-    #* Argument normalization:
-    #* dirs and files
+    #* Paths and runtime parameters.
     train_npz = Path(train_cache)
     valid_npz = Path(valid_cache) if valid_cache is not None else None
     work_dir = Path(kwargs.get('work_dir', DEFAULT_WORKDIR))
-    #run_dir = work_dir/f"train_{datetime.now().strftime('%y%m%d-%H%M')}_{kwargs.get('tag','')}"
     run_dir = work_dir/f"{datetime.now().strftime('%y%m%d-%H%M')}_{kwargs.get('tag','')}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    #* training params
+
     lr = kwargs.get('lr', DEFAULT_LR)
     epochs = kwargs.get('epochs', DEFAULT_EPOCHS)
     batch_size  = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
     hidden_dim  = kwargs.get('hidden_dim', DEFAULT_HIDDEN_DIM)
-    split_ratio = kwargs.get('split_ratio', DEFAULT_SPLIT_RATIO)
-    split_seed  = kwargs.get('split_seed', DEFAULT_SPLIT_SEED)
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    #* # datasets & loaders
+    # Build train/valid datasets;
     full_train_ds = ClipFeatureDataset(train_npz)
     if valid_npz is not None:
         train_ds = full_train_ds
         valid_ds = ClipFeatureDataset(valid_npz)
-        # split_used = 'external_valid_cache'
+        valid_used = str(valid_npz)
     else:
+        #* split train cache only when valid cache is not given.
+        split_ratio = kwargs.get('split_ratio', DEFAULT_SPLIT_RATIO)
+        split_seed = kwargs.get('split_seed', DEFAULT_SPLIT_SEED)
         if not (0.0 < split_ratio < 1.0): # or len(full_train_ds) < 2
             raise ValueError(f" Invalid split_ratio= {split_ratio}. Expected value in (0, 1).")
         n_total = len(full_train_ds)
-        # n_train = int(round(n_total * split_ratio))
-        # n_train = max(1, min(n_total - 1, n_train))
         n_train = int( max(1, np.floor(n_total*split_ratio)) )
         n_valid = n_total - n_train
         gen = torch.Generator().manual_seed(split_seed)
         train_ds, valid_ds = random_split(full_train_ds, [n_train, n_valid], generator=gen)
-        # split_used = 'runtime_random_split'
+        valid_used =  f"Runtime split: ratio{split_ratio}, seed{split_seed}"
 
-    # save run config (lightweight)
+    #* Save lightweight run config for later testing/evaluation.
     run_cfg = {'batch_size': batch_size, 'epochs': epochs,
                'lr': lr, 'hidden_dim' : hidden_dim,
                'train_cache': str(train_npz),
-               'valid_cache': str(valid_npz) if valid_npz is not None else f"Runtime split: ratio{split_ratio}, seed{split_seed}",
-               }
+               'valid_cache': valid_used, }
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     valid_loader = DataLoader(valid_ds, batch_size=batch_size, shuffle=False)
@@ -174,18 +181,17 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     sample_x, _ = train_ds[0]
     model = ClipMLP(int(sample_x.numel()), hidden_dim=hidden_dim).to(device)
 
-    #* handle class imbalance
+    #* Positive class weight for BCE (neg/pos) to reduce imbalance bias.
     pos_weight = None
     train_y = _labels_from_dataset(train_ds)
-    n_pos = int((train_y == 1).sum())
-    n_neg = int((train_y == 0).sum())
+    n_pos = (train_y == 1).sum()
+    n_neg = (train_y == 0).sum()
     if n_pos > 0:
         pos_weight = torch.tensor(n_neg/max(n_pos, 1), device=device)
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    #* training loop
     train_log = []
     for epoch in range(1, epochs + 1):
         train_loss  = train_one_epoch(model, train_loader, optimizer, criterion, device)
@@ -194,9 +200,9 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
         
         print(f'Epoch {epoch:03d} | train loss: {train_loss:.4f} | val loss: {val_loss:.4f}')
 
-    #* save files 
+    #* Save model and run logs.
     torch.save(model.state_dict(), run_dir/'model.pt')
-    
+
     with open(run_dir/LOCAL_LOG, 'w') as f:
         json.dump(train_log, f, indent=2)
     
@@ -205,12 +211,19 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
 
     print(f"Training complete\n Files saved to {run_dir} ")
 
-    return run_dir
-    # return model, train_log
+    return run_dir    # return model, train_log
 
 
 def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
-    """ Run model inference on a cached NPZ file and save raw per-clip results as NPZ."""
+    """     Run model inference on a cache NPZ and save predictions NPZ file.
+        NPZ file stores: `cache_index`, `y_true`, `y_pred`, `y_prob`.
+        model setting are loaded from config.json (file
+        parameters:
+        :param test_cache: path to test cache NPZ.
+        :param test_model: path to `model.pt` produced by `run_training`.
+        :param kwargs    :  batch_size, threshold, out_dir, out_name.
+        :return:    Dict with saved `path` and in-memory prediction arrays.
+    """
     test_npz = Path(test_cache)
     model_path = Path(test_model)
 
@@ -218,7 +231,7 @@ def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
     threshold = float(kwargs.get('threshold', 0.5))
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    #* Resolve hidden_dim strictly from run_config.json.
+    # Rebuild model shape from the training config saved with the checkpoint.
     cfg_path = model_path.parent/LOCAL_CONFIG
     if not cfg_path.is_file():
         # raise FileNotFoundError(f"{LOCAL_CONFIG} is missing")
@@ -257,7 +270,7 @@ def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
     y_true = y_true.astype(np.int64)
     y_pred = y_pred.astype(np.int64)
 
-    #* saving the result
+    # Save raw per-clip predictions.
     out_name = kwargs.get('out_name', f"{model_path.stem}_{test_npz.stem}-test.npz")
     out_path = Path(kwargs.get('out_dir', model_path.parent))/str(out_name)
     out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
@@ -266,7 +279,6 @@ def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
     np.savez_compressed(out_path, **save_payload)
 
     print(f'Testing run complete\npredictions saved to "{out_path}" ')
-    #* return results
     return {'path': str(out_path), **save_payload}
 
 # --------------------------------------------------
@@ -274,16 +286,16 @@ def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
 # --------------------------------------------------
 
 def test_test(test_cache: str | Path, test_model: str | Path, **kwargs):
-    """ Alias for run_testing."""
-    # from  evaluation_tools import analyze_test_results, print_test_report, plot_roc_curve
+    """ Small helper that tests the testing tools"""
     #* return run_testing(test_cache, tst_model, **kwargs)
     res = run_testing(test_cache, test_model, **kwargs)
     if res is not None:
         report = analyze_test_results(res['path'], show_roc=kwargs.get('show',False))
         print_test_report(report)
 
-
+#*
 def train_rwd_n_rlvs():
+    """ Example script: train/test on RWF and RLVS caches separately."""
     d = Path("data/cache/")
     #* train on RWF data
     output_path = run_training(d/"RWF_train.npz", tag="TMS-18f_RW", split_ratio=0.85, split_seed=21)
@@ -291,7 +303,7 @@ def train_rwd_n_rlvs():
     res = run_testing(d/'RWF_test.npz', output_path/'model.pt')
     if res is not None:
         report = analyze_test_results(res['path'], show_roc=True, print=True)
-    # * Test on RLVS train-set
+    #* Test on RLVS train-set
     res = run_testing(d/'RLVS_train.npz', output_path/'model.pt')
     if res is not None:
         report = analyze_test_results(res['path'], show_roc=True)
@@ -309,6 +321,7 @@ def train_rwd_n_rlvs():
 
 
 def train_joint():
+    """Example script: merge RWF+RLVS caches, then train/test a joint model."""
     from  precompute_clips import merge_cache_npz, cache_info
     d = Path("data/cache/")
     #* train on RWF data
@@ -339,4 +352,4 @@ if __name__ == '__main__':
     # train_rwd_n_rlvs()
     train_joint()
 
-# 318(2,4,2)->
+# 318(2,4,2)-> 300(2,,)

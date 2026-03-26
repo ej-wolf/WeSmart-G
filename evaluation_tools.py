@@ -5,14 +5,12 @@ import matplotlib.pyplot as plt
 
 DEFAULT_ROC_RES = 100
 
+# -----------------------------------------------------------------------
 #* Local helpers
-# --------------------------------------------------
+# -----------------------------------------------------------------------
 
 def _binary_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """ Compute  binary-confusion matrix
-        :param y_true : the grand truth
-        :param y_pred : model prediction
-    """
+    """ Compute binary classification metrics from true/predicted labels."""
     tn = int(np.sum((y_pred == 0) & (y_true == 0)))
     fp = int(np.sum((y_pred == 1) & (y_true == 0)))
     fn = int(np.sum((y_pred == 0) & (y_true == 1)))
@@ -31,8 +29,9 @@ def _binary_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
             'FPR': fp/(fp + tn) if (fp + tn) > 0 else 0.0,
             'confusion_matrix': [[tn, fp], [fn, tp]],}
 
-
 def _scalar_or_none(arr):
+    """ Convert scalar-like numpy values to Python scalars;
+        other values remain unchanged."""
     if arr is None:
         return None
     if isinstance(arr, np.ndarray):
@@ -42,9 +41,8 @@ def _scalar_or_none(arr):
             return arr.reshape(()).item()
     return arr
 
-
 def _load_raw_results_npz(npz_path:str|Path) -> dict:
-
+    """Load a raw test-results NPZ file into a normalized dictionary."""
     npz_path = Path(npz_path)
     data = np.load(npz_path, allow_pickle=True)
     raw = {'source_path': str(npz_path),
@@ -56,6 +54,7 @@ def _load_raw_results_npz(npz_path:str|Path) -> dict:
            'y_true': data['y_true'].astype(np.int64),
            'y_pred': data['y_pred'].astype(np.int64),
            'y_prob': data['y_prob'].astype(np.float32) if 'y_prob' in data.files else None,}
+
     if 'meta_video' in data.files:
         raw['meta_video'] = data['meta_video']
     if 'meta_t_start' in data.files:
@@ -64,9 +63,8 @@ def _load_raw_results_npz(npz_path:str|Path) -> dict:
         raw['meta_t_end'] = data['meta_t_end']
     return raw
 
-
 def _validate_raw_results(raw: dict) -> tuple[np.ndarray, np.ndarray]:
-    """ Validate raw results payload and return y_true/y_pred as int64 arrays."""
+    """ Validate raw payload and return y_true/y_pred as int64 1D arrays."""
     if not isinstance(raw, dict):
         raise TypeError("raw results must be a dict")
 
@@ -84,9 +82,20 @@ def _validate_raw_results(raw: dict) -> tuple[np.ndarray, np.ndarray]:
 
     return y_true, y_pred
 
+# -----------------------------------------------------------------------
+#* Main and API functions
+# -----------------------------------------------------------------------
 
-def analyze_test_results(test_results:str|Path|dict, **kwargs):
-    """Analyze raw test NPZ output created by run_testing and save summary metrics."""
+def analyze_test_results(test_results:Path|str|dict, **kwargs):
+    """ Build an evaluation summary from raw test results and dumps it into JSON.
+        :param test_results: Accepts either Path/str to raw test-results NPZ,
+                             or in-memory raw-results dict.
+        Optional parameters in kwargs:
+        out_path :  (Path/str) for the results JSON file, if not provided, use input path.
+                    or infer path from the results dict
+        show_roc:  If True draws ROC image
+        print   :  if True print results to consol
+    """
 
     if isinstance(test_results, (str, Path)):
         src_path = Path(test_results)
@@ -106,6 +115,7 @@ def analyze_test_results(test_results:str|Path|dict, **kwargs):
                     # 'raw_results_path': str(src_path) if src_path is not None else raw.get('path', None),})
                     'raw_results_path': str(src_path) or  raw.get('path', None),})
 
+    # Prefer probability scores when available; otherwise use hard predictions.
     y_prob = raw.get('y_prob', None)
     if y_prob is not None:
         scores = np.asarray(y_prob, dtype=np.float64)
@@ -116,13 +126,13 @@ def analyze_test_results(test_results:str|Path|dict, **kwargs):
 
     roc = None
     try:
-        roc = _roc_from_scores(y_true, scores, max_resolution=kwargs.get('max_resolution', 100))
+        roc = roc_from_scores(y_true, scores, max_resolution=kwargs.get('max_resolution', 100))
         summary.update({'roc_auc': roc['auc'], 'roc_score_type': score_name,})
     except Exception as e:
         summary.update({'roc_auc': None, 'roc_score_type': score_name, 'roc_error': str(e),})
 
     tst_name = src_path.stem if src_path is not None else ''
-    # out_path = kwargs.get('out_path', None)
+    # out_path can be either target directory or full target JSON path.
     out_name = kwargs.get('output_name', f"{tst_name}_summary.json")
     src_dir = src_path.parent if src_path else None
     out_path = kwargs.get('out_path', None) or src_dir
@@ -139,6 +149,7 @@ def analyze_test_results(test_results:str|Path|dict, **kwargs):
         print("[INFO] Test analysis complete\n Summary file wasn't saved; (please provide out_path)")
 
     if roc is not None:
+        # Keep ROC outputs next to the summary output.
         roc_path = out_path.with_stem(tst_name)
         plot_roc_curve(roc, save_to=out_path, show=bool(kwargs.get('show_roc', False)),
                        title=kwargs.get('roc_title', f"ROC Curve for {tst_name} ({score_name})"),)
@@ -154,8 +165,13 @@ def analyze_test_results(test_results:str|Path|dict, **kwargs):
     return summary
 
 
-def _roc_from_scores(y_true: np.ndarray, scores: np.ndarray, max_resolution=DEFAULT_ROC_RES):
-    """Compute ROC coordinates/AUC and optionally smooth/downsample the curve."""
+def roc_from_scores(y_true: np.ndarray, scores: np.ndarray, max_resolution=DEFAULT_ROC_RES):
+    """ Compute ROC arrays and AUC from binary labels and scores.
+    :param y_true:  Grand truth labels
+    :param scores:  Predictions, in form of binary labels of probabilities
+    :param int max_resolution: Max ROC points. If None, 0, or False -> no limiting
+    :return: dict with 'fpr', 'tpr' and 'thresholds' array and calculated AUC
+    """
     y_true = np.asarray(y_true, dtype=np.int64)
     scores = np.asarray(scores, dtype=np.float64)
 
@@ -220,11 +236,16 @@ def _roc_from_scores(y_true: np.ndarray, scores: np.ndarray, max_resolution=DEFA
     return {'fpr': fpr, 'tpr': tpr, 'thresholds': thresholds, 'auc': auc}
 
 
-#* outputs, handel print and ploting
+#* outputs, handel print and plotting
 # --------------------------------------------------
 
 def print_test_report(results, **kwargs):
-    """Print aligned test summary from dict or from summary JSON path."""
+    """ Print a compact aligned report of testing summary.
+        :param results:  dict or JSON path for testing summary
+        Optional kwargs:
+        - precision: float print precision
+        - label_width: left column width
+    """
     def _fmt(v):
         if isinstance(v, float):
             return f"{v:.{precision}f}"
@@ -239,11 +260,11 @@ def print_test_report(results, **kwargs):
     else:
         raise TypeError("results must be dict or path to summary json")
 
-    precision = int(kwargs.get('precision', 4))
-    label_w = int(kwargs.get('label_width', 20))
+    precision = kwargs.get('precision', 4)
+    label_w = kwargs.get('label_width', 20)
 
-    cm = summary.get('confusion_matrix', None)
-    support = summary.get('support', None)
+    cm:list|None = summary.get('confusion_matrix', None)
+    support:list = summary.get('support', None)
     support_str = f"{support[0]}/ {support[1]}" if support is not None else 'N/A'
 
     rows = [("Results file", Path(summary.get('raw_results_path', '')).name ),
@@ -255,7 +276,7 @@ def print_test_report(results, **kwargs):
             ("AUC", summary.get('roc_auc', None))
             # ("model_path", summary.get('model_path', None)),
             # ("test_cache", summary.get('test_cache', None)),
-             ]
+            ]
 
     print("\n==== Test Summary ====")
     for k, v in rows:
@@ -276,7 +297,12 @@ def print_test_report(results, **kwargs):
 
 
 def plot_roc_curve(roc: dict, **kwargs):
-    """ Draw ROC curve from a ROC dict. Optional save via `save_to`."""
+    """ Render ROC plot from `roc_from_scores` output.
+    Expects dict with keys: `fpr`, `tpr`, `thresholds`, `auc`.
+    If `save_to` is provided, saves both PNG and CSV (`fpr;tpr;thresholds`) with same stem.
+    :param roc:         Data for the plotting (Expects keys: `fpr`, `tpr`, `thresholds`, `auc`)
+    :param kwargs:
+    """
 
     fpr = np.asarray(roc['fpr'], dtype=np.float64)
     tpr = np.asarray(roc['tpr'], dtype=np.float64)
