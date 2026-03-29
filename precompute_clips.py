@@ -21,8 +21,11 @@
       -rs/--random-seed RANDOM_SEED : set the random seed (42)
       -ns/--new-split               : Force New split (default: False)
       -r/--valid-ratio VALID_RATIO  : Validation split ratio (default: 0.2)
+      -p/--pure-motion              : Use only motion features, drop the static overlap block
+      -l/--legacy                   : Use only the original 18 motion features
+      --no-temp-smooth              : Disable temporal smoothing
 
-    *** `info`:  Inspect an existing cache NPZ and print dataset/video statistics.
+    ***  info - Inspect an existing cache NPZ and print dataset/video statistics.
     usage:
     >> precompute_clips.py info npz_path [-h] [--list] [--details] [--sort SORT]
                                         [--sample SAMPLE] [-rs RANDOM_SEED]
@@ -35,9 +38,11 @@
       -sr/--sort SORT               : (str) options [duration, duration_rev] or None
       -sm/--sample SAMPLE           : (int/float) sample size/portion for printing
       -rs/--random-seed             : (int) seed for random sampling (default: 42)
+    ***  merge - merges multiple cache npz files into one
+       out_path                     : Output merged npz path
+       npz_paths                    : Cache npz files for merging
 """
 
-# import json
 import random, argparse, sys, numpy as np
 from pathlib import Path
 
@@ -117,12 +122,11 @@ def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
 # Step A: feature precomputation
 # --------------------------------------------------
 
-def precompute_features_cache(  #* changed
-                json_dir: str | Path,
-                list_file: str| Path,
-                out_path : str | Path,
-                allow_empty_lbl: bool = False,
-                **kwargs):
+def precompute_features_cache(json_dir :str|Path,
+                              list_file:str|Path,
+                              out_path :str|Path,
+                              allow_empty_lbl:bool=False,
+                              **kwargs):
     """ Precompute clip-level motion features for a dataset split.
     Parameters
         json_dir : directory with JSON files
@@ -133,7 +137,6 @@ def precompute_features_cache(  #* changed
     json_dir = Path(json_dir)
     list_file = Path(list_file)
     out_path = Path(out_path).with_suffix('.npz')
-    # / list_file.name.replace(VIDEO_LIST, CACHE_LIST)
 
     feats, labels, meta = [], [], []
 
@@ -142,7 +145,6 @@ def precompute_features_cache(  #* changed
 
     for vid in video_names:
         json_path = json_dir/vid
-
         # clips = slice_json_stream(json_path, allow_empty_lbl=allow_empty_lbl)
         # print_color(f" file: {json_path.name} --  {json_path.is_file()}", 'b')
         json_data = load_json_data(json_path, j_type=kwargs.get('json_type', DEFAULT_TYPE))
@@ -151,7 +153,11 @@ def precompute_features_cache(  #* changed
         for clip in clips:
             if clip['label'] is None:
                 continue
-            motion_seq = extract_motion_features(clip['frames'])
+            motion_seq = extract_motion_features(
+                         clip['frames'],
+                         pure_motion=kwargs.get('pure_motion', False),
+                         legacy=kwargs.get('legacy', False),
+                         )
 
             if kwargs.get('temp_smooth', TEMPORAL_SMOOTHING):
                 motion_seq = _temporal_conv_1d(motion_seq, TEMP_KERNEL)
@@ -164,13 +170,12 @@ def precompute_features_cache(  #* changed
 
     feats = np.stack(feats) if feats else np.zeros((0,))
     labels = np.asarray(labels, dtype=np.int64)
-    print_color(feats.shape)
-
-    print()
+    #print_color(feats.shape)
     np.savez_compressed(out_path, X=feats, y=labels, meta=np.asarray(meta, dtype=object),)
 
-    print_color(f'Saved {len(labels)} clips to {out_path}', 'b')
+    print()
     inspect_feature_file(out_path)
+    print_color(f'Saved {len(labels)} clips to {out_path}', 'b')
 
 
 # --------------------------------------------------
@@ -262,7 +267,6 @@ def merge_cache_npz(npz_paths, out_path:str|Path):
     print_color(f"Merged {len(in_paths)} files -> {out_path}", 'b')
     inspect_feature_file(out_path)
     return out_path
-
 
 
 def cache_info(path: str|Path, **kwargs):
@@ -436,8 +440,7 @@ def cache_info(path: str|Path, **kwargs):
             'total_clip_time': total_clip_time,
             'window': w_mean, 'window_std': w_std,
             'stride': s_mean, 'stride_std':s_std,
-            'sample_size': len(names),
-            }
+            'sample_size': len(names), }
 #165
 
 def _run_build(args):
@@ -448,8 +451,8 @@ def _run_build(args):
     cache_dir.mkdir(parents=True, exist_ok=True)
     split_dir.mkdir(parents=True, exist_ok=True)
 
-    # train_list = split_dir/f'train{VIDEO_LIST}'
-    # valid_list = split_dir/f'valid{VIDEO_LIST}'
+    # train_list = split_dir/f"train{VIDEO_LIST}"
+    # valid_list = split_dir/f"valid{VIDEO_LIST}"
     train_list = split_dir/SPLIT_LISTS['train']
     valid_list = split_dir/SPLIT_LISTS['valid']
     test_list  = split_dir/SPLIT_LISTS['test']
@@ -469,18 +472,21 @@ def _run_build(args):
                                allow_empty_lbl=args.allow_empty,
                                json_type=args.json_type,
                                temp_smooth=(not args.no_temp_smooth),
+                               pure_motion=args.pure_motion,
+                               legacy=args.legacy,
                                )
     precompute_features_cache( jsons_dir, test_list, cache_dir/f"{npz_name}_test",   # f"{npz_name}_valid",
                                allow_empty_lbl=args.allow_empty,
                                json_type=args.json_type,
                                temp_smooth=(not args.no_temp_smooth),
+                               pure_motion=args.pure_motion,
+                               legacy=args.legacy,
                                )
 
 
 def _run_info(args):
     cache_info(args.npz_path, **vars(args))
     # print(args)
-
     # kwargs = vars(args).copy();  # kwargs.pop('cmd', None);  # cache_info(args.npz_path, **kwargs)
 
 
@@ -492,8 +498,7 @@ def _run_merge(args):
 # * CLI entry point
 # --------------------------------------------------
 def main():
-
-    """CLI entry point."""
+    """ CLI entry point."""
     parser = argparse.ArgumentParser('precompute_clips',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter,
                                      description='Build clip-feature caches from JSON files or JSON streams',
@@ -501,15 +506,17 @@ def main():
     sub = parser.add_subparsers(dest='cmd')
 
     build_p = sub.add_parser('build', help='build train/valid cache files from JSON directory')
-    build_p.add_argument('jsons_dir', type=Path, help="dir containing JSONs")
+    build_p.add_argument('jsons_dir', type=Path, help="dataset path/ dir containing JSONs")
     build_p.add_argument('cache_dir', type=Path, help="path for the cached NPZ feature files")
-    build_p.add_argument('-s', '--split-dir', type=Path, default=None, help="path for train_videos.txt/valid_videos.txt")
     build_p.add_argument('-cn', '--cache-name', type=Path, default=None, help="base name for output npz files")
-    build_p.add_argument('-e', '--allow-empty', action='store_true', help="allow empty (None) labels")
-    build_p.add_argument('-rs', '--random-seed', type=int, default=RANDOM_SEED)
+    build_p.add_argument('-s',  '--split-dir' , type=Path, default=None, help="path for train_videos.txt/valid_videos.txt")
     build_p.add_argument('-ns', '--new-split', action='store_true', help='force new train/valid split')
-    build_p.add_argument('-r', '--valid-ratio', type=float, default=VAL_RATIO, help='validation split ratio')
+    build_p.add_argument('-r',  '--valid-ratio', type=float, default=VAL_RATIO, help='validation split ratio')
+    build_p.add_argument('-rs', '--random-seed', type=int, default=RANDOM_SEED)
+    build_p.add_argument('-e',  '--allow-empty', action='store_true', help="allow empty (None) labels")
     build_p.add_argument('-jt', '--json-type', default=DEFAULT_TYPE, choices=['type_1', 'type_2', '1', '2'], help='input JSON format for loader')
+    build_p.add_argument('-p',  '--pure-motion', action='store_true', help='use only motion features, without the static overlap block')
+    build_p.add_argument('-l',  '--legacy',  action='store_true', help='use only the original 18 motion features')
     build_p.add_argument('--no-temp-smooth', action='store_true', help='disable temporal smoothing')
 
     info_p = sub.add_parser('info', help='print cache statistics from npz file')
@@ -524,11 +531,10 @@ def main():
     merge_p.add_argument('out_path', type=Path, help='output merged npz path')
     merge_p.add_argument('npz_paths', nargs='+', type=Path, help='input cache npz files to merge')
 
-    # Backward compatibility: if user runs old build-style command without subcommand,
-    # route it to `build`.
+    #* if subcommand is missing, route it to `build' for Backward compatibility
     known_cmds = {'build', 'info', 'merge'}
     if len(sys.argv) > 1 and not sys.argv[1].startswith('-') and sys.argv[1] not in known_cmds:
-        sys.argv.insert(1, 'build')
+        sys.argv.insert(1, 'build')  #* set default
 
     args = parser.parse_args()
     if args.cmd == 'build':
@@ -544,4 +550,6 @@ if __name__ == '__main__':
     pass
     main()
 
-#444(,2,) -> 482(1,4,4)
+
+#444(,2,) -> 482(1,4,4)-
+#555(1,1,4)
