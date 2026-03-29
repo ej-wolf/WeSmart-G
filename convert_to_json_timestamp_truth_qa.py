@@ -1,4 +1,4 @@
-""" CLI interface for video_to_json_bb_keypoints_folder
+""" CLI interface for the timestamp-truth video_to_json converter with QA manifest
     Converts one or more videos into structured JSON dict.
     YOLO detector used for people detection and extracting
     bound-boxes and key-points at frame level.
@@ -25,7 +25,7 @@
 """
 import argparse
 from pathlib import Path
-from video_to_json_bb_keypoints_folder import process_video
+from video_to_json_bb_keypoints_folder_timestamp_truth_qa import process_video
 from my_local_utils import print_color
 
 def main():
@@ -42,9 +42,7 @@ def main():
     parser.add_argument( '-f', '--fight', action="append", help="Fight interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
     parser.add_argument( '-fa','--fall', action="append", help="Fall interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
     parser.add_argument('--show', action='store_true', help='Show video during processing')
-    parser.add_argument('--allow-incomplete', action='store_true',
-                        help='Write JSON even if decoder stops before the metadata frame count')
-    parser.add_argument('--time-source', choices=('fps', 'ffprobe'), default='fps',
+    parser.add_argument('--time-source', choices=('fps', 'ffprobe'), default='ffprobe',
                         help="How to derive frame time: metadata fps or ffprobe per-frame timestamps")
     parser.add_argument('--only-with-txt-ann', action='store_true',
                         help='When VIDEO is a directory and --ann-file is not set, process only videos that have a sibling <stem>.txt file')
@@ -64,7 +62,6 @@ def main():
                           fall_intervals=args.fall,
                           model_path=args.model,
                           show=args.show,
-                          allow_incomplete=args.allow_incomplete,
                           time_source=args.time_source,
                           only_with_txt_ann=args.only_with_txt_ann,
                           name_from_video_path=args.name_from_video_path)

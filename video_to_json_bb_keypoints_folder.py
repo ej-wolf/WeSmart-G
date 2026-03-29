@@ -26,7 +26,7 @@
              `      ...
 """
 
-import cv2, json, torch
+import cv2, json, re, shutil, statistics, subprocess, torch
 from pathlib import Path
 from ultralytics import YOLO
 #* import from my utils
@@ -52,6 +52,101 @@ TAG_FIGHT    = 4
 MODELS_DIR = 'models/'
 DEFAULT_YOLO = MODELS_DIR + "yolo26x-pose.pt"
 #* "yolo26x-pose.pt" / "yolo11x-pose.pt" / "yolov8s.pt"
+VIDEO_SUFFIXES = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v', '.mpg', '.mpeg', '.wmv', '.mts', '.m2ts'}
+
+
+def parse_rational(value):
+    """Convert ffprobe rational strings like '30000/1001' to float."""
+    if not value or value in {"0/0", "N/A"}:
+        return None
+    try:
+        num, den = value.split("/", 1)
+        den = float(den)
+        if den == 0:
+            return None
+        return float(num) / den
+    except (TypeError, ValueError):
+        return None
+
+
+def probe_video_timing_ffprobe(video_path: Path):
+    """Read stream timing metadata and per-frame timestamps with ffprobe."""
+    ffprobe_path = shutil.which("ffprobe")
+    if ffprobe_path is None:
+        return None
+
+    stream_cmd = [
+        ffprobe_path,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=avg_frame_rate,r_frame_rate,time_base,nb_frames,duration",
+        "-of", "json",
+        str(video_path),
+    ]
+    try:
+        stream_proc = subprocess.run(stream_cmd, check=True, capture_output=True, text=True)
+        stream_payload = json.loads(stream_proc.stdout or "{}")
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        print(f"[WARN] ffprobe stream metadata failed for {video_path}: {exc}")
+        return None
+
+    frame_cmd = [
+        ffprobe_path,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "frame=best_effort_timestamp_time",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+
+    frame_times = []
+    try:
+        with subprocess.Popen(frame_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+            assert proc.stdout is not None
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    frame_times.append(float(line))
+                except ValueError:
+                    continue
+            stderr = proc.stderr.read() if proc.stderr is not None else ""
+            return_code = proc.wait()
+        if return_code != 0:
+            print(f"[WARN] ffprobe frame timestamps failed for {video_path}: {stderr.strip()}")
+            return None
+    except OSError as exc:
+        print(f"[WARN] Could not launch ffprobe for {video_path}: {exc}")
+        return None
+
+    stream_info = (stream_payload.get("streams") or [{}])[0]
+    avg_frame_rate = parse_rational(stream_info.get("avg_frame_rate"))
+    nominal_frame_rate = parse_rational(stream_info.get("r_frame_rate"))
+    deltas = [curr - prev for prev, curr in zip(frame_times, frame_times[1:]) if curr >= prev]
+    median_delta = statistics.median(deltas) if deltas else None
+    jitter_tolerance = max(0.002, 0.10 * median_delta) if median_delta else None
+    variable_timing = bool(
+        median_delta
+        and jitter_tolerance
+        and any(abs(delta - median_delta) > jitter_tolerance for delta in deltas)
+    )
+    return {
+        "frame_times": frame_times,
+        "frame_timestamp_count": len(frame_times),
+        "avg_frame_rate": avg_frame_rate,
+        "nominal_frame_rate": nominal_frame_rate,
+        "stream_time_base": stream_info.get("time_base"),
+        "stream_duration_sec": float(stream_info["duration"]) if stream_info.get("duration") not in (None, "N/A") else None,
+        "stream_nb_frames": int(stream_info["nb_frames"]) if stream_info.get("nb_frames", "").isdigit() else None,
+        "median_frame_delta": median_delta,
+        "variable_frame_timing": variable_timing,
+    }
+
+
+def is_video_file(path: Path | str) -> bool:
+    """Return True when the path looks like a supported video file."""
+    return Path(path).suffix.lower() in VIDEO_SUFFIXES
 
 def parse_sec_str(t):
     """ Convert 'HH:MM:SS' or 'MM:SS' or 'SS' to seconds"""
@@ -179,6 +274,9 @@ def process_video(input_path: Path|str,
                                defaults < ann_file intervals < explicit *_intervals arguments
                                If ann_file is None, the code will look next to each video for:
                                <video_stem>.txt, <video_stem>.ann, or <video_stem>
+    :param kwargs['time_source']:
+                               'fps'     → derive time from frame_idx / fps metadata
+                               'ffprobe' → derive time from real per-frame timestamps
     """
 
     #* local helpers sub-function
@@ -192,6 +290,38 @@ def process_video(input_path: Path|str,
             if candidate.is_file():
                 return candidate
         return None
+
+    def find_txt_annotation_file(video_path):
+        """Find a sibling .txt annotation file matching the video stem."""
+        candidate = Path(video_path).with_suffix(".txt")
+        return candidate if candidate.is_file() else None
+
+    def sanitize_name_part(part):
+        sanitized = re.sub(r'[^A-Za-z0-9._-]+', '_', str(part).strip())
+        return sanitized.strip('_') or 'unnamed'
+
+    def build_output_stem(video_path):
+        video_path = Path(video_path)
+        if json_name is not None:
+            return json_name
+        if not name_from_video_path:
+            return sanitize_name_part(video_path.stem)
+
+        stem_path = video_path.with_suffix('')
+        parts = list(stem_path.parts)
+        anchor_idx = None
+        for idx, part in enumerate(parts):
+            if part.lower() in {'video', 'videos'}:
+                anchor_idx = idx
+        if anchor_idx is not None and anchor_idx + 1 < len(parts):
+            raw_parts = parts[anchor_idx + 1:]
+        elif stem_path.parent.name:
+            raw_parts = [stem_path.parent.name, stem_path.name]
+        else:
+            raw_parts = [stem_path.name]
+
+        clean_parts = [sanitize_name_part(part) for part in raw_parts]
+        return '__'.join(part for part in clean_parts if part) or sanitize_name_part(video_path.stem)
 
     def as_event_list(tags):
         if tags is None:
@@ -222,6 +352,11 @@ def process_video(input_path: Path|str,
     fight_intervals = fight_intervals or []
     fall_intervals = fall_intervals or []
     allow_incomplete = bool(kwargs.get('allow_incomplete', False))
+    requested_time_source = str(kwargs.get('time_source', 'fps')).lower()
+    only_with_txt_ann = bool(kwargs.get('only_with_txt_ann', False))
+    name_from_video_path = bool(kwargs.get('name_from_video_path', False))
+    if requested_time_source not in {'fps', 'ffprobe'}:
+        raise ValueError(f"Invalid time_source: {requested_time_source}")
 
     model_path = kwargs.get('model_path', None) or DEFAULT_YOLO
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
@@ -229,7 +364,19 @@ def process_video(input_path: Path|str,
     
     input_path = Path(input_path)
     if input_path.is_dir():
-        vid_list = [p for p in input_path.iterdir() if p.is_file()]
+        all_files = [p for p in input_path.iterdir() if p.is_file()]
+        vid_list = [p for p in all_files if is_video_file(p)]
+        ignored_non_video_count = len(all_files) - len(vid_list)
+        if ignored_non_video_count:
+            print(f"[INFO] Ignoring {ignored_non_video_count} non-video files in {input_path}")
+        if only_with_txt_ann and ann_file is None:
+            filtered_vid_list = []
+            for vid_path in vid_list:
+                if find_txt_annotation_file(vid_path) is not None:
+                    filtered_vid_list.append(vid_path)
+                else:
+                    print(f"[INFO] Skipping {vid_path.name}: no sibling .txt annotation file")
+            vid_list = filtered_vid_list
     else:
         vid_list = [input_path]
 
@@ -239,7 +386,7 @@ def process_video(input_path: Path|str,
         json_dir = input_path if input_path.is_dir() else input_path.parent
         json_name = None
     elif output_path.suffix == '.json':
-        json_dir = output_path.parent if output_path.parent.is_dir() else input_path
+        json_dir = output_path.parent
         json_name = output_path.stem
     elif output_path.is_dir():
         json_dir = output_path
@@ -254,9 +401,12 @@ def process_video(input_path: Path|str,
     detector_info = {'model':Path(model_path).stem, 'version':model.ckpt['version'], 'threshold':conf_thresh}
     print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {detector_info['threshold']}", 'b')
     print(f"Default group event: {default_group_tag}\n")
+    if name_from_video_path:
+        print("[INFO] Output naming mode: path-based names after the last 'video'/'videos' folder")
 
     ann_intervals = parse_annotation_file(ann_file) if ann_file else None
     for vid_path in vid_list:
+        output_stem = build_output_stem(vid_path)
         cap = cv2.VideoCapture(str(vid_path))
         if not cap.isOpened():
             print(f"[WARN] Cannot open video (probably corrupted): {vid_path}")
@@ -273,11 +423,33 @@ def process_video(input_path: Path|str,
             h = int(w*1080/1920)
         if fps <= 0:
             fps = 25.0  # fallback if metadata is broken
-        video_duration_sec = frame_count/fps
+        timing_info = {'requested_source': requested_time_source,
+                       'source': 'fps',
+                       'opencv_fps': fps}
+        frame_times = None
+        if requested_time_source == 'ffprobe':
+            ffprobe_timing = probe_video_timing_ffprobe(vid_path)
+            if ffprobe_timing is None or not ffprobe_timing['frame_times']:
+                print(f"[WARN] Falling back to fps-based timing for {vid_path.name}")
+            else:
+                frame_times = ffprobe_timing['frame_times']
+                timing_info.update({k: v for k, v in ffprobe_timing.items() if k != 'frame_times'})
+                timing_info['source'] = 'ffprobe'
+        reference_duration = frame_count / fps if frame_count > 0 else 0.0
+        if frame_times:
+            reference_duration = max(reference_duration, frame_times[-1])
+        video_duration_sec = reference_duration
         print(f"*** Converting {vid_path.name},{(w, h)}p {video_duration_sec} s")
+        print(
+            f"Timing source: {timing_info['source']}; "
+            f"opencv fps={fps:.3f}; "
+            f"ffprobe avg fps={timing_info.get('avg_frame_rate')}"
+        )
+        if timing_info.get('variable_frame_timing'):
+            print(f"[WARN] {vid_path.name} has variable frame timing. Use time_source='ffprobe' for accurate timestamps.")
         video_ann_intervals = ann_intervals
         if video_ann_intervals is None:
-            auto_ann_file = find_annotation_file(vid_path)
+            auto_ann_file = find_txt_annotation_file(vid_path) if only_with_txt_ann else find_annotation_file(vid_path)
             if auto_ann_file is not None:
                 print(f"Using annotation file: {auto_ann_file}")
                 video_ann_intervals = parse_annotation_file(auto_ann_file)
@@ -297,7 +469,8 @@ def process_video(input_path: Path|str,
 
         sample_period = 1.0 / target_sampling
         legacy_step = max(1, int(round(fps/target_sampling)))
-        frame_time_tolerance = 0.5 / fps
+        frame_interval_sec = timing_info.get('median_frame_delta') or (1.0 / fps)
+        frame_time_tolerance = 0.5 * frame_interval_sec
         print_color(
             f"target sampling = {target_sampling:.3f} Hz -> sample period = {sample_period:.3f} s "
             f"(legacy approx step = {legacy_step})"
@@ -313,6 +486,7 @@ def process_video(input_path: Path|str,
         decode_stop_idx = None
         decode_stop_pos = None
         next_sample_time = 0.0
+        ffprobe_short_warning_shown = False
         THRESH = 0.5
         while True:
             ret, frame = cap.read()
@@ -328,7 +502,16 @@ def process_video(input_path: Path|str,
                 break
 
             frame = cv2.resize(frame, (w, h))
-            time_sec = frame_idx / fps
+            if frame_times is not None and frame_idx < len(frame_times):
+                time_sec = frame_times[frame_idx]
+            else:
+                if frame_times is not None and not ffprobe_short_warning_shown:
+                    print(
+                        f"[WARN] ffprobe timestamps ended at frame {len(frame_times)} for {vid_path.name}; "
+                        f"falling back to fps-based timing from frame {frame_idx}"
+                    )
+                    ffprobe_short_warning_shown = True
+                time_sec = frame_idx / fps
             if time_sec + frame_time_tolerance < next_sample_time:
                 frame_idx += 1
                 continue
@@ -405,7 +588,7 @@ def process_video(input_path: Path|str,
             and decoded_frame_count + 1 < meta_frame_count
         )
         incomplete_reason = None
-        marker_path = json_dir / f"{json_name if json_name else vid_path.stem}.incomplete.txt"
+        marker_path = json_dir / f"{output_stem}.incomplete.txt"
         if decode_incomplete:
             incomplete_reason = (
                 f"Decoder stopped before metadata frame count: decoded={decoded_frame_count}, "
@@ -437,6 +620,7 @@ def process_video(input_path: Path|str,
                            },
         data = {'video': str(vid_path),
                 'fps': fps,
+                'timing': timing_info,
                 'sampling rate': {'target': target_sampling,
                                   'effective': len(frames)/max(frames[-1]['t'] - frames[0]['t'], 1.0/fps) if len(frames) > 1 else target_sampling,
                                   'mode': 'time_hz'},
@@ -450,7 +634,7 @@ def process_video(input_path: Path|str,
                 }
 
         #Todo: resolve case when video_path is dir while output_path is a file name
-        json_path = get_unique_name(json_dir/f"{json_name if json_name else vid_path.stem}.json",4)
+        json_path = get_unique_name(json_dir / f"{output_stem}.json", 4)
 
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
