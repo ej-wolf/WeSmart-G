@@ -26,9 +26,10 @@ LOCAL_CONFIG    = "config.json"
 LOCAL_LOG       = "log.json"
 
 DEFAULT_BATCH_SIZE = 256
-DEFAULT_EPOCHS = 30
+DEFAULT_EPOCHS = 50
 DEFAULT_LR = 1e-3
 DEFAULT_HIDDEN_DIM  = 64
+DEFAULT_SAVE_EVERY = 10
 DEFAULT_SPLIT_RATIO = 0.85
 DEFAULT_SPLIT_SEED  = 42
 DEFAULT_DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -62,7 +63,6 @@ class ClipMLP(nn.Module):
                                  nn.ReLU(inplace=True),
                                  nn.Linear(hidden_dim, 1),
                                  )
-
     def forward(self, x):
         return self.net(x).squeeze(1)
 
@@ -131,7 +131,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
         :param kwargs:
             work_dir, tag   : directory for output files and their tag, by default
                               both work dir & tag are generated from the cache and model properties
-            lr, epochs, batch_size, hidden_dim :
+            lr, epochs, batch_size, hidden_dim, save_every :
                              Training params, if passed they overwrite the defaults/config settings
             split_ratio, split_seed : ratio and seed for runtime splitting (if relevant)
         :return:              path for the effective work_dir
@@ -148,6 +148,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     epochs = kwargs.get('epochs', DEFAULT_EPOCHS)
     batch_size  = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
     hidden_dim  = kwargs.get('hidden_dim', DEFAULT_HIDDEN_DIM)
+    save_every  = kwargs.get('save_every', DEFAULT_SAVE_EVERY)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Build train/valid datasets;
@@ -172,6 +173,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     #* Save lightweight run config for later testing/evaluation.
     run_cfg = {'batch_size': batch_size, 'epochs': epochs,
                'lr': lr, 'hidden_dim' : hidden_dim,
+               'save_every': save_every,
                'train_cache': str(train_npz),
                'valid_cache': valid_used, }
 
@@ -197,7 +199,10 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
         train_loss  = train_one_epoch(model, train_loader, optimizer, criterion, device)
         val_loss, _, _ = eval_one_epoch(model, valid_loader, criterion, device)
         train_log += [{ 'epoch': epoch, 'train_loss': train_loss, 'val_loss':val_loss }]
-        
+
+        if save_every and epoch % save_every == 0:
+            torch.save(model.state_dict(), run_dir/f"model_ep{epoch:03d}.pt")
+
         print(f'Epoch {epoch:03d} | train loss: {train_loss:.4f} | val loss: {val_loss:.4f}')
 
     #* Save model and run logs.
