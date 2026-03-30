@@ -24,7 +24,7 @@ def _run_train(args):
     """ Run training command."""
     kw = _kwargs_from_args(args,
                            ('work_dir', 'tag', 'lr', 'epochs', 'batch_size',
-                                   'hidden_dim', 'split_ratio', 'split_seed',))
+                                   'hidden_dim', 'split_ratio', 'random_seed',))
     run_dir = run_training(args.train_cache, args.valid_cache, **kw)
     print(f"Training done. Run dir: {run_dir}")
 
@@ -56,7 +56,7 @@ def main():
     train_p.add_argument('-bs', '--batch-size', type=int, default=None, help='Batch size')
     train_p.add_argument('-hd', '--hidden-dim', type=int, default=None, help='Hidden layer size')
     train_p.add_argument('-sr', '--split-ratio', type=float, default=None, help='Runtime train split ratio')
-    train_p.add_argument('-ss', '--split-seed', type=int, default=None, help='Runtime split seed')
+    train_p.add_argument('-rs', '--random-seed', type=int, default=None, help='Runtime split seed')
     train_p.set_defaults(fn=_run_train)
 
     test_p = sub.add_parser('test', help='Test model on cache npz')

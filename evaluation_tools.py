@@ -268,8 +268,8 @@ def print_test_report(results, **kwargs):
     support_str = f"{support[0]}/ {support[1]}" if support is not None else 'N/A'
 
     rows = [("Results file", Path(summary.get('raw_results_path', '')).name ),
-            ("num_samples", summary.get('num_samples', None)),
-            ("neg(0)/ pos(1)", support_str),
+            ("Num_samples", summary.get('num_samples', None)),
+            ("GT_counts 0/1", support_str),
             ("accuracy", summary.get('accuracy', None)),
             ("recall", summary.get('recall', None)),
             ("FPR", summary.get('FPR', None)),

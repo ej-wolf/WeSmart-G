@@ -38,6 +38,7 @@
       -sr/--sort SORT               : (str) options [duration, duration_rev] or None
       -sm/--sample SAMPLE           : (int/float) sample size/portion for printing
       -rs/--random-seed             : (int) seed for random sampling (default: 42)
+
     ***  merge - merges multiple cache npz files into one
        out_path                     : Output merged npz path
        npz_paths                    : Cache npz files for merging
@@ -45,8 +46,7 @@
 
 import random, argparse, sys, numpy as np
 from pathlib import Path
-
-# ---- import your existing pipeline ----
+#* ---- local imports  ----
 from json_utils import load_json_data
 from common.my_local_utils import print_color
 from temporal_slicing_json import slice_json_stream
@@ -269,7 +269,7 @@ def merge_cache_npz(npz_paths, out_path:str|Path):
     return out_path
 
 
-def cache_info(path: str|Path, **kwargs):
+def cache_info(path:str|Path, **kwargs):
     """ Summarize a cached NPZ and optionally print per-video list/details.
     Args:
         path: NPZ path with keys `X`, `y`, `meta`.
@@ -322,6 +322,8 @@ def cache_info(path: str|Path, **kwargs):
     path = Path(path)
     data = np.load(path, allow_pickle=True)
     meta = data['meta']
+    y:np.ndarray = data['y']
+    support = [len(y)-y.sum(), y.sum()]  #* support[0]= counts of 0, sup[1]= counts of 1
     n_clips = len(meta)
 
     if n_clips == 0:
@@ -404,11 +406,12 @@ def cache_info(path: str|Path, **kwargs):
           f"Avg. video Time : {avg_video_time:.2f} s\n"
           f"Total clip time : {total_clip_time:.2f} s\n"
           # f"Avg. clip time  : {avg_clip_time:.2f} s\n"
-          f"Window/ stride  : {window_msg}/ {stride_msg} (inferred)\n"
+          f"Window / stride : {window_msg} / {stride_msg} (inferred)\n"
+          f"GT counts 1/0   : {support[1]} / {support[0]}\n"
           f"Features number : {data['X'].shape[1] }"
           )
 
-    # Resolve sample size from int/ratio conventions.
+    #* Resolve sample size from int/ratio conventions.
     names = sorted(video_info.keys())
     if kwargs.get('list', False) or kwargs.get('details', False):
         sample = kwargs.get('sample', None)
@@ -433,14 +436,13 @@ def cache_info(path: str|Path, **kwargs):
             print(f"{i:>3} | {name[:40]:40} | {v_time:^12.2f} | {rec['n_clips']:^6d} | {rec['clip_time']:15.2f} | {'':>3}")
     print()
     return {'path': str(path),
-            'n_videos': n_videos,
-            'n_clips' : n_clips,
+            'n_videos': n_videos,'n_clips' : n_clips,
             'total_video_time': total_video_time,
             'avg_video_time'  : avg_video_time,
             'total_clip_time': total_clip_time,
             'window': w_mean, 'window_std': w_std,
             'stride': s_mean, 'stride_std':s_std,
-            'sample_size': len(names), }
+            'sample_size': len(names), 'support':support}
 #165
 
 def _run_build(args):
@@ -549,6 +551,7 @@ def main():
 if __name__ == '__main__':
     pass
     main()
+    # cache_info(path="data/cache/Joint_RWFLV_test.npz")
 
 
 #444(,2,) -> 482(1,4,4)-
