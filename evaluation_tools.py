@@ -2,6 +2,8 @@ from pathlib import Path
 import json
 import numpy as np
 import matplotlib.pyplot as plt
+#* local imports
+from common.my_local_utils import print_color
 
 DEFAULT_ROC_RES = 100
 
@@ -144,7 +146,8 @@ def analyze_test_results(test_results:Path|str|dict, **kwargs):
             out_path = out_path/out_name
         with out_path.open('w') as f:
             json.dump(summary, f, indent=2)
-            print(f"Test analysis complete\nSummary saved to {out_path}")
+            print(f"Test analysis complete")
+            print_color(f"  Summary saved to   :{out_path}", 'b')
     else:
         print("[INFO] Test analysis complete\n Summary file wasn't saved; (please provide out_path)")
 
@@ -338,7 +341,9 @@ def plot_roc_curve(roc: dict, **kwargs):
         csv_path = save_to.with_suffix('.csv')
         roc_table = np.column_stack([fpr, tpr, thresholds])
         np.savetxt(csv_path, roc_table, delimiter=';', header='fpr;tpr;thresholds', comments='')
-        print(f"ROC plot saved to {save_to}\nROC table saved to {csv_path}\nAUC: {auc:.6f}")
+        print_color(f"  ROC plot saved to  :{save_to}\n"
+                         f"  ROC table saved to :{csv_path}m",'b')
+        print(f"AUC: {auc:.6f}")
     else:
         print(f"ROC plot was not saved\nAUC: {auc:.6f}")
 

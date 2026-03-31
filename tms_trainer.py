@@ -32,11 +32,13 @@ def _run_train(args):
 def _run_test(args):
     """Run testing command."""
     kw = _kwargs_from_args(args, ('batch_size', 'threshold', 'out_dir', 'out_name'))
-    res = run_testing(args.test_cache, args.test_model, **kw)
-    if res is not None:
-        print(f"Testing done. Predictions: {res['path']}")
-        if args.analyze:
-            analyze_test_results(res['path'], print=args.report, show_roc=args.show_roc)
+    res = run_testing(args.test_model,args.test_cache, **kw)
+    # if res is not None:
+    #     print(f"Testing done. Predictions: {res['path']}")
+    #     if args.analyze:
+    #         analyze_test_results(res['path'], print=args.report, show_roc=args.show_roc)
+    if res is not None and args.analyze:
+        analyze_test_results(res['path'], print=args.report, show_roc=args.show_roc)
 
 
 def main():
@@ -60,8 +62,8 @@ def main():
     train_p.set_defaults(fn=_run_train)
 
     test_p = sub.add_parser('test', help='Test model on cache npz')
-    test_p.add_argument('test_cache', type=Path, help='Test cache npz path')
     test_p.add_argument('test_model', type=Path, help='Model.pt path')
+    test_p.add_argument('test_cache', type=Path, help='Test cache npz path')
     test_p.add_argument('-bs', '--batch-size', type=int,  default=None, help='Batch size')
     test_p.add_argument('-td', '--threshold',  type=float,default=None, help='Decision threshold')
     test_p.add_argument('-od', '--out-dir',    type=Path, default=None, help='Output dir for predictions files')

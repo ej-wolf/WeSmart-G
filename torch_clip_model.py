@@ -180,7 +180,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     train_npz = Path(train_cache)
     valid_npz = Path(valid_cache) if valid_cache is not None else None
     work_dir = Path(kwargs.get('work_dir', DEFAULT_WORKDIR))
-    run_dir = work_dir/f"{datetime.now().strftime('%y%m%d-%H%M')}_{kwargs.get('tag','')}"
+    run_dir = work_dir/f"{datetime.now().strftime('%y%m%d-%H%M')}_{kwargs.get('tag',train_npz.stem)}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     lr = kwargs.get('lr', DEFAULT_LR)
@@ -301,7 +301,8 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     return run_dir    # return model, train_log
 
 
-def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
+# def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
+def run_testing(test_model:str|Path, test_cache:str|Path,  **kwargs):
     """     Run model inference on a cache NPZ and save predictions NPZ file.
         NPZ file stores: `cache_index`, `y_true`, `y_pred`, `y_prob`.
         model setting are loaded from config.json (file
@@ -311,8 +312,8 @@ def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
         :param kwargs    :  batch_size, threshold, out_dir, out_name.
         :return:    Dict with saved `path` and in-memory prediction arrays.
     """
-    test_npz = Path(test_cache)
     model_path = Path(test_model)
+    test_npz = Path(test_cache)
 
     batch_size = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
     threshold = float(kwargs.get('threshold', 0.5))
@@ -364,7 +365,7 @@ def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
     save_payload = {'cache_index':cache_index, 'y_true':y_true, 'y_pred':y_pred, 'y_prob':y_prob}
     np.savez_compressed(out_path, **save_payload)
 
-    print(f'Testing run complete\npredictions saved to "{out_path}" ')
+    print(f'Testing run complete\n  predictions saved to "{out_path}" \n')
     return {'path': str(out_path), **save_payload}
 
 # --------------------------------------------------
