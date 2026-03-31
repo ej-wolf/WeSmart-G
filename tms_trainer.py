@@ -7,7 +7,7 @@
 from pathlib import Path
 import argparse
 from torch_clip_model import run_training, run_testing
-from evaluation_tools import analyze_test_results
+from evaluation_tools import analyze_test_results, analyze_video_test
 
 
 def _kwargs_from_args(args, names):
@@ -30,22 +30,25 @@ def _run_train(args):
 
 
 def _run_test(args):
-    """Run testing command."""
+    """ Run testing command."""
     kw = _kwargs_from_args(args, ('batch_size', 'threshold', 'out_dir', 'out_name'))
-    res = run_testing(args.test_model,args.test_cache, **kw)
+    res = run_testing(args.test_model, args.test_cache, vid_info=args.vid_info, **kw)
     # if res is not None:
     #     print(f"Testing done. Predictions: {res['path']}")
     #     if args.analyze:
     #         analyze_test_results(res['path'], print=args.report, show_roc=args.show_roc)
     if res is not None and args.analyze:
-        analyze_test_results(res['path'], print=args.report, show_roc=args.show_roc)
+        if args.vid_info:
+            analyze_video_test(res['path'], print=args.report, show_roc=args.show_roc)
+        else:
+            analyze_test_results(res['path'], print=args.report, show_roc=args.show_roc)
 
 
 def main():
     """ Parse CLI args and dispatch train/test commands."""
     parser = argparse.ArgumentParser('train_cli',
-            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-            description='Train/test clip model on cached NPZ files',)
+                                    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+                                    description='Train/test clip model on cached NPZ files',)
     sub = parser.add_subparsers(dest='cmd', required=True)
 
     train_p = sub.add_parser('train', help='Train model from cache npz')
@@ -68,10 +71,11 @@ def main():
     test_p.add_argument('-td', '--threshold',  type=float,default=None, help='Decision threshold')
     test_p.add_argument('-od', '--out-dir',    type=Path, default=None, help='Output dir for predictions files')
     test_p.add_argument('-on', '--out-name',   type=str,  default=None, help='Output prediction filename')
+    test_p.add_argument('-v',  '--video-info', dest='vid_info', action='store_true', help='add source-video info to raw predictions npz')
     test_p.add_argument('-a' , '--analyze',  dest='analyze', action='store_true', help='run further predictions analysis')
     test_p.add_argument('--no-report',   dest='report' ,  action='store_false', help='Do not print test report')
     test_p.add_argument('--no-show-roc', dest='show_roc', action='store_false', help='Do not display ROC figure')
-    test_p.set_defaults(analyze=False, report=True, show_roc=True)
+    test_p.set_defaults(analyze=False, report=True, show_roc=True, vid_info=False)
     test_p.set_defaults(fn=_run_test)
 
     args = parser.parse_args()

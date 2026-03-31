@@ -84,6 +84,12 @@ def _validate_raw_results(raw: dict) -> tuple[np.ndarray, np.ndarray]:
 
     return y_true, y_pred
 
+
+def _default_video_pool(clip_pred, clip_score=None):
+    """ Default video decision: positive if at least two clips are positive. """
+    score = float(np.sum(np.asarray(clip_pred, dtype=np.int64) == 1))
+    return int(score >= 2), score
+
 # -----------------------------------------------------------------------
 #* Main and API functions
 # -----------------------------------------------------------------------
@@ -162,6 +168,132 @@ def analyze_test_results(test_results:Path|str|dict, **kwargs):
                    np.column_stack([roc['fpr'], roc['tpr'], roc['thresholds']]),
                    delimiter=';', header='FPR;TPR;Thresholds')
 
+
+    if kwargs.get('print', True):
+        print_test_report(summary)
+    return summary
+
+
+def analyze_video_test(test_res:Path|str|dict, **kwargs):
+    """ Build a video-level evaluation summary from clip-level raw test results.
+        Videos with inconsistent clip GT labels are skipped with a warning.
+        Optional kwargs:
+        out_path     : output JSON path or directory
+        output_name  : output JSON file name if out_path is a directory
+        pool_func    : function that maps clip predictions to one video prediction
+        show_roc     : if True draws ROC
+        print        : if True print report to console
+    """
+    if isinstance(test_res, (str, Path)):
+        src_path = Path(test_res)
+        raw = _load_raw_results_npz(src_path)
+    elif isinstance(test_res, dict):
+        src_path = None
+        raw = test_res
+    else:
+        raise TypeError("test_res must be dict or path to raw results npz")
+
+    y_true, y_pred = _validate_raw_results(raw)
+    if 'meta_video' not in raw:
+        raise KeyError("video-level analysis requires 'meta_video' in raw test results")
+
+    meta_video = np.asarray(raw['meta_video'])
+    if len(meta_video) != len(y_true):
+        raise ValueError(f"meta_video length mismatch: {len(meta_video)} vs {len(y_true)}")
+
+    y_prob = raw.get('y_prob', None)
+    if y_prob is not None:
+        y_prob = np.asarray(y_prob, dtype=np.float64)
+        if len(y_prob) != len(y_true):
+            raise ValueError(f"y_prob length mismatch: {len(y_prob)} vs {len(y_true)}")
+
+    pool_func = kwargs.get('pool_func', _default_video_pool)
+    video_to_idx = {}
+    for i, vid in enumerate(meta_video):
+        video_to_idx.setdefault(str(vid), []).append(i)
+
+    vid_names, vid_true, vid_pred, vid_score = [], [], [], []
+    excluded_videos = []
+    excluded_clips = 0
+
+    for vid, idx in video_to_idx.items():
+        clip_true = y_true[idx]
+        uniq_true = np.unique(clip_true)
+        if len(uniq_true) != 1:
+            print_color(f"[WARN] Inconsistent GT in video {vid}; excluded from video test", 'o')
+            excluded_videos.append(vid)
+            excluded_clips += len(idx)
+            continue
+
+        clip_pred = y_pred[idx]
+        clip_score = y_prob[idx] if y_prob is not None else None
+        pooled = pool_func(clip_pred, clip_score)
+        if isinstance(pooled, tuple):
+            video_pred, video_score = pooled
+        else:
+            video_pred = pooled
+            _, video_score = _default_video_pool(clip_pred, clip_score)
+
+        vid_names.append(vid)
+        vid_true.append(int(uniq_true[0]))
+        vid_pred.append(int(video_pred))
+        vid_score.append(float(video_score))
+
+    if len(vid_true) == 0:
+        raise ValueError("No valid videos left for analysis after excluding inconsistent GT videos")
+
+    vid_true = np.asarray(vid_true, dtype=np.int64)
+    vid_pred = np.asarray(vid_pred, dtype=np.int64)
+    vid_score = np.asarray(vid_score, dtype=np.float64)
+
+    summary = _binary_metrics(vid_true, vid_pred)
+    summary.update({
+        'model_path': raw.get('model_path', None),
+        'test_cache': raw.get('test_cache', None),
+        'threshold': raw.get('threshold', None),
+        'hidden_dim': raw.get('hidden_dim', None),
+        'raw_results_path': str(src_path) if src_path is not None else raw.get('path', None),
+        'analysis_unit': 'video',
+        'num_videos_total': len(video_to_idx),
+        'num_videos_used': len(vid_true),
+        'num_videos_excluded': len(excluded_videos),
+        'num_clips_excluded': excluded_clips,
+        'excluded_videos': excluded_videos,
+    })
+
+    roc = None
+    try:
+        roc = roc_from_scores(vid_true, vid_score, max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES))
+        summary.update({'roc_auc': roc['auc'], 'roc_score_type': 'video_score'})
+    except Exception as e:
+        summary.update({'roc_auc': None, 'roc_score_type': 'video_score', 'roc_error': str(e)})
+
+    tst_name = src_path.stem if src_path is not None else 'video_test'
+    out_name = kwargs.get('output_name', f"{tst_name}_video_summary.json")
+    src_dir = src_path.parent if src_path else None
+    out_path = kwargs.get('out_path', None) or src_dir
+
+    if out_path is not None:
+        out_path = Path(out_path)
+        if out_path.suffix == '':
+            out_path.mkdir(parents=False, exist_ok=True)
+            out_path = out_path / out_name
+        with out_path.open('w') as f:
+            json.dump(summary, f, indent=2)
+        print("Video test analysis complete")
+        print_color(f"  Summary saved to   :{out_path}", 'b')
+    else:
+        print("[INFO] Video test analysis complete\n Summary file wasn't saved; (please provide out_path)")
+
+    if roc is not None and out_path is not None:
+        plot_roc_curve(
+            roc,
+            save_to=out_path,
+            show=bool(kwargs.get('show_roc', False)),
+            title=kwargs.get('roc_title', f"Video ROC for {tst_name}"),
+        )
+    elif roc is not None and kwargs.get('show_roc', False):
+        plot_roc_curve(roc, show=True, title=kwargs.get('roc_title', f"Video ROC for {tst_name}"))
 
     if kwargs.get('print', True):
         print_test_report(summary)

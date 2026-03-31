@@ -302,15 +302,17 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
 
 
 # def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
-def run_testing(test_model:str|Path, test_cache:str|Path,  **kwargs):
+def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, **kwargs):
     """     Run model inference on a cache NPZ and save predictions NPZ file.
-        NPZ file stores: `cache_index`, `y_true`, `y_pred`, `y_prob`.
+        NPZ file stores: `cache_index`, `y_true`, `y_pred`, `y_prob`,
+        and optionally `meta_video`.
         model setting are loaded from config.json (file
         parameters:
         :param test_cache: path to test cache NPZ.
         :param test_model: path to `model.pt` produced by `run_training`.
-        :param kwargs    :  batch_size, threshold, out_dir, out_name.
-        :return:    Dict with saved `path` and in-memory prediction arrays.
+        :param vid_info  : if True save source-video info (`meta_video`) in raw NPZ.
+        :param kwargs    : batch_size, threshold, out_dir, out_name
+        :return          : Dict with saved `path` and in-memory prediction arrays.
     """
     model_path = Path(test_model)
     test_npz = Path(test_cache)
@@ -363,6 +365,15 @@ def run_testing(test_model:str|Path, test_cache:str|Path,  **kwargs):
     out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
 
     save_payload = {'cache_index':cache_index, 'y_true':y_true, 'y_pred':y_pred, 'y_prob':y_prob}
+    if vid_info:
+        test_data = np.load(test_npz, allow_pickle=True)
+        if 'meta' not in test_data.files:
+            raise KeyError(f"{test_npz} does not contain 'meta', cannot add vid_info")
+        meta = test_data['meta']
+        if len(meta) != len(y_true):
+            raise ValueError(f"meta length mismatch: {len(meta)} vs {len(y_true)} predictions")
+        save_payload['meta_video'] = np.asarray([item['video'] for item in meta], dtype=object)
+
     np.savez_compressed(out_path, **save_payload)
 
     print(f'Testing run complete\n  predictions saved to "{out_path}" \n')
@@ -372,10 +383,11 @@ def run_testing(test_model:str|Path, test_cache:str|Path,  **kwargs):
 #* Training scripts and unit testing
 # --------------------------------------------------
 
-def test_test(test_cache: str | Path, test_model: str | Path, **kwargs):
+def test_test(test_cache:str|Path, test_model:str|Path, **kwargs):
     """ Small helper that tests the testing tools"""
     #* return run_testing(test_cache, tst_model, **kwargs)
-    res = run_testing(test_cache, test_model, **kwargs)
+    # res = run_testing(test_cache, test_model, **kwargs)
+    res = run_testing(test_model, test_cache, **kwargs)
     if res is not None:
         report = analyze_test_results(res['path'], show_roc=kwargs.get('show',False))
         print_test_report(report)
@@ -437,6 +449,8 @@ if __name__ == '__main__':
     # model, hist = run_training('data/cache/RWF_train.npz', split_ratio=0.85, split_seed=42)
 
     # train_rwd_n_rlvs()
-    train_joint()
-
+    # train_joint()
+    tst_mdl = "work_dirs/json_models/260331-0233_J-RWFLV-25ft/best_model.085.pt"
+    tst_ch =  "data/cache/J_RWFLV_25ft_test.npz"
+    test_test(test_model=tst_mdl, test_cache=tst_ch, out_name='tst-tst' )
 # 318(2,4,2)-> 300(2,,)
