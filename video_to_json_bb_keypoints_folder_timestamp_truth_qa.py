@@ -676,7 +676,9 @@ def process_video(input_path: Path|str,
                 continue
 
             try:
-                results = model(frame, conf=conf_thresh, verbose=False, imgsz=(h, w))[0]
+                n_h = h if h % 32 == 0 else h + (32 - (h%32))
+                n_w = w if w % 32 == 0 else w + (32 - (w%32))
+                results = model(frame, conf=conf_thresh, verbose=False, imgsz=(n_h, n_w))[0]
             except Exception as exc:
                 print(f'[ERROR] YOLO inference failed at frame_idx={frame_idx}: {exc}')
                 cap.release()

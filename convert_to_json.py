@@ -44,7 +44,7 @@ def main():
     parser.add_argument('--show', action='store_true', help='Show video during processing')
     parser.add_argument('--allow-incomplete', action='store_true',
                         help='Write JSON even if decoder stops before the metadata frame count')
-    parser.add_argument('--time-source', choices=('fps', 'ffprobe'), default='fps',
+    parser.add_argument('--time-source', choices=('fps', 'ffprobe'), default='ffprobe',
                         help="How to derive frame time: metadata fps or ffprobe per-frame timestamps")
     parser.add_argument('--only-with-txt-ann', action='store_true',
                         help='When VIDEO is a directory and --ann-file is not set, process only videos that have a sibling <stem>.txt file')
