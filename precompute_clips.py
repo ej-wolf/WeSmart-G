@@ -1,5 +1,4 @@
-""" CLI script.
-    '
+""" CLI script.    '
     preprocess and extract features from given json dir.
     1) create train/val split, or load existing split from *.txt files
     2) slices JSON streams into temporal clips,
@@ -552,7 +551,6 @@ if __name__ == '__main__':
     pass
     main()
     # cache_info(path="data/cache/Joint_RWFLV_test.npz")
-
 
 #444(,2,) -> 482(1,4,4)-
 #555(1,1,4)

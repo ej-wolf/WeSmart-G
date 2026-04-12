@@ -6,31 +6,11 @@ import matplotlib.pyplot as plt
 from common.my_local_utils import print_color
 
 DEFAULT_ROC_RES = 100
+DEFAULT_MIN_CLIPS = 2
 
 # -----------------------------------------------------------------------
 #* Local helpers
 # -----------------------------------------------------------------------
-
-def _binary_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """ Compute binary classification metrics from true/predicted labels."""
-    tn = int(np.sum((y_pred == 0) & (y_true == 0)))
-    fp = int(np.sum((y_pred == 1) & (y_true == 0)))
-    fn = int(np.sum((y_pred == 0) & (y_true == 1)))
-    tp = int(np.sum((y_pred == 1) & (y_true == 1)))
-    n = len(y_true)
-
-    support = {}
-    for v in y_true:
-        k = int(v)
-        support[k] = support.get(k, 0) + 1
-
-    return {'num_samples': n,
-            'support': support,
-            'accuracy': (tn + tp)/n if n > 0 else 0.0,
-            'recall'  : tp/(tp + fn) if (tp + fn) > 0 else 0.0,
-            'FPR': fp/(fp + tn) if (fp + tn) > 0 else 0.0,
-            'confusion_matrix': [[tn, fp], [fn, tp]],}
-
 def _scalar_or_none(arr):
     """ Convert scalar-like numpy values to Python scalars;
         other values remain unchanged."""
@@ -85,16 +65,101 @@ def _validate_raw_results(raw: dict) -> tuple[np.ndarray, np.ndarray]:
     return y_true, y_pred
 
 
-def _default_video_pool(clip_pred, clip_score=None):
-    """ Default video decision: positive if at least two clips are positive. """
+def _resolve_input(test_results):
+    """  Normalize public analyzer input into raw results dict and optional source path."""
+    if   isinstance(test_results, (str, Path)):
+        src_path = Path(test_results)
+        raw = _load_raw_results_npz(src_path)
+    elif isinstance(test_results, dict):
+        # src_path = None
+        src_path = test_results.get('path', None)
+        raw = test_results
+    else:
+        raise TypeError(f"Can't load test npz file:{test_results}")
+    return raw, src_path
+
+
+def _resolve_output_pah(src_path, output_name, out_path=None):
+    """ Resolve output JSON path from explicit path or source file location. """
+
+    out_path = out_path or (src_path.parent if src_path else None)
+    if out_path is None:
+        return None
+    out_path = Path(out_path)
+    if out_path.suffix == '':
+        return out_path/output_name
+    return out_path
+
+
+def _support_counts(y_true):
+    """ Return class-count dict for a binary label array. """
+    support = {}
+    for v in np.asarray(y_true, dtype=np.int64):
+        k = int(v)
+        support[k] = support.get(k, 0) + 1
+    return support
+
+
+def _save_analyze_summary(summary, out_path):
+    """ Save summary JSON if path is given, otherwise print a short notice. """
+
+    testing_set = {'test_cache': summary.get('test_cache', None),
+                   'clips_num': summary.get('num_clips', None),
+                   'clips_support': summary.get('support_clips', None),}
+    if summary.get('analysis_unit', None) == 'video':
+        testing_set['videos_num'] =  summary.get('num_videos', None)
+        testing_set['videos_support'] = summary.get('support_video', None)
+
+    save_summary = { 'raw_results_path': summary.get('raw_results_path', None),
+                     'raw_results_type': summary.get('raw_results_type', None),
+                     'raw_results_unit' : summary['analysis_unit'], #  summary.get('raw_result_unit', None),
+                     'model'      :summary.get('model_path',''),
+                     'testing_set': testing_set,
+                     'confusion_matrix': summary.get('confusion_matrix', None),
+                     'accuracy': summary.get('accuracy', None),
+                     'recall': summary.get('recall', None),
+                     'FPR': summary.get('FPR', None),
+                     'ROC AUC': summary.get('roc_auc', None),
+                     }
+
+    if out_path is not None:
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=False, exist_ok=True)
+        with out_path.open('w') as f:
+            json.dump(save_summary, f, indent=2)
+        print("Analysis complete")
+        print_color(f"  Summary saved to   :{out_path}", 'b')
+    else:
+        print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
+    return out_path
+
+
+def _roc_summary(y_true, scores, score_name, max_resolution=DEFAULT_ROC_RES):
+    """ Compute ROC outputs and the matching summary fields. """
+    try:
+        roc = roc_from_scores(y_true, scores, max_resolution=max_resolution)
+        return roc, {'roc_auc':roc['auc'], 'roc_score_type': score_name}
+    except Exception as e:
+        return None, {'roc_auc':None, 'roc_score_type': score_name, 'roc_error': str(e)}
+
+
+def _min_clips_pool(clip_pred, clip_score=None, min_val=DEFAULT_MIN_CLIPS):
+    """ pool by minimum number or fraction of positive clips. """
+
     score = float(np.sum(np.asarray(clip_pred, dtype=np.int64) == 1))
-    return int(score >= 2), score
+    if   isinstance(min_val, int):
+        target = min_val
+    elif isinstance(min_val, float):
+        target = round(len(clip_pred)*min_val)
+    else:
+        raise TypeError(f"min_val must be int or float, got {type(min_val).__name__}")
+    return int(score >= target), score
 
 # -----------------------------------------------------------------------
 #* Main and API functions
 # -----------------------------------------------------------------------
 
-def analyze_test_results(test_results:Path|str|dict, **kwargs):
+def analyze_clip_test(test_results:Path|str|dict, **kwargs):
     """ Build an evaluation summary from raw test results and dumps it into JSON.
         :param test_results: Accepts either Path/str to raw test-results NPZ,
                              or in-memory raw-results dict.
@@ -104,27 +169,15 @@ def analyze_test_results(test_results:Path|str|dict, **kwargs):
         show_roc:  If True draws ROC image
         print   :  if True print results to consol
     """
+    #*Normalize arguments
+    raw_res, results_path = _resolve_input(test_results)
+    y_true, y_pred = _validate_raw_results(raw_res)
+    clip_support = _support_counts(y_true)
 
-    if isinstance(test_results, (str, Path)):
-        src_path = Path(test_results)
-        raw = _load_raw_results_npz(src_path)
-    elif isinstance(test_results, dict):
-        src_path = None
-        raw = test_results
-    else:
-        raise TypeError(" test_results must be dict or path to raw results npz")
-
-    y_true, y_pred = _validate_raw_results(raw)
-    summary = _binary_metrics(y_true, y_pred)
-    summary.update({'model_path': raw.get('model_path', None),
-                    'test_cache': raw.get('test_cache', None),
-                    'threshold' : raw.get('threshold' , None),
-                    'hidden_dim': raw.get('hidden_dim', None),
-                    # 'raw_results_path': str(src_path) if src_path is not None else raw.get('path', None),})
-                    'raw_results_path': str(src_path) or  raw.get('path', None),})
-
-    # Prefer probability scores when available; otherwise use hard predictions.
-    y_prob = raw.get('y_prob', None)
+    #* Start Analysis
+    summary = binary_metrics(y_true, y_pred)
+    #* Prefer probability scores when available; otherwise use hard predictions.
+    y_prob = raw_res.get('y_prob', None)
     if y_prob is not None:
         scores = np.asarray(y_prob, dtype=np.float64)
         score_name = 'y_prob'
@@ -132,42 +185,34 @@ def analyze_test_results(test_results:Path|str|dict, **kwargs):
         scores = np.asarray(y_pred, dtype=np.float64)
         score_name = 'y_pred'
 
-    roc = None
-    try:
-        roc = roc_from_scores(y_true, scores, max_resolution=kwargs.get('max_resolution', 100))
-        summary.update({'roc_auc': roc['auc'], 'roc_score_type': score_name,})
-    except Exception as e:
-        summary.update({'roc_auc': None, 'roc_score_type': score_name, 'roc_error': str(e),})
+    summary.update({'raw_results_path': str(results_path),
+                    'raw_results_type': score_name,
+                    'analysis_unit': 'clip',
+                    'model_path': raw_res.get('model_path', None),
+                    'test_cache': raw_res.get('test_cache', None),
+                    'num_clips': len(y_true),
+                    'support_clips': clip_support,
+                    })
 
-    tst_name = src_path.stem if src_path is not None else ''
-    # out_path can be either target directory or full target JSON path.
-    out_name = kwargs.get('output_name', f"{tst_name}_summary.json")
-    src_dir = src_path.parent if src_path else None
-    out_path = kwargs.get('out_path', None) or src_dir
+    roc, roc_info = _roc_summary(y_true, scores, score_name,
+                                 max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES))
+    summary.update(roc_info)
 
-    if out_path is not None:
-        out_path = Path(out_path)
-        if out_path.suffix == '':
-            out_path.mkdir(parents=False, exist_ok=True)
-            out_path = out_path/out_name
-        with out_path.open('w') as f:
-            json.dump(summary, f, indent=2)
-            print(f"Test analysis complete")
-            print_color(f"  Summary saved to   :{out_path}", 'b')
-    else:
-        print("[INFO] Test analysis complete\n Summary file wasn't saved; (please provide out_path)")
+    #* out_path can be either target directory or full target JSON path.
+    tst_name = results_path.stem if results_path is not None else ''
+    out_name = kwargs.get('output_name', f"{tst_name}_clip-summary.json")
+    out_path = _resolve_output_pah(results_path, out_name, kwargs.get('out_path', None))
+    out_path = _save_analyze_summary(summary, out_path)
+
+    # if roc is not None and out_path is not None:
+    #     plot_roc_curve(roc, save_to=out_path, show=bool(kwargs.get('show_roc', False)),
+    #                    title=kwargs.get('roc_title', f"ROC Curve for {tst_name} ({score_name})"),)
+    # elif roc is not None and kwargs.get('show_roc', False):
+    #     plot_roc_curve(roc, show=True, title=kwargs.get('roc_title', f"ROC Curve for {tst_name} ({score_name})"))
 
     if roc is not None:
-        # Keep ROC outputs next to the summary output.
-        roc_path = out_path.with_stem(tst_name)
         plot_roc_curve(roc, save_to=out_path, show=bool(kwargs.get('show_roc', False)),
-                       title=kwargs.get('roc_title', f"ROC Curve for {tst_name} ({score_name})"),)
-        # csv_path = roc_path.with_suffix('.csv')
-        # roc_table = np.column_stack([roc['fpr'], roc['tpr'], roc['thresholds']])
-        np.savetxt(roc_path.with_suffix('.csv'),
-                   np.column_stack([roc['fpr'], roc['tpr'], roc['thresholds']]),
-                   delimiter=';', header='FPR;TPR;Thresholds')
-
+                       title=kwargs.get('roc_title', f"ROC Curve for {tst_name} ({score_name})"), )
 
     if kwargs.get('print', True):
         print_test_report(summary)
@@ -181,58 +226,55 @@ def analyze_video_test(test_res:Path|str|dict, **kwargs):
         out_path     : output JSON path or directory
         output_name  : output JSON file name if out_path is a directory
         pool_func    : function that maps clip predictions to one video prediction
+        min_val      : threshold for the default video pool rule
         show_roc     : if True draws ROC
         print        : if True print report to console
     """
-    if isinstance(test_res, (str, Path)):
-        src_path = Path(test_res)
-        raw = _load_raw_results_npz(src_path)
-    elif isinstance(test_res, dict):
-        src_path = None
-        raw = test_res
-    else:
-        raise TypeError("test_res must be dict or path to raw results npz")
+    #* Normalize arguments
+    raw_res, res_path = _resolve_input(test_res)
+    y_true, y_pred = _validate_raw_results(raw_res)
+    # clip_support = _support_counts(y_true)
 
-    y_true, y_pred = _validate_raw_results(raw)
-    if 'meta_video' not in raw:
-        raise KeyError("video-level analysis requires 'meta_video' in raw test results")
+    if 'meta_video' not in raw_res or len(y_true) != len(y_true):
+        raise KeyError("Results file meta data are defective")
 
-    meta_video = np.asarray(raw['meta_video'])
+    meta_video = np.asarray(raw_res['meta_video'])
     if len(meta_video) != len(y_true):
         raise ValueError(f"meta_video length mismatch: {len(meta_video)} vs {len(y_true)}")
 
-    y_prob = raw.get('y_prob', None)
+    y_prob = raw_res.get('y_prob', None)
     if y_prob is not None:
         y_prob = np.asarray(y_prob, dtype=np.float64)
         if len(y_prob) != len(y_true):
             raise ValueError(f"y_prob length mismatch: {len(y_prob)} vs {len(y_true)}")
 
-    pool_func = kwargs.get('pool_func', _default_video_pool)
+    pool_func = kwargs.get('pool_func', _min_clips_pool)
+    min_val = kwargs.get('min_val', kwargs.get('threshold', DEFAULT_MIN_CLIPS))
     video_to_idx = {}
     for i, vid in enumerate(meta_video):
         video_to_idx.setdefault(str(vid), []).append(i)
 
     vid_names, vid_true, vid_pred, vid_score = [], [], [], []
     excluded_videos = []
-    excluded_clips = 0
-
     for vid, idx in video_to_idx.items():
         clip_true = y_true[idx]
         uniq_true = np.unique(clip_true)
         if len(uniq_true) != 1:
             print_color(f"[WARN] Inconsistent GT in video {vid}; excluded from video test", 'o')
             excluded_videos.append(vid)
-            excluded_clips += len(idx)
             continue
 
         clip_pred = y_pred[idx]
         clip_score = y_prob[idx] if y_prob is not None else None
-        pooled = pool_func(clip_pred, clip_score)
+        if pool_func is _min_clips_pool:
+            pooled = pool_func(clip_pred, clip_score, min_val=min_val)
+        else:
+            pooled = pool_func(clip_pred, clip_score)
         if isinstance(pooled, tuple):
             video_pred, video_score = pooled
         else:
             video_pred = pooled
-            _, video_score = _default_video_pool(clip_pred, clip_score)
+            _, video_score = _min_clips_pool(clip_pred, clip_score, min_val=min_val)
 
         vid_names.append(vid)
         vid_true.append(int(uniq_true[0]))
@@ -245,59 +287,53 @@ def analyze_video_test(test_res:Path|str|dict, **kwargs):
     vid_true = np.asarray(vid_true, dtype=np.int64)
     vid_pred = np.asarray(vid_pred, dtype=np.int64)
     vid_score = np.asarray(vid_score, dtype=np.float64)
+    # video_support = _support_counts(vid_pred)
 
-    summary = _binary_metrics(vid_true, vid_pred)
-    summary.update({
-        'model_path': raw.get('model_path', None),
-        'test_cache': raw.get('test_cache', None),
-        'threshold': raw.get('threshold', None),
-        'hidden_dim': raw.get('hidden_dim', None),
-        'raw_results_path': str(src_path) if src_path is not None else raw.get('path', None),
-        'analysis_unit': 'video',
-        'num_videos_total': len(video_to_idx),
-        'num_videos_used': len(vid_true),
-        'num_videos_excluded': len(excluded_videos),
-        'num_clips_excluded': excluded_clips,
-        'excluded_videos': excluded_videos,
-    })
+    print_color(_support_counts(y_true),'r')
+    summary = binary_metrics(vid_true, vid_pred)
+    summary.update({'raw_results_path': str(res_path) ,
+                    'raw_results_type': 'y_prob' if y_prob is not None else 'y_pred',
+                    'analysis_unit': 'video',
+                    'model_path': raw_res.get('model_path', None),
+                    'test_cache': raw_res.get('test_cache', None),
+                    'num_clips': len(y_true),
+                    'support_clips': _support_counts(y_true),  # clip_support,
+                    'num_videos': len(vid_true),
+                    'support_video': _support_counts(vid_pred),
+                    'num_videos_excluded': len(excluded_videos),
+                    'excluded_videos': excluded_videos, })
 
-    roc = None
-    try:
-        roc = roc_from_scores(vid_true, vid_score, max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES))
-        summary.update({'roc_auc': roc['auc'], 'roc_score_type': 'video_score'})
-    except Exception as e:
-        summary.update({'roc_auc': None, 'roc_score_type': 'video_score', 'roc_error': str(e)})
+    roc, roc_info = _roc_summary(vid_true, vid_score, 'video_score',
+                                 max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES))
+    summary.update(roc_info)
 
-    tst_name = src_path.stem if src_path is not None else 'video_test'
-    out_name = kwargs.get('output_name', f"{tst_name}_video_summary.json")
-    src_dir = src_path.parent if src_path else None
-    out_path = kwargs.get('out_path', None) or src_dir
+    # * out_path can be either target directory or full target JSON path.
+    tst_name = res_path.stem if res_path is not None else 'video_test'
+    out_name = kwargs.get('output_name', f"{tst_name}_video-summary.json")
+    out_path = _resolve_output_pah(res_path, out_name, kwargs.get('out_path', None))
+    out_path = _save_analyze_summary(summary, out_path)
 
-    if out_path is not None:
-        out_path = Path(out_path)
-        if out_path.suffix == '':
-            out_path.mkdir(parents=False, exist_ok=True)
-            out_path = out_path / out_name
-        with out_path.open('w') as f:
-            json.dump(summary, f, indent=2)
-        print("Video test analysis complete")
-        print_color(f"  Summary saved to   :{out_path}", 'b')
-    else:
-        print("[INFO] Video test analysis complete\n Summary file wasn't saved; (please provide out_path)")
-
-    if roc is not None and out_path is not None:
-        plot_roc_curve(
-            roc,
-            save_to=out_path,
-            show=bool(kwargs.get('show_roc', False)),
-            title=kwargs.get('roc_title', f"Video ROC for {tst_name}"),
-        )
-    elif roc is not None and kwargs.get('show_roc', False):
-        plot_roc_curve(roc, show=True, title=kwargs.get('roc_title', f"Video ROC for {tst_name}"))
+    if roc is not None:
+        plot_roc_curve(roc, save_to=out_path, show=bool(kwargs.get('show_roc', False)),
+                            title=kwargs.get('roc_title', f"Video ROC for {tst_name}"),)
 
     if kwargs.get('print', True):
         print_test_report(summary)
-    return summary
+    return summary #345
+
+def binary_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    """ Compute binary classification metrics from true/predicted labels."""
+
+    tn = int(np.sum((y_pred == 0) & (y_true == 0)))
+    fp = int(np.sum((y_pred == 1) & (y_true == 0)))
+    fn = int(np.sum((y_pred == 0) & (y_true == 1)))
+    tp = int(np.sum((y_pred == 1) & (y_true == 1)))
+    n = len(y_true)
+
+    return {'confusion_matrix': [[tn, fp], [fn, tp]],
+            'accuracy': (tn + tp)/n if n > 0 else 0.0,
+            'recall'  : tp/(tp + fn) if (tp + fn) > 0 else 0.0,
+            'FPR'     : fp/(fp + tn) if (fp + tn) > 0 else 0.0,}
 
 
 def roc_from_scores(y_true: np.ndarray, scores: np.ndarray, max_resolution=DEFAULT_ROC_RES):
@@ -399,11 +435,12 @@ def print_test_report(results, **kwargs):
     label_w = kwargs.get('label_width', 20)
 
     cm:list|None = summary.get('confusion_matrix', None)
-    support:list = summary.get('support', None)
+    support:list|None = summary.get('support_video', summary.get('support_clips', None) )
     support_str = f"{support[0]}/ {support[1]}" if support is not None else 'N/A'
 
-    rows = [("Results file", Path(summary.get('raw_results_path', '')).name ),
-            ("Num_samples", summary.get('num_samples', None)),
+    rows = [("Predictions file", Path(summary.get('raw_results_path', '')).name ),
+            # ("Num_samples", summary.get('num_samples', None)),
+            ("Num_samples", summary.get('num_videos', summary.get('num_clips', None) )),
             ("GT_counts 0/1", support_str),
             ("accuracy", summary.get('accuracy', None)),
             ("recall", summary.get('recall', None)),
@@ -413,7 +450,7 @@ def print_test_report(results, **kwargs):
             # ("test_cache", summary.get('test_cache', None)),
             ]
 
-    print("\n==== Test Summary ====")
+    print("\n===== Test Summary =====")
     for k, v in rows:
         if v is not None:
             print(f"{k:<{label_w}}: {_fmt(v)}")
@@ -438,12 +475,7 @@ def plot_roc_curve(roc: dict, **kwargs):
     :param roc:         Data for the plotting (Expects keys: `fpr`, `tpr`, `thresholds`, `auc`)
     :param kwargs:
     """
-
-    fpr = np.asarray(roc['fpr'], dtype=np.float64)
-    tpr = np.asarray(roc['tpr'], dtype=np.float64)
-    thresholds = np.asarray(roc['thresholds'], dtype=np.float64)
-    auc = float(roc['auc'])
-
+    #* Normalize arguments
     fig_size = kwargs.get('figsize', (6, 5))
     dpi = int(kwargs.get('dpi', 120))
     save_to = kwargs.get('save_to', None)
@@ -451,9 +483,15 @@ def plot_roc_curve(roc: dict, **kwargs):
         show = bool(kwargs['show'])
     else:
         show = save_to is None
+    if save_to is None and not show:
+        return
+
+    fpr = np.asarray(roc['fpr'], dtype=np.float64)
+    tpr = np.asarray(roc['tpr'], dtype=np.float64)
+    thresholds = np.asarray(roc['thresholds'], dtype=np.float64)
+    auc = float(roc['auc'])
 
     title = kwargs.get('title', "ROC Curve")
-
     plt.figure(figsize=fig_size)
     plt.plot(fpr, tpr, label=f"AUC = {auc:.4f}", linewidth=2)
     plt.plot([0, 1], [0, 1], linestyle='--', linewidth=1, alpha=0.7)
@@ -468,22 +506,22 @@ def plot_roc_curve(roc: dict, **kwargs):
         save_to = Path(save_to)
         if save_to.suffix.lower() != '.png':
             save_to = save_to.with_suffix('.png')
-        save_to.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(save_to, dpi=dpi)
-        csv_path = save_to.with_suffix('.csv')
-        roc_table = np.column_stack([fpr, tpr, thresholds])
-        np.savetxt(csv_path, roc_table, delimiter=';', header='fpr;tpr;thresholds', comments='')
-        print_color(f"  ROC plot saved to  :{save_to}\n"
-                         f"  ROC table saved to :{csv_path}m",'b')
-        print(f"AUC: {auc:.6f}")
-    else:
-        print(f"ROC plot was not saved\nAUC: {auc:.6f}")
+        try:
+            save_to.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(save_to, dpi=dpi)
+            csv_path = save_to.with_suffix('.csv')
+            roc_table = np.column_stack([fpr, tpr, thresholds])
+            np.savetxt(csv_path, roc_table, delimiter=';', header='fpr;tpr;thresholds', comments='')
+            print_color (f"  ROC plot saved to  :{save_to}\n"
+                              f"  ROC table saved to :{csv_path}m",'b')
+        except Exception as e:
+            print_color(f"Failed to save ROC outputs to {save_to}: {e}", 'r')
 
     if show:
         plt.show()
     plt.close()
 
-
+#548(5,3,2)
 if __name__ == '__main__':
     pass
     # analyze_test_results('work_dirs/json_models/train_260323-0314_RWF_tms_f18/test_raw_model_260323-202938.npz')

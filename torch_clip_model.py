@@ -19,7 +19,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 #* Project import
 from common.my_local_utils import print_color
-from evaluation_tools import analyze_test_results, print_test_report, plot_roc_curve
+# from evaluation_tools import (analyze_clip_test, analyze_video_test, print_test_report plot_roc_curve)
+import evaluation_tools as evl
 
 #* config constants ToDo: make proper config file
 DEFAULT_WORKDIR = "work_dirs/json_models"
@@ -360,11 +361,15 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, **kwar
     y_pred = y_pred.astype(np.int64)
 
     # Save raw per-clip predictions.
-    out_name = kwargs.get('out_name', f"{model_path.stem}_{test_npz.stem}-test.npz")
+    # out_name = kwargs.get('out_name', f"{model_path.stem}_{test_npz.stem}-test.npz")
+    out_name = kwargs.get('output_tag', f"{model_path.stem}_{test_npz.stem}-tst.npz")
     out_path = Path(kwargs.get('out_dir', model_path.parent))/str(out_name)
     out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
 
-    save_payload = {'cache_index':cache_index, 'y_true':y_true, 'y_pred':y_pred, 'y_prob':y_prob}
+    save_payload = {'model_path': str(model_path), 'test_cache': str(test_npz),
+                    'cache_index':cache_index,
+                    'y_true':y_true, 'y_pred':y_pred, 'y_prob':y_prob}
+
     if vid_info:
         test_data = np.load(test_npz, allow_pickle=True)
         if 'meta' not in test_data.files:
@@ -376,7 +381,10 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, **kwar
 
     np.savez_compressed(out_path, **save_payload)
 
-    print(f'Testing run complete\n  predictions saved to "{out_path}" \n')
+    print(f"\n=== Testing run complete ===\n"
+          f"  Tested model : {test_model}\n"
+          f"  Tested set   : {test_cache}\n"
+          f"  Predictions saved to: {out_path}\n")
     return {'path': str(out_path), **save_payload}
 
 # --------------------------------------------------
@@ -388,9 +396,12 @@ def test_test(test_cache:str|Path, test_model:str|Path, **kwargs):
     #* return run_testing(test_cache, tst_model, **kwargs)
     # res = run_testing(test_cache, test_model, **kwargs)
     res = run_testing(test_model, test_cache, **kwargs)
-    if res is not None:
-        report = analyze_test_results(res['path'], show_roc=kwargs.get('show',False))
-        print_test_report(report)
+    if res is None: return
+    if not kwargs.get('vid_info',False):
+        report = evl.analyze_clip_test(res['path'], show_roc=kwargs.get('show', False))
+    else: #* vid_info == Ture
+        report = evl.analyze_video_test(res['path'], show_roc=kwargs.get('show', False))
+    evl.print_test_report(report)
 
 #*
 def train_rwd_n_rlvs():
@@ -401,22 +412,22 @@ def train_rwd_n_rlvs():
     #* Test on RWF test-set
     res = run_testing(d/'RWF_test.npz', output_path/'model.pt')
     if res is not None:
-        report = analyze_test_results(res['path'], show_roc=True, print=True)
+        report = evl.analyze_clip_test(res['path'], show_roc=True, print=True)
     #* Test on RLVS train-set
     res = run_testing(d/'RLVS_train.npz', output_path/'model.pt')
     if res is not None:
-        report = analyze_test_results(res['path'], show_roc=True)
+        report = evl.analyze_clip_test(res['path'], show_roc=True)
 
     #* train on RLVS data
     output_path = run_training(d/"RLVS_train.npz", tag="TMS-18f_RLVS", split_ratio=0.85, split_seed=21)
     #* Test on RLVS test-set
     res = run_testing(d/'RLVS_test.npz', output_path/'model.pt')
     if res is not None:
-        report = analyze_test_results(res['path'], show_roc=True, print=True)
+        report = evl.analyze_clip_test(res['path'], show_roc=True, print=True)
     # * Test on RLVS train-set
     res = run_testing(d/'RWF_train.npz', output_path/'model.pt')
     if res is not None:
-        report = analyze_test_results(res['path'], show_roc=True)
+        report = evl.analyze_clip_test(res['path'], show_roc=True)
 
 
 def train_joint():
@@ -439,7 +450,7 @@ def train_joint():
     #* Test on RWF test-set
     res = run_testing(tst_j, output_path/'model.pt')
     if res is not None:
-        report = analyze_test_results(res['path'], show_roc=True, print=True)
+        report = evl.analyze_clip_test(res['path'], show_roc=True, print=True)
 
 
 if __name__ == '__main__':
@@ -451,6 +462,9 @@ if __name__ == '__main__':
     # train_rwd_n_rlvs()
     # train_joint()
     tst_mdl = "work_dirs/json_models/260331-0233_J-RWFLV-25ft/best_model.085.pt"
+    tst_mdl = "work_dirs/json_models/draft/260331-0233_J-RWFLV-25ft/best_model.085.pt"
     tst_ch =  "data/cache/J_RWFLV_25ft_test.npz"
-    test_test(test_model=tst_mdl, test_cache=tst_ch, out_name='tst-tst' )
+
+    test_test(test_model=tst_mdl, test_cache=tst_ch, out_name='tvt_J25ft-4v',vid_info=True)
+
 # 318(2,4,2)-> 300(2,,)
