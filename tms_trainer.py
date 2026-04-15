@@ -32,7 +32,8 @@ def _run_train(args):
 def _run_test(args):
     """ Run testing command."""
     kw = _kwargs_from_args(args, ('batch_size', 'threshold', 'out_dir', 'output_tag'))
-    res = run_testing(args.test_model, args.test_cache, vid_info=args.vid_info, **kw)
+    res = run_testing(args.test_model, args.test_cache,
+                      vid_info=args.vid_info, stream_mode=args.stream_mode, **kw)
     # if res is not None:
     #     print(f"Testing done. Predictions: {res['path']}")
     #     if args.analyze:
@@ -72,10 +73,11 @@ def main():
     test_p.add_argument('-od', '--out-dir',    type=Path, default=None, help='Output dir for predictions files')
     test_p.add_argument('-t',  '--output-tag', type=str,  default=None, help='Output prediction filename')
     test_p.add_argument('-v',  '--video-info', dest='vid_info', action='store_true', help='add source-video info to raw predictions npz')
+    test_p.add_argument('-s', '--stream_mode', dest='stream_mode', action='store_true', help='use stream-style identifiers (video_name, time_stamp)')
     test_p.add_argument('-a' , '--analyze',  dest='analyze', action='store_true', help='run further predictions analysis')
     test_p.add_argument('-ns', '--no-show-roc', dest='show_roc', action='store_false', help='Do not display ROC figure')
     test_p.add_argument('--no-report',   dest='report' ,  action='store_false', help='Do not print test report')
-    test_p.set_defaults(analyze=False, report=True, show_roc=True, vid_info=False)
+    test_p.set_defaults(analyze=False, report=True, show_roc=True, vid_info=False, stream_mode=False)
     test_p.set_defaults(fn=_run_test)
 
     args = parser.parse_args()

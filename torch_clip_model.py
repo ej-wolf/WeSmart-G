@@ -38,7 +38,7 @@ DEFAULT_MIN_EPOCHS = 30
 DEFAULT_MAX_EPOCHS = 150
 DEFAULT_SAVE_EVERY = 10
 #*
-DEFAULT_PATIENCE = 20
+DEFAULT_PATIENCE = 30
 DEFAULT_MIN_DELTA = 0.002
 
 DEFAULT_DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -303,17 +303,18 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
 
 
 # def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
-def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, **kwargs):
+def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, stream_mode=False, **kwargs):
     """     Run model inference on a cache NPZ and save predictions NPZ file.
-        NPZ file stores: `cache_index`, `y_true`, `y_pred`, `y_prob`,
-        and optionally `meta_video`.
-        model setting are loaded from config.json (file
+        NPZ file stores raw per-clip predictions. Model setting are loaded from config.json (file
+        Default format uses `cache_index` as clip identifier.
+        Stream mode uses (`video_name`, `time_stamp`) as identifiers.
         parameters:
-        :param test_cache: path to test cache NPZ.
-        :param test_model: path to `model.pt` produced by `run_training`.
-        :param vid_info  : if True save source-video info (`meta_video`) in raw NPZ.
-        :param kwargs    : batch_size, threshold, out_dir, out_name
-        :return          : Dict with saved `path` and in-memory prediction arrays.
+        :param test_cache : path to test cache NPZ.
+        :param test_model : path to `model.pt`
+        :param vid_info   : if True save clip metadata fields (`meta_video`, `meta_t_start`, `meta_t_end`).
+        :param stream_mode: if True save `video_name` and `time_stamp` instead of `cache_index`.
+        :param kwargs     : batch_size, threshold, out_dir, out_name
+        :return           : Dict with saved `path` and in-memory prediction arrays.
     """
     model_path = Path(test_model)
     test_npz = Path(test_cache)
@@ -356,7 +357,6 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, **kwar
     y_true = np.concatenate(y_true_all, axis=0)
     y_pred = (y_prob >= threshold).astype(np.int64)
 
-    cache_index = np.arange(len(y_true), dtype=np.int64)
     y_true = y_true.astype(np.int64)
     y_pred = y_pred.astype(np.int64)
 
@@ -367,17 +367,31 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, **kwar
     out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
 
     save_payload = {'model_path': str(model_path), 'test_cache': str(test_npz),
-                    'cache_index':cache_index,
-                    'y_true':y_true, 'y_pred':y_pred, 'y_prob':y_prob}
+                    'y_true': y_true, 'y_pred': y_pred, 'y_prob': y_prob}
 
-    if vid_info:
+    if stream_mode or vid_info:
         test_data = np.load(test_npz, allow_pickle=True)
         if 'meta' not in test_data.files:
-            raise KeyError(f"{test_npz} does not contain 'meta', cannot add vid_info")
+            raise KeyError(f"{test_npz} does not contain 'meta', cannot add stream/video info")
         meta = test_data['meta']
         if len(meta) != len(y_true):
             raise ValueError(f"meta length mismatch: {len(meta)} vs {len(y_true)} predictions")
-        save_payload['meta_video'] = np.asarray([item['video'] for item in meta], dtype=object)
+        meta_video = np.asarray([Path(item['video']).stem for item in meta], dtype=str)
+        meta_t_start = np.asarray([item['t_start'] for item in meta], dtype=np.float32)
+        meta_t_end = np.asarray([item['t_end'] for item in meta], dtype=np.float32)
+
+        if stream_mode:
+            save_payload['video_name'] = meta_video
+            save_payload['time_stamp'] = meta_t_end
+        else:
+            save_payload['cache_index'] = np.arange(len(y_true), dtype=np.int64)
+
+        if vid_info:
+            save_payload['meta_video'] = meta_video
+            save_payload['meta_t_start'] = meta_t_start
+            save_payload['meta_t_end'] = meta_t_end
+    else:
+        save_payload['cache_index'] = np.arange(len(y_true), dtype=np.int64)
 
     np.savez_compressed(out_path, **save_payload)
 

@@ -7,22 +7,26 @@
     5) (optional) Prints dataset statistics for inspection
 
     usage
-    >> precompute_clips  jsons_dir cache_dir [-h] [-s SPLIT_DIR] [-e]
-                        [-rs RANDOM_SEED] [-ns] [-r VALID_RATIO]
+    >> precompute_clips  jsons_dir cache_dir [-h] [-sd SPLIT_DIR] [-e]
+                        [-rs RANDOM_SEED] [-ns] [-r VALID_RATIO] [-w WINDOW] [-s STRIDE]
+                        [-p] [-l] [--no-temp-smooth] [-jt {type_1,type_2,1,2}]
     positional arguments:
       jsons_dir                     : dir containing JSONs
       cache_dir                     : path for the cached NPZ feature files
     options:
       -h/ --help                    : Show help message and exit
-      -s/ --split-dir [path]        : Path for the train/val list files
-      -e/ --allow`preP-empty        : Allow empty (None) labeling (default: True)
       -cn/--cache-name              : Name for the created npz
+      -sd/--split-dir [path]        : Path for the train/val list files
+      -e/ --allow-empty             : Allow empty (None) labeling
       -rs/--random-seed RANDOM_SEED : set the random seed (42)
       -ns/--new-split               : Force New split (default: False)
       -r/--valid-ratio VALID_RATIO  : Validation split ratio (default: 0.2)
+      -w/ --window WINDOW           : Clip window in seconds
+      -s/ --stride STRIDE           : Clip stride in seconds
       -p/--pure-motion              : Use only motion features, drop the static overlap block
       -l/--legacy                   : Use only the original 18 motion features
       --no-temp-smooth              : Disable temporal smoothing
+      -jt/--json-type               : Used to run old (legacy) JSON formats
 
     ***  info - Inspect an existing cache NPZ and print dataset/video statistics.
     usage:
@@ -48,7 +52,7 @@ from pathlib import Path
 #* ---- local imports  ----
 from json_utils import load_json_data
 from common.my_local_utils import print_color
-from temporal_slicing_json import slice_json_stream
+from temporal_slicing_json import slice_json_stream, WINDOW_SEC, STRIDE_SEC
 from analyze_json_motion import extract_motion_features, _temporal_conv_1d, _clip_pooling
 
 
@@ -147,7 +151,12 @@ def precompute_features_cache(json_dir :str|Path,
         # clips = slice_json_stream(json_path, allow_empty_lbl=allow_empty_lbl)
         # print_color(f" file: {json_path.name} --  {json_path.is_file()}", 'b')
         json_data = load_json_data(json_path, j_type=kwargs.get('json_type', DEFAULT_TYPE))
-        clips = slice_json_stream(json_data, allow_empty_lbl=allow_empty_lbl)
+        clips = slice_json_stream(
+            json_data,
+            window_sec=kwargs.get('window', WINDOW_SEC),
+            stride_sec=kwargs.get('stride', STRIDE_SEC),
+            allow_empty_lbl=allow_empty_lbl,
+        )
 
         for clip in clips:
             if clip['label'] is None:
@@ -473,6 +482,8 @@ def _run_build(args):
                                allow_empty_lbl=args.allow_empty,
                                json_type=args.json_type,
                                temp_smooth=(not args.no_temp_smooth),
+                               window=args.window,
+                               stride=args.stride,
                                pure_motion=args.pure_motion,
                                legacy=args.legacy,
                                )
@@ -480,6 +491,8 @@ def _run_build(args):
                                allow_empty_lbl=args.allow_empty,
                                json_type=args.json_type,
                                temp_smooth=(not args.no_temp_smooth),
+                               window=args.window,
+                               stride=args.stride,
                                pure_motion=args.pure_motion,
                                legacy=args.legacy,
                                )
@@ -510,15 +523,17 @@ def main():
     build_p.add_argument('jsons_dir', type=Path, help="dataset path/ dir containing JSONs")
     build_p.add_argument('cache_dir', type=Path, help="path for the cached NPZ feature files")
     build_p.add_argument('-cn', '--cache-name', type=Path, default=None, help="base name for output npz files")
-    build_p.add_argument('-s',  '--split-dir' , type=Path, default=None, help="path for train_videos.txt/valid_videos.txt")
+    build_p.add_argument('-sd', '--split-dir' , type=Path, default=None, help="path for train_videos.txt/valid_videos.txt")
     build_p.add_argument('-ns', '--new-split', action='store_true', help='force new train/valid split')
     build_p.add_argument('-r',  '--valid-ratio', type=float, default=VAL_RATIO, help='validation split ratio')
     build_p.add_argument('-rs', '--random-seed', type=int, default=RANDOM_SEED)
+    build_p.add_argument('-w',  '--window', type=float, default=WINDOW_SEC, help='clip window in seconds')
+    build_p.add_argument('-s',  '--stride', type=float, default=STRIDE_SEC, help='clip stride in seconds')
     build_p.add_argument('-e',  '--allow-empty', action='store_true', help="allow empty (None) labels")
-    build_p.add_argument('-jt', '--json-type', default=DEFAULT_TYPE, choices=['type_1', 'type_2', '1', '2'], help='input JSON format for loader')
     build_p.add_argument('-p',  '--pure-motion', action='store_true', help='use only motion features, without the static overlap block')
     build_p.add_argument('-l',  '--legacy',  action='store_true', help='use only the original 18 motion features')
     build_p.add_argument('--no-temp-smooth', action='store_true', help='disable temporal smoothing')
+    build_p.add_argument('--json-type', default=DEFAULT_TYPE, choices=['type_1', 'type_2', '1', '2'], help='input JSON format for loader')
 
     info_p = sub.add_parser('info', help='print cache statistics from npz file')
     info_p.add_argument('npz_path', type=Path, help='path to cache npz file')

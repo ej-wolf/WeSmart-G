@@ -37,6 +37,10 @@ def _load_raw_results_npz(npz_path:str|Path) -> dict:
            'y_pred': data['y_pred'].astype(np.int64),
            'y_prob': data['y_prob'].astype(np.float32) if 'y_prob' in data.files else None,}
 
+    if 'video_name' in data.files:
+        raw['video_name'] = data['video_name']
+    if 'time_stamp' in data.files:
+        raw['time_stamp'] = data['time_stamp']
     if 'meta_video' in data.files:
         raw['meta_video'] = data['meta_video']
     if 'meta_t_start' in data.files:
@@ -93,7 +97,7 @@ def _resolve_output_pah(src_path, output_name, out_path=None):
 
 def _support_counts(y_true):
     """ Return class-count dict for a binary label array. """
-    support = {}
+    support = {0: 0, 1: 0}
     for v in np.asarray(y_true, dtype=np.int64):
         k = int(v)
         support[k] = support.get(k, 0) + 1
@@ -289,7 +293,7 @@ def analyze_video_test(test_res:Path|str|dict, **kwargs):
     vid_score = np.asarray(vid_score, dtype=np.float64)
     # video_support = _support_counts(vid_pred)
 
-    print_color(_support_counts(y_true),'r')
+    print_color(_support_counts(y_true), 'r')
     summary = binary_metrics(vid_true, vid_pred)
     summary.update({'raw_results_path': str(res_path) ,
                     'raw_results_type': 'y_prob' if y_prob is not None else 'y_pred',
@@ -299,7 +303,7 @@ def analyze_video_test(test_res:Path|str|dict, **kwargs):
                     'num_clips': len(y_true),
                     'support_clips': _support_counts(y_true),  # clip_support,
                     'num_videos': len(vid_true),
-                    'support_video': _support_counts(vid_pred),
+                    'support_video': _support_counts(vid_true),
                     'num_videos_excluded': len(excluded_videos),
                     'excluded_videos': excluded_videos, })
 
