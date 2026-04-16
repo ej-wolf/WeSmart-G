@@ -96,12 +96,27 @@ def _resolve_output_pah(src_path, output_name, out_path=None):
 
 
 def _support_counts(y_true):
-    """ Return class-count dict for a binary label array. """
-    support = {0: 0, 1: 0}
-    for v in np.asarray(y_true, dtype=np.int64):
-        k = int(v)
-        support[k] = support.get(k, 0) + 1
-    return support
+    """ Return class counts as [class_0_count, class_1_count]. """
+    y_true = np.asarray(y_true, dtype=np.int64)
+    return [int(np.sum(y_true == 0)), int(np.sum(y_true == 1))]
+
+
+def _support_pair(obj) -> tuple[int, int] | None:
+    """ Normalize current list and older dict/json support formats."""
+    try:
+        if obj is None:
+            return None
+        elif isinstance(obj, dict):
+            return int(obj.get(0, obj.get('0'))), int(obj.get(1, obj.get('1')))
+        elif isinstance(obj, (list, tuple, np.ndarray)):
+            # if len(obj) != 2:
+            #     return None
+            # return int(obj[0]), int(obj[1])
+            return (int(obj[0]), int(obj[1])) if len(obj) == 2 else None
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
 
 
 def _save_analyze_summary(summary, out_path):
@@ -439,12 +454,19 @@ def print_test_report(results, **kwargs):
     label_w = kwargs.get('label_width', 20)
 
     cm:list|None = summary.get('confusion_matrix', None)
-    support:list|None = summary.get('support_video', summary.get('support_clips', None) )
-    support_str = f"{support[0]}/ {support[1]}" if support is not None else 'N/A'
+    testing_set = summary.get('testing_set', {})
+    support = summary.get('support_video', summary.get('support_clips', None))
+    if support is None:
+        support = testing_set.get('videos_support', testing_set.get('clips_support', None))
+    support_pair = _support_pair(support)
+    support_str = f"{support_pair[0]}/ {support_pair[1]}" if support_pair is not None else 'N/A'
+    num_samples = summary.get('num_videos', summary.get('num_clips', None))
+    if num_samples is None:
+        num_samples = testing_set.get('videos_num', testing_set.get('clips_num', None))
 
     rows = [("Predictions file", Path(summary.get('raw_results_path', '')).name ),
             # ("Num_samples", summary.get('num_samples', None)),
-            ("Num_samples", summary.get('num_videos', summary.get('num_clips', None) )),
+            ("Num_samples", num_samples),
             ("GT_counts 0/1", support_str),
             ("accuracy", summary.get('accuracy', None)),
             ("recall", summary.get('recall', None)),

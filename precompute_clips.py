@@ -1,4 +1,5 @@
 """ CLI script.    '
+    *** Build (default) ****
     preprocess and extract features from given json dir.
     1) create train/val split, or load existing split from *.txt files
     2) slices JSON streams into temporal clips,
@@ -6,10 +7,10 @@
     4) Saves cached features to disk (one NPZ file per split)
     5) (optional) Prints dataset statistics for inspection
 
-    usage
-    >> precompute_clips  jsons_dir cache_dir [-h] [-sd SPLIT_DIR] [-e]
-                        [-rs RANDOM_SEED] [-ns] [-r VALID_RATIO] [-w WINDOW] [-s STRIDE]
-                        [-p] [-l] [--no-temp-smooth] [-jt {type_1,type_2,1,2}]
+    usage:
+    >> precompute_clips build  jsons_dir cache_dir [-h] [-cn CACHE_NAME] [-sd SPLIT_DIR]
+                        [-ns] [-r VALID_RATIO] [-rs RANDOM_SEED] [-w WINDOW] [-s STRIDE]
+                        [-e] [-p] [-l] [--no-temp-smooth] [--json-type {type_1,type_2,1,2}]
     positional arguments:
       jsons_dir                     : dir containing JSONs
       cache_dir                     : path for the cached NPZ feature files
@@ -17,18 +18,19 @@
       -h/ --help                    : Show help message and exit
       -cn/--cache-name              : Name for the created npz
       -sd/--split-dir [path]        : Path for the train/val list files
-      -e/ --allow-empty             : Allow empty (None) labeling
       -rs/--random-seed RANDOM_SEED : set the random seed (42)
       -ns/--new-split               : Force New split (default: False)
       -r/--valid-ratio VALID_RATIO  : Validation split ratio (default: 0.2)
       -w/ --window WINDOW           : Clip window in seconds
       -s/ --stride STRIDE           : Clip stride in seconds
+      -e/ --allow-empty             : Allow empty (None) labeling
       -p/--pure-motion              : Use only motion features, drop the static overlap block
       -l/--legacy                   : Use only the original 18 motion features
       --no-temp-smooth              : Disable temporal smoothing
       -jt/--json-type               : Used to run old (legacy) JSON formats
 
-    ***  info - Inspect an existing cache NPZ and print dataset/video statistics.
+    ***  info ***
+    Inspect an existing cache NPZ and print dataset/video statistics.
     usage:
     >> precompute_clips.py info npz_path [-h] [--list] [--details] [--sort SORT]
                                         [--sample SAMPLE] [-rs RANDOM_SEED]
@@ -42,9 +44,14 @@
       -sm/--sample SAMPLE           : (int/float) sample size/portion for printing
       -rs/--random-seed             : (int) seed for random sampling (default: 42)
 
-    ***  merge - merges multiple cache npz files into one
-       out_path                     : Output merged npz path
-       npz_paths                    : Cache npz files for merging
+    ***  merge ***
+    merges multiple cache npz files into one
+    usage:      precompute_clips merge [-h] out_path npz_paths [npz_paths ...]
+    positional arguments:
+       out_path                     : path with name of the output merged npz path
+       npz_paths                    : Cache npz files for merge
+    options:
+       -h/--help                    :show this help message and exit
 """
 
 import random, argparse, sys, numpy as np
