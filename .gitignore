@@ -21,6 +21,7 @@ __pycache__/
 
 # Data, Caches and temp dirs 
 data/
+data-qt/
 cache/
 dummy_test/rawframes_dummy/
 

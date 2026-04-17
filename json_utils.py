@@ -22,10 +22,10 @@ Returned structure:
                  }
 """
 
-import json
+import json, cv2
 from pathlib import Path
 #* local imports
-from my_local_utils import print_color, _make_unique_dir
+from common.my_local_utils import print_color, _make_unique_dir
 
 # --------------------------------------------------
 # * Public loader

@@ -7,41 +7,38 @@
     * The unit is wrapped into CLI in convert_json.py via process_video function.
 
     * JSON structure:
-           {'video' : "...",           # video/file name
-            'fps': 25.0,
-            'step': 5,                # step size
-            'frames':[
-                    {'f': 15,               #* frame index
-                     't': 0.6,              #* time from start in seconds
-                     'individual_events': [],
-                     'group_events': [2, 3],
-                     'detection_list':[     #* list of YOLO detections (human)
-                              {'class':     #* normal,  fall ...
-                               'conf':      #* confidence of 'class'
-                               'bbox':      #* [x1, y1, x2, y2] in normalized unit
-                               'key_points': [x1, y1, c1, x2, y2, c2, ....  x17, y17, c17]
-                                            #* flatten vector of 17 key points (x,y) and it's confidence (c)
-                                       ]
-                    },]
-             `      ...
+       {'video' : "...",                #* video/file name
+        'fps': 25.0,                    #* video fps according to metadata
+        'sampling_rate':{'target':,     #* desired/target for analyzing (Hz)
+                         'effective':   #*
+                        },
+        'detector': {...}                 #* info abot the detector used to detect BB and KP
+        'event_intervals': {...}          #*
+        'frames':[
+                {'f': 15,               #* frame index
+                 't': 0.6,              #* time from start in seconds
+                 'individual_events': [],
+                 'group_events': [2, 3],
+                 'detection_list':[     #* list of YOLO detections (human)
+                          {'class':     #* normal,  fall ...
+                           'conf':      #* confidence of 'class'
+                           'bbox':      #* [x1, y1, x2, y2] in normalized unit
+                           'key_points': [x1, y1, c1, x2, y2, c2, ....  x17, y17, c17]
+                                        #* flatten vector of 17 key points (x,y) and it's confidence (c)
+                                   ]
+                },]
+         `      ...
 """
 
 import cv2, json, torch
 from pathlib import Path
 from ultralytics import YOLO
 #* import from my utils
-from my_local_utils import get_unique_name, print_color
+from common.my_local_utils import get_unique_name, print_color
 
-#* Events Thresholds  -------------------------------------------------------------------
-# SINGLE_THRESHOLDS = { 0: 0.5,   #* normal
-#                       1: 0.9,   #* abnormal
-#                       2: 0.7,   #* fall
-#                       5: 0.9,}  #* kick
-# GROUPED_THRESHOLDS = {3: 0.7,   #* tension
-#                       4: 0.7,}  #* violence
+#* Defaults and constants  -------------------------------------------------------------------
 DETECTION_THRESHOLD = 0.5
 DEFAULT_SAMPELING = 5
-# STEP = 5
 
 #* Events flags
 TAG_NO_EVENT = 0
@@ -223,11 +220,12 @@ def process_video(input_path: Path|str,
     tension_intervals = tension_intervals or []
     fight_intervals = fight_intervals or []
     fall_intervals = fall_intervals or []
+    allow_incomplete = bool(kwargs.get('allow_incomplete', False))
 
     #* load model
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
 
-    #* handel and set input/output pathes
+    #* handel and set input/output paths
     if input_path.is_dir():
         input_dir = input_path
         vid_list = [p for p in input_path.iterdir() if p.is_file()]
@@ -235,7 +233,7 @@ def process_video(input_path: Path|str,
         input_dir = input_path.parent
         vid_list = [input_path]
     else:
-        raise ("Error, can't find input path")
+        raise "Error, can't find input path"
 
     if output_path is None:
         json_dir = input_path if input_path.is_dir() else input_path.parent
@@ -243,13 +241,14 @@ def process_video(input_path: Path|str,
     elif output_path.suffix == '.json':
         json_dir = output_path.parent if output_path.parent.is_dir() else input_dir
         json_name = output_path.stem
-    elif output_path.is_dir():
+    elif output_path.is_dir() or output_path.parent.is_dir():
         json_dir = output_path
         json_name = None
     else:
-        #ToDo: handle it
-        json_dir = output_path
-        json_name = None
+        #ToDo: Done
+        raise f"Error, Bad output path :{output_path}\n See --help for farther information"
+        # json_dir = output_path
+        # json_name = None
     json_dir.mkdir(parents=True, exist_ok=True)
 
     #* detection info for header
@@ -260,12 +259,12 @@ def process_video(input_path: Path|str,
 
     ann_intervals = parse_annotation_file(ann_file) if ann_file else None
     for vid_path in vid_list:
-        #* open
+        #* open video
         cap = cv2.VideoCapture(str(vid_path))
         if not cap.isOpened():
             print(f"[WARN] Cannot open video (probably corrupted): {vid_path}")
             continue
-
+        #* params from metadata
         fps = cap.get(cv2.CAP_PROP_FPS)
         frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -276,6 +275,7 @@ def process_video(input_path: Path|str,
         if w != 1920:
             h = int(w*1080/1920)
 
+        img_sz = (h, w)
         video_duration_sec = frame_count/fps
         print(f"*** Converting {vid_path.name},{(w, h)}p {video_duration_sec} s")
         video_ann_intervals = ann_intervals
@@ -294,9 +294,8 @@ def process_video(input_path: Path|str,
         fall_intervals_sec.extend(parse_interval(s) for s in fall_intervals if s and s.strip())
 
 
-        # target_sampling = float(kwargs.get('sample_rate', DEFAULT_SAMPELING))
         target_sampling = sample_rate or  DEFAULT_SAMPELING
-        if target_sampling <= 0 or target_sampling > fps  :
+        if target_sampling <= 0 or target_sampling > fps :
         #* i.e    0 <= sampling_rate_Hz <= fps
             raise ValueError(f"Invalid sampling rate: {target_sampling} Hz")
 
@@ -312,15 +311,23 @@ def process_video(input_path: Path|str,
         # dTHRESH = 0.5
         while True:
             ret, frame = cap.read()
-            if not ret:
+            if not ret or frame is None:
+                print(f"[INFO] cv2.VideoCapture.read()  failed at frame_idx = {frame_idx+1}")
                 break
+
             frame = cv2.resize(frame, (w, h))
+            #* frame miss
             if frame_idx % step != 0:
                 frame_idx += 1
                 continue
+            time_sec = frame_idx/fps
 
             #* run model on current frame
-            results = model(frame, conf=conf_thresh, verbose=False)[0]
+            try:
+                results = model(frame, conf=conf_thresh, verbose=False,  imgsz=img_sz)[0]
+            except Exception as exc:
+                print(f"[ERROR] YOLO inference failed at frame_idx={frame_idx}: {exc}")
+                raise
 
             detection_list = []
             if results.boxes:
@@ -361,8 +368,7 @@ def process_video(input_path: Path|str,
             frames.append({'f': frame_idx, 't': time_sec,
                            'individual_events': [],
                             'group_events': sorted(set(group_tags), reverse=True),
-                            'detection_list': detection_list,}
-                          )
+                            'detection_list': detection_list,})
 
             if show:
                 cv2.imshow("head_center_debug", frame)
@@ -412,10 +418,13 @@ def process_video(input_path: Path|str,
 def local_runner(tst_path, **kwargs):
     process_video(tst_path, **kwargs)
 
-
 if __name__ == "__main__":
-    local_runner("/mnt/local-data/Projects/Wesmart/Video-datasets/test_ds/tst_conv",
-                 output_path="/mnt/local-data/Python/Projects/weSmart/data/json_files/tst_conv/try_05",
+
+    video_path = Path("/mnt/local-data/Projects/Wesmart/Video-datasets/draft_set/tst_conv")
+    draft_path =  Path( "/mnt/local-data/Python/Projects/weSmart/data/json_files/tst_conv/draft_dir")
+
+    local_runner(video_path,
+                 output_path = draft_path/'tst-03'/'tst-03',
                  default_group_tag = 0,
                  )
 

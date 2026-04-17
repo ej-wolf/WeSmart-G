@@ -3,7 +3,7 @@ from pathlib import Path
 from colorama import Fore
 
 #* Local imports
-from my_local_utils import print_color
+from common.my_local_utils import print_color
 from json_utils import  load_json_data
 
 # --------------------------------------------------
@@ -24,9 +24,9 @@ def slice_json_stream(# json_path:str|Path,
                       allow_empty_lbl:bool = True):
     """  Slice a continuous JSON stream into overlapping temporal clips.
     :param data: json raw data
-    window_sec, stride_sec, min_events : slicing parameters
-    allow_empty_lbl: if True , label = None (neither positive nor negative)
-                     if False, label = 0 or 1 (fully annotated negatives)
+    :param window_sec, stride_sec, min_events: slicing parameters
+    :param allow_empty_lbl: if True , label = None (neither positive nor negative)
+                            if False, label = 0 or 1 (fully annotated negatives)
     Return:
     clips : list of dicts with keys:
         - frames : list of frame dicts belonging to the clip

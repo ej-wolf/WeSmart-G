@@ -1,4 +1,4 @@
-import shutil, re, random
+import shutil, re
 from pathlib import Path
 import json
 
@@ -7,12 +7,18 @@ from colorama import Fore, Style
 # B, U, R = '\033[1m', '\033[4m', '\033[0m'
 # RED, GREEN, BLUE = Fore.RED, Fore.GREEN, Fore.BLUE
 # RESET = Style.RESET_ALL
+
+def rgb(r, g, b):
+    return f"\033[38;2;{r};{g};{b}m"
+
 def print_color(msg:str, clr=Fore.RED):
     if   clr in ['RED',' Red', 'red', 'r']      :  clr = Fore.RED
     elif clr in ['BLUE', 'Blue', 'blue', 'b']   :  clr = Fore.BLUE
     elif clr in ['YELLOW', 'yellow', 'y']       :  clr = Fore.YELLOW
     elif clr in ['BLUE', 'Blue', 'blue', 'r']   :  clr = Fore.BLUE
     elif clr in ['GREEN', 'Green', 'green', 'g']:  clr = Fore.GREEN
+    elif clr in ['ORANGE', 'orange', 'o']       :  clr = rgb(255, 165, 0)
+
     print( f"{clr}{msg}{Style.RESET_ALL}")
 
 # ----------------------------------------------------------------------------
@@ -48,7 +54,7 @@ def clear_dir(path, missing_ok:bool = False) -> None:
     is printed and swallowed, so it won't stop the program.
     ----------
     :param path : str|Path  Directory whose contents will be removed.
-    :param missing_ok : bool, default False
+    :param missing_ok : bool, defaut False
             If False, raise FileNotFoundError when path doesn't exist.
             If True, silently do nothing when path doesn't exist.
     """
@@ -147,11 +153,11 @@ def get_unique_name(file_name:str|Path, n:int=3) -> Path:
 
 
 # ***** json handling ***** #x`1
-def load_json_frames(json_path: str | Path):
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-    # frames =
-    return data['frames'] # frames
+# def load_json_frames(json_path: str|Path):
+#     with open(json_path, 'r') as f:
+#         data = json.load(f)
+#     # frames =
+#     return data['frames'] # frames
 
 
 def json_equal(f1, f2, keys=None):
@@ -165,155 +171,6 @@ def json_equal(f1, f2, keys=None):
             return  all (found)
             return json.load(a).get('frames') == json.load(b).get('frames')
         return json.load(a) == json.load(b)
-
-def compare_json_dirs(d1, d2, soft_compare=False, **kwargs):
-    """ Compare two JSON directories;
-        in soft mode only common filenames are checked."""
-    d1, d2 = Path(d1),  Path(d2)
-
-    if not d1.is_dir(): return False, f"can't find 1st path: {d1.name}"
-    if not d2.is_dir(): return False, f"can't find 2nd path: {d2.name}"
-
-    files1 = {p.name: p for p in d1.rglob('*.json')}
-    files2 = {p.name: p for p in d2.rglob('*.json')}
-
-    if not soft_compare:
-        #* Strict mode: file sets must match exactly
-        if set(files1.keys()) != set(files2.keys()):
-            return False, 'Different file sets'
-        compare_list = files1.keys()
-    else:
-        #* Soft mode: compare only common names
-        compare_list = set(files1.keys()) & set(files2.keys())
-
-    if not compare_list:
-        return False, 'No common JSON files to compare'
-
-    unequal_count =0
-    for name in compare_list:
-        print(f"Comparing {name} ")
-        if  json_equal(files1[name], files2[name]):
-            print_color(f"\r - equal ", 'b')
-        else:
-            print_color(f"\r - differ")
-            unequal_count += 1
-            if kwargs.get('break',False):
-                return False, f'Mismatch in {name}'
-    if unequal_count > 0:
-        return False, f" {len(compare_list) - unequal_count} out of {len(compare_list)} are equal"
-
-    return True, "Directories identical (based on comparison mode)" #24
-
-
-def compare_json_samples(l1, l2, smp, **kwargs):
-    """Randomly compare JSON samples between two lists/dirs and print match statistics."""
-
-    list1 = list(Path(l1).rglob('*.json')) if isinstance(l1, (str, Path)) else l1
-    list2 = list(Path(l2).rglob('*.json')) if isinstance(l2, (str, Path)) else l2
-    # print_color(list1);
-    print_color(list2, 'b')
-
-    if not list1:
-        print('No files in first input')
-        return
-
-    # Determine number of samples
-    if isinstance(smp, float) and (0 <= smp <= 1):
-        n_draw = max(1, int(len(list1) * smp)) if smp > 0 else 0
-    elif isinstance(smp, int) and 0 < smp :
-        n_draw = min(int(smp), len(list1))
-    else:
-        raise ValueError('smp must a float between 0 and 1 or positive int ')
-
-    sampled = random.sample(list1, n_draw) if n_draw > 0 else []
-    print_color(sampled);
-    # Map list2 by filename
-    map2 = {p.name: p for p in list2}
-
-    if kwargs.get('print_list', False):
-        print("\t File: \t\t |\tFound\t|\tEqual ")
-    found,identical = 0, 0
-    for p1 in sampled:
-        p2 = map2.get(Path(p1).name)
-        if p2:
-            found += 1
-            eql = json_equal(p1, p2)
-            if eql:
-                identical += 1
-        if kwargs.get('print_list', False):
-            print(f"{Path(p1).name:20}- {'Yes' if p2 else '---'}\t{eql} ")
-
-    percent = 100*(identical/found) if found > 0 else 0
-    print(f"\nComparison result:\n {n_draw} files drawn\n"
-          f" {found} found in second set\n  {identical} identical ({percent:.1f}%)")
-
-
-# ***** pth handling ***** #
-#*86->63
-def get_epoch_pth(dir_path:str|Path, epoch:int|str|None='best') -> str|None:
-    """ Return path to desired checkpoint (pth file) in dir_path.
-    :param epoch:- int : desired epoch; if exact file not found, pick the closest
-                         *later* epoch_XX.pth, or the last available if none later.
-                 - 'best' (default): return a 'best' checkpoint if present
-                         (file name containing 'best'). If none, fall back to last
-                       epoch_XX.pth and print a warning.
-                 - 'last': return the last epoch_XX.pth (highest epoch number).
-    """
-    #* Helper: extract epoch number from names like 'epoch_25.pth'
-    def _epoch_of(name: str) -> int | None:
-        if name.startswith('epoch_') and name.endswith('.pth'):
-            num_part = name[len('epoch_'):-len('.pth')]
-            try:
-                return int(num_part)
-            except ValueError:
-                return None
-
-    def all_pairs():
-        epc_pairs = [(p.name, _epoch_of(p.name)) for p in pth_files]
-        return [(p, e) for p, e in epc_pairs if e is not None]
-
-    dir_path = Path(dir_path)
-    if not dir_path.is_dir():
-        raise FileNotFoundError(f'Checkpoint directory not found: {dir_path}')
-
-    pth_files = sorted(dir_path.glob('*.pth'))
-    if not pth_files:
-        # raise FileNotFoundError(f'No .pth files found in {dir_path}')
-        print(f"[Error] No pth files found in {dir_path}")
-        return None
-
-    #* --- 'best' case ---
-    if (isinstance(epoch, str) and epoch == 'best') or epoch is None:
-        pth = [p for p in pth_files if 'best' in p.name]
-        if pth:  # If several, pick the newest by mtime
-            best_pth = max(pth, key=lambda p: p.stat().st_mtime)
-            return str(best_pth.name)
-        print("[WARN] No best checkpoint found, falling back to last epoch.")
-        epoch = 'last'  # fallthrough
-
-    #* --- 'last' case ---
-    if isinstance(epoch, str) and epoch == 'last':
-        epoch_pairs = all_pairs()
-        if not epoch_pairs:
-            # Only weird filenames – fall back to newest
-            latest = max(pth_files, key=lambda p: p.stat().st_mtime)
-            return str(latest)
-        last_pth, _ = max(epoch_pairs, key=lambda pe: pe[1])
-        return last_pth
-
-    #* --- numeric (or numeric-string) epoch request ---
-    if not isinstance(epoch, int):
-        print(f"Unsupported epoch spec: {epoch!r}")
-
-    #* Exact match first
-    pth = f'epoch_{epoch}.pth'
-    if (dir_path/pth).is_file():
-        return pth
-    #* Otherwise, search for closest later epoch_XX.pth
-    epoch_pairs = all_pairs()
-    closest_pth, _ = min(epoch_pairs,key=lambda pe: (abs(pe[1] - epoch), -pe[1]), )
-    return str(closest_pth)
-
 
 # ***** Basic Log handling ***** #
 def _save_log(lines, log_name, log_type: str | None = None):
@@ -388,19 +245,6 @@ def as_collection(x):
     return [x]
 
 collection = as_collection
-
-
-# ----------------------------------------------------------------------------
-# Testing
-# -----------------------------------------------------------------------------
-def tst_get_pth(tst_path:str=None, **kwargs):
-
-    tst_ls = kwargs.get('tst_ls', [None, 'best', 'last', 10, 25, 17, 51, 81, -1])
-    d = Path(tst_path)
-    for t in tst_ls:
-        print(get_epoch_pth(d, t))
-    d = d.parent
-    print(get_epoch_pth(d)),  print(get_epoch_pth(d, epoch=10))
 
 
 if __name__ == "__main__":

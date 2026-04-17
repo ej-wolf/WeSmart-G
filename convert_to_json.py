@@ -24,7 +24,7 @@
 import argparse
 from pathlib import Path
 from video_to_json_bb_keypoints_folder import process_video
-from my_local_utils import print_color
+from common.my_local_utils import print_color
 
 def main():
     parser = argparse.ArgumentParser(description="Convert video to JSON data file",
@@ -39,7 +39,7 @@ def main():
     parser.add_argument( '-t', '--tension', action="append", help="Tension interval(s) in format START-END, e.g. 00:01:00-00:01:30, -00:00:40, 00:05:00-")
     parser.add_argument( '-f', '--fight', action="append", help="Fight interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
     parser.add_argument( '-fa','--fall', action="append", help="Fall interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
-    parser.add_argument( 'sw', '--show', action='store_true', help='Show video during processing')
+    parser.add_argument( '-sw', '--show', action='store_true', help='Show video during processing')
 
     args = parser.parse_args()
     if args.conf is not None:
