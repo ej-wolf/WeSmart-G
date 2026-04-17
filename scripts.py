@@ -16,6 +16,7 @@ MAIN_CACHE_DIR = Path("data/cache")
 
 DATASETS = [('RWF', RWF_DIR), ('RLVS', RLVS_DIR)]
 JOINT_DS =  'J-RWL'
+RESULT_NAME = 'all_results'
 
 def build_window_study(): # 80 -> 65
     """  Small batch script for the window/stride cache study.
@@ -23,10 +24,12 @@ def build_window_study(): # 80 -> 65
     using the existing split files in each dataset directory, then merges the
     matching train/test caches into a joint dataset per window/stride option.
     """
-    WINDOW_SETTINGS = [(2.0, 1.0),
-                       (3.0, 1.5),
-                       (3.0, 1.0),
-                       (4.0, 2.0), ]
+    # WINDOW_SETTINGS = [(2.0, 1.0), (3.0, 1.5), (3.0, 1.0), (4.0, 2.0), ]
+    WINDOW_SETTINGS = [(0.6, 0.4),
+                       (1.2, 0.6),
+                       (3.6, 1.2),
+                       (5.0, 2.5),]
+
 
     def _fmt_num(x: float) -> str:
         """ Format numeric values for filenames, replacing '.' with 'o'."""
@@ -59,8 +62,8 @@ def build_window_study(): # 80 -> 65
 
 
 
-def train_test_stdy(cache_dir:str|Path): #92 -> 63
-    """ Train all `*_train.npz` caches in a directory and run clip/video tests."""
+def train_test_stdy(cache_dir:str|Path, **kwargs): #92 -> 63
+    """Train all `*_train.npz` caches in a directory and run clip/video tests."""
 
     def _dataset_tag(stem:str, split_suffix:str) -> str:
         """Strip the split suffix from a cache stem."""
@@ -74,6 +77,19 @@ def train_test_stdy(cache_dir:str|Path): #92 -> 63
         bm = best_models[-1]
         be = int(bm.stem.split(".")[-1])
         return bm, be
+
+    def _existing_run_dir(tag: str, base_work_dir: Path) -> Path | None:
+        """Return the newest matching prior run dir for `tag`, if it is usable."""
+        if not base_work_dir.is_dir():
+            return None
+
+        run_name = re.compile(rf"^\d{{6}}-\d{{4}}_{re.escape(tag)}$")
+        matches = [p for p in base_work_dir.iterdir()
+                   if p.is_dir() and run_name.fullmatch(p.name)]
+        ready_runs = [p for p in matches if any(p.glob("best_model.*.pt"))]
+        if ready_runs:
+            return sorted(ready_runs)[-1]
+        return None
 
     def _run_one_test(test_npz:Path, test_mode: str):
         """Run one test job and the matching analysis."""
@@ -102,9 +118,18 @@ def train_test_stdy(cache_dir:str|Path): #92 -> 63
 
     for train_cache in train_caches:
         train_tag = _dataset_tag(train_cache.stem   , "_train")
-        run_dir = run_training( train_cache, tag=train_tag, work_dir=work_dir, save_every=20,)
-        run_dir = Path(run_dir)
-        best_model, best_epoch = _best_model_info(run_dir)
+        try:
+            run_dir = _existing_run_dir(train_tag, work_dir) if kwargs.get('skip_existing', True) else None
+            if run_dir is None:
+                run_dir = run_training(train_cache, tag=train_tag, work_dir=work_dir, save_every=20)
+                run_dir = Path(run_dir)
+            else:
+                print(f"Skipping training for {train_tag}: using {run_dir.name}")
+
+            best_model, best_epoch = _best_model_info(run_dir)
+        except Exception as exc:
+            print(f"[train_test_stdy] Training failed for {train_tag}: {type(exc).__name__}: {exc}")
+            continue
 
         own_test = cache_dir/f"{train_tag}_test.npz"
         suffix = train_tag.split("_", 1)[1] if "_" in train_tag else ""
@@ -115,13 +140,21 @@ def train_test_stdy(cache_dir:str|Path): #92 -> 63
         test_targets = []
         for p in (own_test, joint_test):
             if p not in test_targets:
-                if not p.is_file():
-                    raise FileNotFoundError(f"Missing test cache: {p}")
-                test_targets.append(p)
+                if p.is_file():
+                    test_targets.append(p)
+                else:
+                    print(f"[train_test_stdy] Missing test cache for {train_tag}: {p}")
+
+        if not test_targets:
+            print(f"[train_test_stdy] No test caches available for {train_tag}; skipping tests")
+            continue
 
         for test_cache in test_targets:
-            _run_one_test(test_cache, 'clip')
-            _run_one_test(test_cache, 'video')
+            for test_mode in ('clip', 'video'):
+                try:
+                    _run_one_test(test_cache, test_mode)
+                except Exception as exc:
+                    print(f"[train_test_stdy] Test failed for {train_tag} on {test_cache.name} ({test_mode}): {type(exc).__name__}: {exc}")
 
 
 def sum_all_results(work_dir: str | Path, **kwargs): #107
@@ -170,22 +203,23 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
         return out
 
     def _sort_key(row: dict, flag: str) -> tuple:
-        """Build a sort key for one requested sort mode."""
+        """ Build a sort key for one requested sort mode."""
         def _num_or_inf(val):
             return float(val) if val not in (None, '') else float('inf')
 
-        if flag == 'model':
+        if  flag == 'model':
             return (_model_disp(row['model'])[0],)
-        if flag == 'win-str':
+        elif flag == 'win-str':
             return (_num_or_inf(row['window']), _num_or_inf(row['stride']))
-        if flag == 'trn-tst':
+        elif flag == 'trn-tst':
             return (row['train ds'], row['test ds'])
-        if flag == 'auc':
+        elif flag == 'auc':
             auc = row['AUC']
             return (1 if auc is None else 0, -(auc if auc is not None else 0.0))
-        if flag in {'clp-vid', 'clip-vid', 'vid-clp'}:
+        elif flag in {'clp-vid', 'clip-vid', 'vid-clp'}:
             return ({'clip': 0, 'video': 1}.get(row['unit'], 99),)
-        raise ValueError(f"Unsupported sort mode: {flag}")
+        else:
+            raise ValueError(f"Unsupported sort mode: {flag}")
 
     def _sort_table(rows: list[dict]):
         """Apply stable sorting so each flag can define its own direction."""
@@ -215,13 +249,14 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
         support_str = f'{support[0]}/{support[1]}' if support is not None else 'N/A'
 
         cm = summary.get('confusion_matrix', [[None, None], [None, None]])
-        return {'model': str(model_path),
-                'cache': test_cache.stem,
+        return {'model': str(model_path), 'cache': test_cache.stem,
                 'train ds': train_ds, 'test ds': test_ds,
+                'unit': unit, 'samples': samples, 'support': support_str,
                 'window': window, 'stride': stride,
-                'unit': unit,
-                'samples': samples, 'support': support_str,
-                'FF': cm[0][0], 'FT': cm[0][1], 'TF': cm[1][0], 'TT': cm[1][1],
+                'FF': cm[0][0],
+                'FT': cm[0][1],
+                'TF': cm[1][0],
+                'TT': cm[1][1],
                 'Acc': summary.get('accuracy', None),
                 'Rec': summary.get('recall', None),
                 'FPR': summary.get('FPR', None),
@@ -273,7 +308,7 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
     table = [_row_from_summary(p) for p in summary_paths]
     _sort_table(table)
 
-    output_path = work_dir/'all_results'
+    output_path = work_dir/kwargs.get('op_name', RESULT_NAME)
     with (output_path.with_suffix('.pkl')).open('wb') as f:
         pickle.dump(table, f)
 
@@ -290,11 +325,11 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
 if __name__ == "__main__":
     pass
     study_dir = 'win-study'
-    study_dir = 'ftr-study'
+    # study_dir = 'ftr-study'
     STUDY_CACHE_DIR = MAIN_CACHE_DIR/study_dir
 
     # build_window_study()
-    # train_test_stdy(STUDY_CACHE_DIR)
-    sum_all_results(MAIN_WORK_DIR/study_dir, sort=['model','vid-clp', 'trn-tst-R'],save_json=True)
+    train_test_stdy(STUDY_CACHE_DIR)
+    sum_all_results(MAIN_WORK_DIR/study_dir, sort=['win-str','vid-clp', 'trn-tst-R'],save_json=True)
 
 # 321(,6,2)->300(,6,2)
