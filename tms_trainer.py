@@ -34,10 +34,6 @@ def _run_test(args):
     kw = _kwargs_from_args(args, ('batch_size', 'threshold', 'out_dir', 'output_tag'))
     res = run_testing(args.test_model, args.test_cache,
                       vid_info=args.vid_info, stream_mode=args.stream_mode, **kw)
-    # if res is not None:
-    #     print(f"Testing done. Predictions: {res['path']}")
-    #     if args.analyze:
-    #         analyze_test_results(res['path'], print=args.report, show_roc=args.show_roc)
     if res is not None and args.analyze:
         if args.vid_info:
             analyze_video_test(res['path'], print=args.report, show_roc=args.show_roc)

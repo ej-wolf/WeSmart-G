@@ -109,9 +109,6 @@ def _support_pair(obj) -> tuple[int, int] | None:
         elif isinstance(obj, dict):
             return int(obj.get(0, obj.get('0'))), int(obj.get(1, obj.get('1')))
         elif isinstance(obj, (list, tuple, np.ndarray)):
-            # if len(obj) != 2:
-            #     return None
-            # return int(obj[0]), int(obj[1])
             return (int(obj[0]), int(obj[1])) if len(obj) == 2 else None
         else:
             return None
@@ -222,12 +219,6 @@ def analyze_clip_test(test_results:Path|str|dict, **kwargs):
     out_name = kwargs.get('output_name', f"{tst_name}_clip-summary.json")
     out_path = _resolve_output_pah(results_path, out_name, kwargs.get('out_path', None))
     out_path = _save_analyze_summary(summary, out_path)
-
-    # if roc is not None and out_path is not None:
-    #     plot_roc_curve(roc, save_to=out_path, show=bool(kwargs.get('show_roc', False)),
-    #                    title=kwargs.get('roc_title', f"ROC Curve for {tst_name} ({score_name})"),)
-    # elif roc is not None and kwargs.get('show_roc', False):
-    #     plot_roc_curve(roc, show=True, title=kwargs.get('roc_title', f"ROC Curve for {tst_name} ({score_name})"))
 
     if roc is not None:
         plot_roc_curve(roc, save_to=out_path, show=bool(kwargs.get('show_roc', False)),
@@ -465,15 +456,12 @@ def print_test_report(results, **kwargs):
         num_samples = testing_set.get('videos_num', testing_set.get('clips_num', None))
 
     rows = [("Predictions file", Path(summary.get('raw_results_path', '')).name ),
-            # ("Num_samples", summary.get('num_samples', None)),
             ("Num_samples", num_samples),
             ("GT_counts 0/1", support_str),
             ("accuracy", summary.get('accuracy', None)),
             ("recall", summary.get('recall', None)),
             ("FPR", summary.get('FPR', None)),
             ("AUC", summary.get('roc_auc', None))
-            # ("model_path", summary.get('model_path', None)),
-            # ("test_cache", summary.get('test_cache', None)),
             ]
 
     print("\n===== Test Summary =====")
@@ -482,14 +470,9 @@ def print_test_report(results, **kwargs):
             print(f"{k:<{label_w}}: {_fmt(v)}")
 
     if cm is not None and len(cm) == 2 and len(cm[0]) == 2 and len(cm[1]) == 2:
-        # print(f"{'confusion_matrix':<{label_w}}:")
-        # print(f"{'':<{label_w}}  pred0  pred1")
-        # print(f"{'true0':<{label_w}}  {cm[0][0]:>5}  {cm[0][1]:>5}")
-        # print(f"{'true1':<{label_w}}  {cm[1][0]:>5}  {cm[1][1]:>5}")
         print(f"{'Confusion Matrix':<{label_w}}: pred-0  pred-1\n"
               f"{'True: 0':<{label_w}}[[{cm[0][0]:>5}, {cm[0][1]:>5}]\n"
-              f"{'True: 1':<{label_w}} [{cm[1][0]:>5}, {cm[1][1]:>5}]]\n")
-        print()
+              f"{'True: 1':<{label_w}} [{cm[1][0]:>5}, {cm[1][1]:>5}]]\n\n")
 
     return summary
 
