@@ -1,13 +1,9 @@
-"""  CLI wrapper for model training/testing on cached NPZ features.
-    Subcommands:
-    - `train`: calls `torch_clip_model.run_training`
-    - `test` : calls `torch_clip_model.run_testing`
-"""
+"""CLI wrapper for model training/testing on cached NPZ features."""
 
 from pathlib import Path
 import argparse
 from torch_clip_model import run_training, run_testing
-from evaluation_tools import analyze_clip_test, analyze_video_test
+from evaluation_tools import analyze_clip_test, analyze_video_test, analyze_stream_test
 
 
 def _kwargs_from_args(args, names):
@@ -31,14 +27,22 @@ def _run_train(args):
 
 def _run_test(args):
     """ Run testing command."""
+    if args.video_mode and args.stream_mode:
+        raise ValueError("Choose only one test evaluation mode: --video-mode or --stream-mode")
+
     kw = _kwargs_from_args(args, ('batch_size', 'threshold', 'out_dir', 'output_tag'))
     res = run_testing(args.test_model, args.test_cache,
-                      vid_info=args.vid_info, stream_mode=args.stream_mode, **kw)
-    if res is not None and args.analyze:
-        if args.vid_info:
-            analyze_video_test(res['path'], print=args.report, show_roc=args.show_roc)
-        else:
-            analyze_clip_test(res['path'], print=args.report, show_roc=args.show_roc)
+                      video_mode=(args.video_mode or args.stream_mode), **kw)
+    if res is None or not args.evaluate:
+        return
+
+    eval_kw = {'print': args.report, 'show_roc': args.show_roc}
+    if args.stream_mode:
+        analyze_stream_test(res['path'], **eval_kw)
+    elif args.video_mode:
+        analyze_video_test(res['path'], **eval_kw)
+    else:
+        analyze_clip_test(res['path'], **eval_kw)
 
 
 def main():
@@ -68,12 +72,12 @@ def main():
     test_p.add_argument('-td', '--threshold',  type=float,default=None, help='Decision threshold')
     test_p.add_argument('-od', '--out-dir',    type=Path, default=None, help='Output dir for predictions files')
     test_p.add_argument('-t',  '--output-tag', type=str,  default=None, help='Output prediction filename')
-    test_p.add_argument('-v',  '--video-info', dest='vid_info', action='store_true', help='add source-video info to raw predictions npz')
-    test_p.add_argument('-s', '--stream_mode', dest='stream_mode', action='store_true', help='use stream-style identifiers (video_name, time_stamp)')
-    test_p.add_argument('-a' , '--analyze',  dest='analyze', action='store_true', help='run further predictions analysis')
+    test_p.add_argument('-vm', '--video-mode',  dest='video_mode', action='store_true', help='run video-level evaluation after testing')
+    test_p.add_argument('-sm', '--stream-mode', dest='stream_mode', action='store_true',help='run stream-level evaluation after testing')
+    test_p.add_argument('-ev', '--evaluate', action='store_true', help='run evaluation after saving raw predictions')
     test_p.add_argument('-ns', '--no-show-roc', dest='show_roc', action='store_false', help='Do not display ROC figure')
     test_p.add_argument('--no-report',   dest='report' ,  action='store_false', help='Do not print test report')
-    test_p.set_defaults(analyze=False, report=True, show_roc=True, vid_info=False, stream_mode=False)
+    test_p.set_defaults(report=True, show_roc=False, video_mode=False, stream_mode=False, evaluate=False)
     test_p.set_defaults(fn=_run_test)
 
     args = parser.parse_args()

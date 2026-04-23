@@ -2,7 +2,7 @@ import json, pickle
 import re
 from pathlib import Path
 #* Imports from local project
-from precompute_clips import precompute_features_cache, merge_cache_npz, WINDOW_SEC, STRIDE_SEC
+from precompute_clips import build_cache_from_json, merge_cache_npz, WINDOW_SEC, STRIDE_SEC
 from tms_trainer import run_training, run_testing
 from evaluation_tools import analyze_clip_test, analyze_video_test, _support_pair
 
@@ -48,7 +48,10 @@ def build_window_study(): # 80 -> 65
         if not list_file.is_file():
             raise FileNotFoundError(f"Missing split file: {list_file}")
 
-        precompute_features_cache(ds_dir, list_file, out_path, window=window, stride=stride)
+        with open(list_file, 'r') as f:
+            json_paths = [ds_dir / ln.strip() for ln in f if ln.strip()]
+
+        build_cache_from_json(json_paths, out_path, window=window, stride=stride)
         return out_path.with_suffix(".npz")
 
     STUDY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -102,8 +105,8 @@ def train_test_stdy(cache_dir:str|Path, **kwargs): #92 -> 63
             analyze_clip_test(res["path"], out_path=run_dir, output_name=output_name, show_roc=False)
             return
         else: # test_mode == 'video'
-            res = run_testing( best_model, test_npz,  stream_mode=True,
-                               vid_info=True, out_dir=run_dir, output_tag=output_tag,)
+            res = run_testing(best_model, test_npz, video_mode=True,
+                              out_dir=run_dir, output_tag=output_tag)
             analyze_video_test(res['path'], out_path=run_dir, output_name=output_name,show_roc=False,)
 
     cache_dir = Path(cache_dir)
@@ -238,7 +241,9 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
         test_tag = test_cache.stem[:-5] if test_cache.stem.endswith('_test') else test_cache.stem
         train_ds, window, stride = _parse_ds_tag(train_tag)
         test_ds, _, _ = _parse_ds_tag(test_tag)
-        unit = summary.get('raw_results_unit', '')
+        unit = summary.get('analysis_mode',
+                           summary.get('raw_results_mode',
+                                       summary.get('raw_results_unit', '')))
 
         if unit == 'video':
             samples = testing_set.get('videos_num', None)

@@ -302,17 +302,16 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     return run_dir    # return model, train_log
 
 
-# def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
-def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, stream_mode=False, **kwargs):
+def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_mode=False, **kwargs):
     """     Run model inference on a cache NPZ and save predictions NPZ file.
         NPZ file stores raw per-clip predictions. Model setting are loaded from config.json (file
         Default format uses `cache_index` as clip identifier.
-        Stream mode uses (`video_name`, `time_stamp`) as identifiers.
+        Video mode uses (`video_name`, `time_stamp`) as identifiers.
         parameters:
         :param test_cache : path to test cache NPZ.
         :param test_model : path to `model.pt`
-        :param vid_info   : if True save clip metadata fields (`meta_video`, `meta_t_start`, `meta_t_end`).
-        :param stream_mode: if True save `video_name` and `time_stamp` instead of `cache_index`.
+        :param vid_info   : legacy no-op flag kept for compatibility.
+        :param video_mode : if True save `video_name` and `time_stamp` instead of `cache_index`.
         :param kwargs     : batch_size, threshold, out_dir, out_name
         :return           : Dict with saved `path` and in-memory prediction arrays.
     """
@@ -369,27 +368,28 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, stream
     save_payload = {'model_path': str(model_path), 'test_cache': str(test_npz),
                     'y_true': y_true, 'y_pred': y_pred, 'y_prob': y_prob}
 
-    if stream_mode or vid_info:
-        test_data = np.load(test_npz, allow_pickle=True)
-        if 'meta' not in test_data.files:
-            raise KeyError(f"{test_npz} does not contain 'meta', cannot add stream/video info")
+    test_data = np.load(test_npz, allow_pickle=True)
+    has_meta = 'meta' in test_data.files
+    if has_meta:
         meta = test_data['meta']
         if len(meta) != len(y_true):
             raise ValueError(f"meta length mismatch: {len(meta)} vs {len(y_true)} predictions")
         meta_video = np.asarray([Path(item['video']).stem for item in meta], dtype=str)
         meta_t_start = np.asarray([item['t_start'] for item in meta], dtype=np.float32)
         meta_t_end = np.asarray([item['t_end'] for item in meta], dtype=np.float32)
+        meta_n_frames = np.asarray([int(item.get('n_frames', -1)) if isinstance(item, dict) else -1
+                                    for item in meta], dtype=np.int64)
 
-        if stream_mode:
-            save_payload['video_name'] = meta_video
-            save_payload['time_stamp'] = meta_t_end
-        else:
-            save_payload['cache_index'] = np.arange(len(y_true), dtype=np.int64)
+        save_payload['meta_video'] = meta_video
+        save_payload['meta_t_start'] = meta_t_start
+        save_payload['meta_t_end'] = meta_t_end
+        save_payload['meta_n_frames'] = meta_n_frames
 
-        if vid_info:
-            save_payload['meta_video'] = meta_video
-            save_payload['meta_t_start'] = meta_t_start
-            save_payload['meta_t_end'] = meta_t_end
+    if video_mode:
+        if not has_meta:
+            raise KeyError(f"{test_npz} does not contain 'meta', cannot add stream/video info")
+        save_payload['video_name'] = meta_video
+        save_payload['time_stamp'] = meta_t_end
     else:
         save_payload['cache_index'] = np.arange(len(y_true), dtype=np.int64)
 
@@ -411,10 +411,16 @@ def test_test(test_cache:str|Path, test_model:str|Path, **kwargs):
     # res = run_testing(test_cache, test_model, **kwargs)
     res = run_testing(test_model, test_cache, **kwargs)
     if res is None: return
-    if not kwargs.get('vid_info',False):
+    eval_mode = kwargs.get('eval_mode', None)
+    if eval_mode is None:
+        eval_mode = 'video' if kwargs.get('video_mode', False) else 'clip'
+
+    if eval_mode == 'clip':
         report = evl.analyze_clip_test(res['path'], show_roc=kwargs.get('show', False))
-    else: #* vid_info == Ture
+    elif eval_mode == 'video':
         report = evl.analyze_video_test(res['path'], show_roc=kwargs.get('show', False))
+    else:
+        report = evl.analyze_stream_test(res['path'], show_roc=kwargs.get('show', False))
     evl.print_test_report(report)
 
 #*
