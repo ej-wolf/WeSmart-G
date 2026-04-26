@@ -1,9 +1,10 @@
 import re
 import cv2
+import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from my_local_utils import _load_log_lines
+from common.my_local_utils import _load_log_lines, print_color
 
 def _close_all_on_key(event):
     if event.key in ('x', 'C'):
@@ -128,7 +129,7 @@ def play_frames(frames_dir, log=None, x: float = 1.0, event_color=False):
 
 
 def plot_my_log(log_path, **kwargs):
-    """     Parse an MMEngine/MMAction text log and plot:
+    """  Parse an MMEngine/MMAction text log and plot:
     kwargs:
       plot_loss: if True plot train loss vs epoch (fig-1). Default: True
       plot_acc: polt accuracy - i.e. train top1 and val metric vs epoch (fig-2). Default: True
@@ -144,10 +145,9 @@ def plot_my_log(log_path, **kwargs):
     # Example lines we match:
     # Epoch(train)  [3][60/73]  ...  loss: 0.3629  top1_acc: 0.9375 ...
     # Epoch(val) [10][18/18]    acc/top1: 2.0000  acc/top5: 2.0000 ...
-    train_pat = re.compile(
-        r"Epoch\(train\)\s+\[(\d+)\]\[\d+/\d+\].*?"
-        r"loss:\s+([0-9.]+)\s+top1_acc:\s+([0-9.]+)"
-    )
+    train_pat = re.compile(r"Epoch\(train\)\s+\[(\d+)\]\[\d+/\d+\].*?"
+                           r"loss:\s+([0-9.]+)\s+top1_acc:\s+([0-9.]+)")
+
     val_pat = re.compile(r"Epoch\(val\)\s+\[(\d+)\]\[\d+/\d+\].*?acc/top1:\s+([0-9.]+)")
 
     # Aggregate per epoch (mean over all train iters)
@@ -183,7 +183,7 @@ def plot_my_log(log_path, **kwargs):
     val_epochs = sorted(val_acc.keys())
     val_acc_vals = [val_acc[e] for e in val_epochs]
 
-    # 1) Plot loss
+    #* 1) Plot loss
     if plot_loss:
         fig = plt.figure()
         plt.plot(epochs, mean_train_loss, marker="o", label="train loss")
@@ -192,7 +192,7 @@ def plot_my_log(log_path, **kwargs):
         plt.grid(True, alpha=0.3)
         plt.legend(); plt.tight_layout()
 
-    # 2) Plot accuracy-ish (train top1 and val metric)
+    #* 2) Plot accuracy-ish (train top1 and val metric)
     if plot_acc:
         fig = plt.figure()
         plt.plot(epochs, mean_train_acc, marker="o", label="train top1")
@@ -207,6 +207,60 @@ def plot_my_log(log_path, **kwargs):
     plt.show()
 
 
+def plot_roc_curve(roc: dict, **kwargs):
+    """Render ROC plot and optional CSV/PNG outputs from `roc_from_scores` data."""
+    fig_size = kwargs.get('figsize', (6, 5))
+    dpi = int(kwargs.get('dpi', 120))
+    save_to = kwargs.get('save_to', None)
+    save_csv = bool(kwargs.get('save_csv', True))
+    if 'show' in kwargs:
+        show = bool(kwargs['show'])
+    else:
+        show = save_to is None
+    if save_to is None and not show:
+        return
+
+    fpr = np.asarray(roc['fpr'], dtype=np.float64)
+    tpr = np.asarray(roc['tpr'], dtype=np.float64)
+    thresholds = np.asarray(roc['thresholds'], dtype=np.float64)
+    auc = float(roc['auc'])
+
+    title = kwargs.get('title', "ROC Curve")
+    plt.figure(figsize=fig_size)
+    plt.plot(fpr, tpr, label=f"AUC = {auc:.4f}", linewidth=2)
+    plt.plot([0, 1], [0, 1], linestyle='--', linewidth=1, alpha=0.7)
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(title)
+    plt.grid(alpha=0.25)
+    plt.legend(loc='lower right')
+    plt.tight_layout()
+
+    if save_to is not None:
+        save_to = Path(save_to)
+        if save_to.suffix.lower() != '.png':
+            save_to = save_to.with_suffix('.png')
+        try:
+            save_to.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(save_to, dpi=dpi)
+            if save_csv:
+                csv_path = save_to.with_suffix('.csv')
+                roc_table = np.column_stack([fpr, tpr, thresholds])
+                np.savetxt(csv_path, roc_table, delimiter=';', header='fpr;tpr;thresholds', comments='')
+                print_color(f"  ROC plot saved to  :{save_to}\n"
+                            f"  ROC table saved to :{csv_path}", 'b')
+            else:
+                print_color(f"  ROC plot saved to  :{save_to}", 'b')
+        except Exception as e:
+            print_color(f"Failed to save ROC outputs to {save_to}: {e}", 'r')
+
+    if show:
+        plt.show()
+    plt.close()
+
+
 if __name__ == "__main__":
 
     log_path = "./work_dirs/R50_bbrfm_01/20251209_042904/20251209_042904.log"
@@ -219,4 +273,3 @@ if __name__ == "__main__":
     plot_my_log(rwf_log)
     plot_my_log(l)
     plot_my_log("/mnt/local-data/Python/Projects/weSmart/work_dirs/tsm_R50_MMA_RWF/20251215_023321/20251215_023321.log")
-

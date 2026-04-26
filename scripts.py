@@ -241,9 +241,7 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
         test_tag = test_cache.stem[:-5] if test_cache.stem.endswith('_test') else test_cache.stem
         train_ds, window, stride = _parse_ds_tag(train_tag)
         test_ds, _, _ = _parse_ds_tag(test_tag)
-        unit = summary.get('analysis_mode',
-                           summary.get('raw_results_mode',
-                                       summary.get('raw_results_unit', '')))
+        unit = summary.get('analysis_mode', '')
 
         if unit == 'video':
             samples = testing_set.get('videos_num', None)

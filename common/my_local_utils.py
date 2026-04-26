@@ -1,6 +1,7 @@
 import shutil, re
 from pathlib import Path
 import json
+import numpy as np
 
 
 from colorama import Fore, Style
@@ -152,7 +153,34 @@ def get_unique_name(file_name:str|Path, n:int=3) -> Path:
         counter += 1
 
 
+def serialize_json_data(value):
+    """Recursively convert numpy scalars/arrays into JSON-safe Python objects."""
+    if isinstance(value, dict):
+        return {str(k): serialize_json_data(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [serialize_json_data(v) for v in value]
+    if isinstance(value, tuple):
+        return [serialize_json_data(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return [serialize_json_data(v) for v in value.tolist()]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def resolve_output_path(src_path, output_name, out_path=None):
+    """Resolve output JSON path from explicit path or source file location."""
+    out_path = out_path or (src_path.parent if src_path else None)
+    if out_path is None:
+        return None
+    out_path = Path(out_path)
+    if out_path.suffix == '':
+        return (out_path/output_name).with_suffix('.json')
+    return out_path.with_suffix('.json')
+
+
 # ***** json handling ***** #x`1
+
 # def load_json_frames(json_path: str|Path):
 #     with open(json_path, 'r') as f:
 #         data = json.load(f)

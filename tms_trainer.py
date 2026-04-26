@@ -36,7 +36,8 @@ def _run_test(args):
     if res is None or not args.evaluate:
         return
 
-    eval_kw = {'print': args.report, 'show_roc': args.show_roc}
+    eval_kw = {'print': args.report, 'show_roc': args.show_roc,
+               'roc_csv': args.roc_csv, 'events_json': args.events_json}
     if args.stream_mode:
         analyze_stream_test(res['path'], **eval_kw)
     elif args.video_mode:
@@ -75,9 +76,13 @@ def main():
     test_p.add_argument('-vm', '--video-mode',  dest='video_mode', action='store_true', help='run video-level evaluation after testing')
     test_p.add_argument('-sm', '--stream-mode', dest='stream_mode', action='store_true',help='run stream-level evaluation after testing')
     test_p.add_argument('-ev', '--evaluate', action='store_true', help='run evaluation after saving raw predictions')
+    test_p.add_argument('--no-roc-csv', dest='roc_csv', action='store_false', help='Do not save ROC CSV file')
+    test_p.add_argument('--no-events-json', dest='events_json', action='store_false',
+                        help='Do not save stream events JSON file')
     test_p.add_argument('-ns', '--no-show-roc', dest='show_roc', action='store_false', help='Do not display ROC figure')
     test_p.add_argument('--no-report',   dest='report' ,  action='store_false', help='Do not print test report')
-    test_p.set_defaults(report=True, show_roc=False, video_mode=False, stream_mode=False, evaluate=False)
+    test_p.set_defaults(report=True, show_roc=False, roc_csv=True, events_json=True,
+                        video_mode=False, stream_mode=False, evaluate=False)
     test_p.set_defaults(fn=_run_test)
 
     args = parser.parse_args()
