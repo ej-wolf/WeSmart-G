@@ -974,5 +974,9 @@ if __name__ == '__main__':
     set_file = Path("work_dirs/json_models/draft/stream-tst_J-RWL_25ft_3w-1o5/tst-02.npz")
     # analyze_test_results('work_dirs/json_models/train_260323-0314_RWF_tms_f18/test_raw_model_260323-202938.npz')
     tst_file = Path("work_dirs/json_models/draft/stream-tst_J-RWL_25ft_3w-1o5/tst-10.npz")
-    analyze_stream_test(set_file)
+    a = analyze_stream_test(set_file)
+    from visual_util import draw_confusion_matrix
+    cm = a['summary']['confusion_matrix']
+    draw_confusion_matrix(cm)
+    pass
 #326(13,1,1)->999(3,3,)
