@@ -30,14 +30,15 @@ def _run_test(args):
     if args.video_mode and args.stream_mode:
         raise ValueError("Choose only one test evaluation mode: --video-mode or --stream-mode")
 
-    kw = _kwargs_from_args(args, ('batch_size', 'threshold', 'out_dir', 'output_tag'))
+    kw = _kwargs_from_args(args, ('batch_size', 'out_dir', 'output_tag'))
     res = run_testing(args.test_model, args.test_cache,
                       video_mode=(args.video_mode or args.stream_mode), **kw)
     if res is None or not args.evaluate:
         return
 
     eval_kw = {'print': args.report, 'show_roc': args.show_roc,
-               'roc_csv': args.roc_csv, 'events_json': args.events_json}
+               'roc_csv': args.roc_csv, 'events_json': args.events_json,
+               'threshold': args.threshold}
     if args.stream_mode:
         analyze_stream_test(res['path'], **eval_kw)
     elif args.video_mode:
@@ -70,7 +71,7 @@ def main():
     test_p.add_argument('test_model', type=Path, help='Model.pt path')
     test_p.add_argument('test_cache', type=Path, help='Test cache npz path')
     test_p.add_argument('-bs', '--batch-size', type=int,  default=None, help='Batch size')
-    test_p.add_argument('-td', '--threshold',  type=float,default=None, help='Decision threshold')
+    test_p.add_argument('-td', '--threshold',  type=float,default=None, help='Evaluation threshold')
     test_p.add_argument('-od', '--out-dir',    type=Path, default=None, help='Output dir for predictions files')
     test_p.add_argument('-t',  '--output-tag', type=str,  default=None, help='Output prediction filename')
     test_p.add_argument('-vm', '--video-mode',  dest='video_mode', action='store_true', help='run video-level evaluation after testing')

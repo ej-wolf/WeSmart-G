@@ -312,14 +312,13 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_
         :param test_model : path to `model.pt`
         :param vid_info   : legacy no-op flag kept for compatibility.
         :param video_mode : if True save `video_name` and `time_stamp` instead of `cache_index`.
-        :param kwargs     : batch_size, threshold, out_dir, out_name
+        :param kwargs     : batch_size, out_dir, out_name
         :return           : Dict with saved `path` and in-memory prediction arrays.
     """
     model_path = Path(test_model)
     test_npz = Path(test_cache)
 
     batch_size = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
-    threshold = float(kwargs.get('threshold', 0.5))
 
     # Rebuild model shape from the training config saved with the checkpoint.
     cfg_path = model_path.parent/LOCAL_CONFIG
@@ -354,10 +353,8 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_
 
     y_prob = np.concatenate(probs_all, axis=0)
     y_true = np.concatenate(y_true_all, axis=0)
-    y_pred = (y_prob >= threshold).astype(np.int64)
 
     y_true = y_true.astype(np.int64)
-    y_pred = y_pred.astype(np.int64)
 
     # Save raw per-clip predictions.
     # out_name = kwargs.get('out_name', f"{model_path.stem}_{test_npz.stem}-test.npz")
@@ -366,7 +363,7 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_
     out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
 
     save_payload = {'model_path': str(model_path), 'test_cache': str(test_npz),
-                    'y_true': y_true, 'y_pred': y_pred, 'y_prob': y_prob}
+                    'y_true': y_true, 'y_prob': y_prob}
 
     test_data = np.load(test_npz, allow_pickle=True)
     has_meta = 'meta' in test_data.files

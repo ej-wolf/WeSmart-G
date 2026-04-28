@@ -1,0 +1,456 @@
+from pathlib import Path
+import csv
+import json
+import numpy as np
+
+from common.my_local_utils import print_color, serialize_json_data, resolve_output_path
+from visual_util import plot_roc_curve
+from evaluation_core import (
+    DEFAULT_ROC_RES,
+    DEFAULT_EVAL_THRESHOLD,
+    DEFAULT_REG_MODEL,
+    _cm_dict,
+    _get_eval_arrays,
+    _resolve_input,
+    _roc_summary,
+    _save_analyze_summary,
+    _support_counts,
+    binary_metrics,
+    print_test_report,
+)
+
+STREAM_MATCH_MIN_OVERLAP = 1e-9
+STREAM_MATCH_MAX_LAG = None
+STREAM_MAX_EVENT_GAP = 1
+
+
+def _build_stream_events(mask, t_frm, step, max_event_gap=STREAM_MAX_EVENT_GAP):
+    """Merge consecutive positive timeline rows into event segments."""
+    mask = np.asarray(mask, dtype=bool)
+    t_frm = np.asarray(t_frm, dtype=np.float64)
+    events = []
+    start_idx = None
+    last_pos_idx = None
+    gap_count = 0
+
+    for idx, is_pos in enumerate(mask):
+        if is_pos and start_idx is None:
+            start_idx = idx
+            last_pos_idx = idx
+            gap_count = 0
+        elif is_pos and start_idx is not None:
+            last_pos_idx = idx
+            gap_count = 0
+        elif not is_pos and start_idx is not None:
+            gap_count += 1
+            if gap_count <= max_event_gap:
+                continue
+
+            end_idx = last_pos_idx
+            events.append({
+                'start': float(t_frm[start_idx]),
+                'end': float(t_frm[end_idx] + step),
+                't_frm_start': float(t_frm[start_idx]),
+                't_frm_end': float(t_frm[end_idx]),
+                'idx_start': int(start_idx),
+                'idx_end': int(end_idx),
+            })
+            start_idx = None
+            last_pos_idx = None
+            gap_count = 0
+
+    if start_idx is not None:
+        end_idx = last_pos_idx
+        events.append({
+            'start': float(t_frm[start_idx]),
+            'end': float(t_frm[end_idx] + step),
+            't_frm_start': float(t_frm[start_idx]),
+            't_frm_end': float(t_frm[end_idx]),
+            'idx_start': int(start_idx),
+            'idx_end': int(end_idx),
+        })
+    return events
+
+
+def _event_overlap(gt_event, pred_event):
+    """Return overlap duration and overlap ratio normalized by GT duration."""
+    start = max(float(gt_event['start']), float(pred_event['start']))
+    end = min(float(gt_event['end']), float(pred_event['end']))
+    overlap = max(0.0, end - start)
+    gt_dur = max(float(gt_event['end']) - float(gt_event['start']), 1e-12)
+    return overlap, overlap / gt_dur
+
+
+def _match_stream_events(gt_events, pred_events, min_overlap, max_lag):
+    """Greedy match of predicted stream events to GT events."""
+    used_pred = set()
+    detected_events, missed_events = [], []
+
+    for gt_idx, gt_event in enumerate(gt_events):
+        candidates = []
+        for pred_idx, pred_event in enumerate(pred_events):
+            if pred_idx in used_pred:
+                continue
+            overlap, overlap_ratio = _event_overlap(gt_event, pred_event)
+            if overlap <= 0 or overlap_ratio < min_overlap:
+                continue
+
+            onset_lag = float(pred_event['start']) - float(gt_event['start'])
+            if max_lag is not None and onset_lag > max_lag:
+                continue
+
+            offset_err = float(pred_event['end']) - float(gt_event['end'])
+            candidates.append((abs(onset_lag), -overlap_ratio, abs(offset_err), pred_idx, overlap, overlap_ratio, offset_err))
+
+        if not candidates:
+            missed_events.append(dict(gt_event))
+            continue
+
+        candidates.sort()
+        onset_lag, _, _, pred_idx, overlap, overlap_ratio, offset_err = candidates[0]
+        used_pred.add(pred_idx)
+        pred_event = pred_events[pred_idx]
+        detected_events.append({
+            'gt_idx': int(gt_idx),
+            'pred_idx': int(pred_idx),
+            'gt_event': dict(gt_event),
+            'pred_event': dict(pred_event),
+            'onset_lag': float(onset_lag),
+            'offset_err': float(offset_err),
+            'overlap': float(overlap),
+            'overlap_ratio': float(overlap_ratio),
+        })
+
+    false_events = [dict(pred_event) for idx, pred_event in enumerate(pred_events) if idx not in used_pred]
+    return detected_events, missed_events, false_events
+
+
+def process_stream_inputs(test_res, **kwargs):
+    """Load and normalize raw stream results into one grouped analysis context."""
+    raw_res, res_path = _resolve_input(test_res)
+    threshold = kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD)
+    y_true, y_pred, scores, score_name = _get_eval_arrays(raw_res, threshold=threshold)
+
+    required_meta = ('meta_video', 'meta_t_start', 'meta_t_end')
+    missing = [key for key in required_meta if key not in raw_res]
+    if missing:
+        raise KeyError(f"Stream analysis requires meta fields: {missing}")
+
+    meta_video = np.asarray(raw_res['meta_video'])
+    meta_t_start = np.asarray(raw_res['meta_t_start'], dtype=np.float64)
+    meta_t_end = np.asarray(raw_res['meta_t_end'], dtype=np.float64)
+    if not (len(meta_video) == len(meta_t_start) == len(meta_t_end) == len(y_true)):
+        raise ValueError("Stream metadata length mismatch")
+
+    if 'meta_n_frames' in raw_res:
+        meta_n_frames = np.asarray(raw_res['meta_n_frames'], dtype=np.int64)
+        if len(meta_n_frames) != len(y_true):
+            raise ValueError("meta_n_frames length mismatch")
+    else:
+        meta_n_frames = np.full(len(y_true), -1, dtype=np.int64)
+
+    match_min_overlap = kwargs.get('match_min_overlap', STREAM_MATCH_MIN_OVERLAP)
+    match_max_lag = kwargs.get('match_max_lag', STREAM_MATCH_MAX_LAG)
+    max_event_gap = kwargs.get('max_event_gap', STREAM_MAX_EVENT_GAP)
+
+    if match_min_overlap < 0:
+        raise ValueError(f"match_min_overlap must be non-negative, got {match_min_overlap}")
+    if match_max_lag is not None and match_max_lag < 0:
+        raise ValueError(f"match_max_lag must be non-negative or None, got {match_max_lag}")
+    if max_event_gap < 0:
+        raise ValueError(f"max_event_gap must be non-negative, got {max_event_gap}")
+
+    video_to_idx = {}
+    for idx, video_name in enumerate(meta_video):
+        video_to_idx.setdefault(str(video_name), []).append(idx)
+
+    video_groups = []
+    for video_name, idx in sorted(video_to_idx.items()):
+        order = np.lexsort((meta_t_start[idx], meta_t_end[idx]))
+        idx = np.asarray(idx, dtype=np.int64)[order]
+        video_groups.append({'video': video_name, 'idx': idx})
+
+    return {
+        'raw_res': raw_res,
+        'res_path': res_path,
+        'y_true': y_true,
+        'y_pred': y_pred,
+        'scores': scores,
+        'score_name': score_name,
+        'meta_video': meta_video,
+        'meta_t_start': meta_t_start,
+        'meta_t_end': meta_t_end,
+        'meta_n_frames': meta_n_frames,
+        'match_min_overlap': match_min_overlap,
+        'match_max_lag': match_max_lag,
+        'max_event_gap': max_event_gap,
+        'video_groups': video_groups,
+    }
+
+
+def analyze_single_stream(stream_ctx, video_group):
+    """Analyze one grouped stream/video timeline and return its report payload."""
+    def _timeline_step():
+        """Infer the timeline step from clip end-times, with duration fallback."""
+        times = np.asarray(t_frm, dtype=np.float64)
+        if len(times) >= 2:
+            diffs = np.diff(np.sort(times))
+            diffs = diffs[diffs > 0]
+            if len(diffs) > 0:
+                return float(np.median(diffs))
+
+        t_start = np.asarray(win_t_start, dtype=np.float64)
+        t_end = np.asarray(win_t_end, dtype=np.float64)
+        if len(t_start) == len(t_end) and len(t_end) > 0:
+            durations = t_end - t_start
+            durations = durations[durations > 0]
+            if len(durations) > 0:
+                return float(np.median(durations))
+        return 1.0
+
+    def _build_window_timeline_rows():
+        """Build minimal per-window timeline rows."""
+        rows = []
+        for win_idx, (t_s, t_e, frm, gt_lbl, y_prb, y_prd) in enumerate(
+            zip(win_t_start, win_t_end, win_n_frames, win_labels, win_scores, win_pred)
+        ):
+            rows.append({
+                'win_idx': win_idx,
+                't_frm': float(t_e),
+                't_start': float(t_s),
+                'n_frm': int(frm),
+                'gt_label': int(gt_lbl),
+                'y_prob': float(y_prb),
+                'y_pred': int(y_prd),
+            })
+        return rows
+
+    idx = video_group['idx']
+    video_name = video_group['video']
+    win_labels = stream_ctx['y_true'][idx]
+    win_pred = stream_ctx['y_pred'][idx]
+    win_scores = stream_ctx['scores'][idx]
+    win_t_start = stream_ctx['meta_t_start'][idx]
+    win_t_end = stream_ctx['meta_t_end'][idx]
+    win_n_frames = stream_ctx['meta_n_frames'][idx]
+    t_frm = win_t_end
+
+    timeline_step = _timeline_step()
+    cm_metrics = binary_metrics(win_labels, win_pred)
+    cm_clips = _cm_dict(cm_metrics['confusion_matrix'])
+    fp_time = cm_clips['fp'] * timeline_step
+    miss_time = cm_clips['fn'] * timeline_step
+
+    gt_events = _build_stream_events(win_labels == 1, t_frm, timeline_step, max_event_gap=stream_ctx['max_event_gap'])
+    pred_events = _build_stream_events(win_pred == 1, t_frm, timeline_step, max_event_gap=stream_ctx['max_event_gap'])
+    detected_events, missed_events, false_events = _match_stream_events(
+        gt_events, pred_events,
+        min_overlap=stream_ctx['match_min_overlap'],
+        max_lag=stream_ctx['match_max_lag'],
+    )
+
+    onset_delays = [match['onset_lag'] for match in detected_events]
+    offset_errs = [abs(match['offset_err']) for match in detected_events]
+
+    return {
+        'video': video_name,
+        'clips_num': len(win_labels),
+        'cm_clips': cm_clips,
+        'accuracy': cm_metrics.get('accuracy', None),
+        'recall': cm_metrics.get('recall', None),
+        'FPR': cm_metrics.get('FPR', None),
+        'false_positive_time': fp_time,
+        'miss_time': miss_time,
+        'detection_lag': onset_delays[0] if onset_delays else None,
+        'mean_onset_delay': np.mean(onset_delays) if onset_delays else None,
+        'mean_offset_err': np.mean(offset_errs) if offset_errs else None,
+        'gt_events_num': len(gt_events),
+        'pred_events_num': len(pred_events),
+        'detected_events_num': len(detected_events),
+        'missed_events_num': len(missed_events),
+        'false_events_num': len(false_events),
+        'gt_events': gt_events,
+        'pred_events': pred_events,
+        'detected_events': detected_events,
+        'missed_events': missed_events,
+        'false_events': false_events,
+        'timeline_rows': _build_window_timeline_rows(),
+        'onset_delays': onset_delays,
+        'offset_errs': offset_errs,
+    }
+
+
+def get_stream_summary(stream_ctx, video_results, **kwargs):
+    """Aggregate per-video stream reports into one stream-level summary."""
+    all_onset_delays = []
+    all_offset_errs = []
+    agg_cm = {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}
+    total_fp_time = total_miss_time = 0.0
+    total_gt_events = total_pred_events = total_detect_events = 0
+    total_missed_events = total_false_events = 0
+
+    for report in video_results:
+        for key in agg_cm:
+            agg_cm[key] += report['cm_clips'][key]
+        total_fp_time += report['false_positive_time']
+        total_miss_time += report['miss_time']
+        total_gt_events += report['gt_events_num']
+        total_pred_events += report['pred_events_num']
+        total_detect_events += report['detected_events_num']
+        total_missed_events += report['missed_events_num']
+        total_false_events += report['false_events_num']
+        all_onset_delays.extend(report['onset_delays'])
+        all_offset_errs.extend(report['offset_errs'])
+
+    summary = binary_metrics(stream_ctx['y_true'], stream_ctx['y_pred'])
+    summary.update({
+        'raw_results_path': str(stream_ctx['res_path']),
+        'raw_results_type': stream_ctx['score_name'],
+        'analysis_mode': 'stream',
+        'model_path': stream_ctx['raw_res'].get('model_path', None),
+        'test_cache': stream_ctx['raw_res'].get('test_cache', None),
+        'num_clips': len(stream_ctx['y_true']),
+        'support_clips': _support_counts(stream_ctx['y_true']),
+        'num_videos': len(video_results),
+        'cm_clips': agg_cm,
+        'false_positive_time': total_fp_time,
+        'miss_time': total_miss_time,
+        'detection_lag': all_onset_delays[0] if all_onset_delays else None,
+        'mean_onset_delay': np.mean(all_onset_delays) if all_onset_delays else None,
+        'mean_offset_err': np.mean(all_offset_errs) if all_offset_errs else None,
+        'gt_events_num': total_gt_events,
+        'pred_events_num': total_pred_events,
+        'detected_events': total_detect_events,
+        'missed_events': total_missed_events,
+        'false_events_num': total_false_events,
+        'match_config': {
+            'min_overlap': stream_ctx['match_min_overlap'],
+            'max_lag': stream_ctx['match_max_lag'],
+            'max_event_gap': stream_ctx['max_event_gap'],
+        },
+    })
+
+    roc, roc_info = _roc_summary(
+        stream_ctx['y_true'], stream_ctx['scores'], stream_ctx['score_name'],
+        max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES),
+    )
+    summary.update(roc_info)
+    return summary, roc
+
+
+def analyze_stream_test(test_res: Path | str | dict, **kwargs):
+    """Analyze raw clip probabilities as one or more temporal streams."""
+    csv_fieldnames = ['win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob', 'y_pred']
+
+    def _save_stream_timeline_csv(csv_path):
+        """Write one per-video timeline CSV with only window-local columns."""
+        csv_path = Path(csv_path).with_suffix('.csv')
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open('w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=csv_fieldnames)
+            writer.writeheader()
+            writer.writerows(timeline_rows)
+        print_color(f"  Timeline CSV saved to  :{csv_path}", 'b')
+        return csv_path
+
+    stream_ctx = process_stream_inputs(test_res, **kwargs)
+    raw_res = stream_ctx['raw_res']
+    res_path = stream_ctx['res_path']
+
+    video_reports = []
+    for video_group in stream_ctx['video_groups']:
+        video_reports.append(analyze_single_stream(stream_ctx, video_group))
+    summary, roc = get_stream_summary(stream_ctx, video_reports, **kwargs)
+
+    tst_name = res_path.stem if res_path is not None else 'stream_test'
+    out_name = kwargs.get('output_name', f"{tst_name}_stream-summary.json")
+    summary_path = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
+    details_name = kwargs.get('details_name', f"{tst_name}_stream-events.json")
+    save_events_json = kwargs.get('events_json', True)
+    save_roc_csv = kwargs.get('roc_csv', True)
+
+    timeline_csvs = []
+    if summary_path is not None and save_events_json not in {False, None}:
+        details_path = summary_path.with_name(details_name)
+        details_path.parent.mkdir(parents=True, exist_ok=True)
+        output_dir = str(summary_path.parent)
+        for report in video_reports:
+            video_name = report['video']
+            video_tag = str(video_name).replace('/', '_').replace('\\', '_').replace(' ', '_')
+            timeline_rows = report.pop('timeline_rows')
+            report.pop('onset_delays', None)
+            report.pop('offset_errs', None)
+            timeline_csv_path = summary_path.with_name(f"{tst_name}_{video_tag}_timeline.csv")
+            timeline_csv_path = _save_stream_timeline_csv(timeline_csv_path)
+            report['timeline_csv'] = timeline_csv_path.name
+            timeline_csvs.append(timeline_csv_path.name)
+
+        summary['output_dir'] = output_dir
+        summary['events_info'] = details_path.name
+        summary['timeline_csvs'] = timeline_csvs
+        details_payload = {
+            'raw_results_path': str(res_path),
+            'model_path': raw_res.get('model_path', None),
+            'output_dir': output_dir,
+            'events_info': details_path.name,
+            'analysis_mode': 'stream',
+            'test_cache': raw_res.get('test_cache', None),
+            'match_config': summary['match_config'],
+            'videos': video_reports,
+        }
+        with details_path.open('w') as f:
+            json.dump(serialize_json_data(details_payload), f, indent=2)
+        print_color(f"  Stream events saved to :{details_path}", 'b')
+    else:
+        summary['output_dir'] = str(summary_path.parent) if summary_path is not None else None
+        summary['events_info'] = 'N/A' if save_events_json in {False, None} else None
+        summary['timeline_csvs'] = []
+
+    summary['roc_csv'] = (
+        summary_path.with_suffix('.csv').name if save_roc_csv and roc is not None and summary_path is not None else
+        ('N/A' if save_roc_csv in {False, None} else None)
+    )
+    if summary_path is not None:
+        _save_analyze_summary(summary, summary_path)
+    else:
+        print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
+
+    if roc is not None and (summary_path is not None or bool(kwargs.get('show_roc', False))):
+        plot_roc_curve(
+            roc, save_to=summary_path, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
+            title=kwargs.get('roc_title', f"Stream ROC for {tst_name} ({stream_ctx['score_name']})"),
+        )
+
+    if kwargs.get('print', True):
+        print_test_report(summary)
+
+    return {'summary': summary, 'videos': video_reports}
+
+
+def run_regression_suite(phase='refactor', **kwargs):
+    """Run stream regression outputs from cache NPZ files."""
+    from torch_clip_model import run_testing
+
+    model_path = Path(kwargs.get('model_path', DEFAULT_REG_MODEL))
+    out_root = Path(kwargs.get('out_root', "work_dirs/json_models/testing")) / phase / 'stream_analysis'
+    show_roc = bool(kwargs.get('show_roc', False))
+    save_roc_csv = bool(kwargs.get('roc_csv', True))
+    save_events_json = bool(kwargs.get('events_json', True))
+    threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
+
+    cases = (
+        ('F_141_0_0_0_0', Path("data/cache/stream-tst/F_141_0_0_0_0.npz"), 'F_141_raw'),
+        ('cam6_11_5_y26', Path("data/cache/stream-tst/cam6_11_5_y26.npz"), 'cam6_11_5_y26_raw'),
+    )
+
+    outputs = {}
+    for case_name, cache_path, raw_tag in cases:
+        out_dir = out_root / case_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        res = run_testing(model_path, cache_path, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
+        report = analyze_stream_test(
+            res['path'], out_path=out_dir, show_roc=show_roc, roc_csv=save_roc_csv,
+            events_json=save_events_json, print=False, threshold=threshold,
+        )
+        outputs[case_name] = {'raw_results': res['path'], 'summary': report['summary']}
+    return outputs

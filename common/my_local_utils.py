@@ -1,4 +1,4 @@
-import shutil, re
+import shutil, re, zipfile
 from pathlib import Path
 import json
 import numpy as np
@@ -177,6 +177,80 @@ def resolve_output_path(src_path, output_name, out_path=None):
     if out_path.suffix == '':
         return (out_path/output_name).with_suffix('.json')
     return out_path.with_suffix('.json')
+
+
+def _zip_one_path(path: str | Path, protocol='zip'):
+    """Archive one file or directory and return the created archive path."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    archive_path = path.with_suffix('.zip') if path.is_file() else path.parent / f"{path.name}.zip"
+    if protocol != 'zip':
+        # TODO: add 7z / rar support once dependency policy is settled.
+        raise NotImplementedError(f"archive protocol '{protocol}' is not implemented yet")
+
+    with zipfile.ZipFile(archive_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        if path.is_file():
+            zf.write(path, arcname=path.name)
+        else:
+            for child in sorted(path.rglob('*')):
+                if child.is_file():
+                    zf.write(child, arcname=str(child.relative_to(path.parent)))
+    return archive_path
+
+
+def zip_dir(dir: Path | str, method='file', protocol='zip', rm_policy='ask'):
+    """Compress a directory either child-by-child or as one archive.
+
+    method:
+        'file' -> zip each direct child of `dir` separately
+        'dir'  -> zip the whole directory into one archive
+    protocol:
+        'zip' implemented now
+        '7z' / 'rar' reserved for later
+    rm_policy:
+        'keep'   -> keep originals
+        'remove' -> remove originals after successful compression
+        'ask'    -> ask once at the end whether to remove originals
+    """
+    dir = Path(dir)
+    if not dir.is_dir():
+        raise NotADirectoryError(dir)
+    if method not in {'file', 'dir'}:
+        raise ValueError(f"Unknown zip_dir method: {method}")
+    if rm_policy not in {'keep', 'remove', 'ask'}:
+        raise ValueError(f"Unknown zip_dir rm_policy: {rm_policy}")
+
+    archived, originals = [], []
+    if method == 'file':
+        for child in sorted(dir.iterdir()):
+            archive_path = _zip_one_path(child, protocol=protocol)
+            archived.append(archive_path)
+            originals.append(child)
+    else:
+        archive_path = _zip_one_path(dir, protocol=protocol)
+        archived.append(archive_path)
+        originals.append(dir)
+
+    remove_originals = False
+    if rm_policy == 'remove':
+        remove_originals = True
+    elif rm_policy == 'ask':
+        try:
+            ans = input(f"Remove original sources after archiving {len(originals)} item(s)? [y/N]: ").strip().lower()
+        except EOFError:
+            ans = ''
+        remove_originals = ans in {'y', 'yes'}
+
+    if remove_originals:
+        for src in originals:
+            if src.is_dir():
+                shutil.rmtree(src)
+            elif src.exists():
+                src.unlink()
+
+    return archived
 
 
 # ***** json handling ***** #x`1

@@ -34,7 +34,7 @@ import cv2, json, torch
 from pathlib import Path
 from ultralytics import YOLO
 #* import from my utils
-from common.my_local_utils import get_unique_name, print_color
+from common.my_local_utils import get_unique_name, print_color, _zip_one_path
 
 #* Defaults and constants  -------------------------------------------------------------------
 DETECTION_THRESHOLD = 0.5
@@ -221,6 +221,7 @@ def process_video(input_path: Path|str,
     fight_intervals = fight_intervals or []
     fall_intervals = fall_intervals or []
     allow_incomplete = bool(kwargs.get('allow_incomplete', False))
+    zip_output = bool(kwargs.get('zip_output', False))
 
     #* load model
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
@@ -403,6 +404,10 @@ def process_video(input_path: Path|str,
 
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+        if zip_output:
+            archive_path = _zip_one_path(json_path, protocol='zip')
+            print_color(f"Archived to {archive_path}", 'b')
 
         print_color(f"Saved::{len(frames)} frame to {json_path}\n----------------\n'",'b')
 
