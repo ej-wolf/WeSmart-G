@@ -4,7 +4,7 @@ from colorama import Fore
 
 #* Local imports
 from common.my_local_utils import print_color
-from json_utils import  load_json_data
+from json_utils import  load_json_data, list_json_sources, resolve_json_source
 
 # --------------------------------------------------
 # * Unit-level defaults (ToDo: later to be loaded from config)
@@ -178,8 +178,9 @@ def print_events(events:dict):
         print('\t ', i, f": from\t {e['begin']:3.1f} to {e['end']:6.1f} sec")
 
 def inspect_dir(j_dir:Path):
-    for j in j_dir.glob("*.json"):
-        print(f"== File ==========================\n{j.name:s} - {j.stat().st_size:,}")
+    for j in list_json_sources(j_dir):
+        src = resolve_json_source(j)
+        print(f"== File ==========================\n{j.name:s} - {src.stat().st_size:,}")
         sjs = slice_json_stream(load_json_data(j), allow_empty_lbl=False)
         # inspect_clips(slice_json_stream(sjs, allow_empty_lbl=False))
         inspect_clips(sjs)

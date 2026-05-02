@@ -64,7 +64,7 @@
 import random, argparse, sys, numpy as np
 from pathlib import Path
 #* ---- local imports  ----
-from json_utils import load_json_data
+from json_utils import load_json_data, list_json_sources
 from common.my_local_utils import print_color, as_collection
 from temporal_slicing_json import slice_json_stream, WINDOW_SEC, STRIDE_SEC
 from analyze_json_motion import extract_motion_features, _temporal_conv_1d, _clip_pooling
@@ -101,9 +101,9 @@ def split_json_ds(dir_path:str|Path, **kwargs) -> dict[str, list[Path]]:
     dir_path = Path(dir_path)
     assert dir_path.is_dir(), f"Not a directory: {dir_path}"
 
-    json_files = sorted(dir_path.glob("*.json"))
+    json_files = sorted(list_json_sources(dir_path))
     if not json_files:
-        raise RuntimeError(f"No JSON files found in {dir_path}")
+        raise RuntimeError(f"No JSON or zipped JSON files found in {dir_path}")
 
     rng = random.Random(kwargs.get('random_seed', RANDOM_SEED))
     rng.shuffle(json_files)

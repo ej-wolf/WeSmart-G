@@ -22,7 +22,7 @@ Returned structure:
                  }
 """
 
-import json, cv2
+import json, cv2, zipfile
 from pathlib import Path
 #* local imports
 from common.my_local_utils import print_color, _make_unique_dir
@@ -30,6 +30,64 @@ from common.my_local_utils import print_color, _make_unique_dir
 # --------------------------------------------------
 # * Public loader
 # --------------------------------------------------
+def resolve_json_source(file: str | Path):
+    """Resolve a logical JSON path to an existing plain or archived source."""
+    file = Path(file)
+    candidates = [file]
+    if file.suffix.lower() == '.json':
+        candidates += [file.with_suffix('.zip'), Path(str(file) + '.zip')]
+    else:
+        candidates += [file.with_suffix('.json'), file.with_suffix('.zip')]
+
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    raise FileNotFoundError(file)
+
+
+def list_json_sources(dir_path: str | Path):
+    """List logical JSON dataset entries from plain or archived JSON files."""
+    dir_path = Path(dir_path)
+    entries = {}
+    for path in sorted(dir_path.iterdir()):
+        if not path.is_file():
+            continue
+        name = path.name
+        if name.endswith('.json'):
+            logical = path
+        elif name.endswith('.json.zip'):
+            logical = path.with_suffix('')
+        elif name.endswith('.zip'):
+            logical = path.with_suffix('.json')
+        else:
+            continue
+
+        prev = entries.get(logical.name)
+        if prev is None or prev.suffix != '.json':
+            entries[logical.name] = logical
+    return list(entries.values())
+
+
+def load_json_raw(file: str|Path):
+    """Load raw JSON dict from plain `.json` or supported ZIP source."""
+    src = resolve_json_source(file)
+    if src.suffix.lower() != '.zip':
+        with src.open('r', encoding='utf-8') as f:
+            return json.load(f)
+
+    logical_name = Path(file).name
+    with zipfile.ZipFile(src, 'r') as zf:
+        members = [name for name in zf.namelist() if not name.endswith('/')]
+        json_members = [name for name in members if name.lower().endswith('.json')]
+        target = next((name for name in json_members if Path(name).name == logical_name), None)
+        if target is None:
+            if len(json_members) == 1:
+                target = json_members[0]
+            else:
+                raise ValueError(f"Ambiguous JSON archive: {src}")
+        with zf.open(target, 'r') as f:
+            return json.load(f)
+
 
 def load_json_data(file:str|Path, j_type='type_1'):
     """ Load JSON file and normalize into firm internal structure.
@@ -58,8 +116,7 @@ def load_type_1(file: Path):
     # * old format had 2 variations for detection_list
     DET_LIST = 'bbs_list_of_keypoints'  # 'list_of_bbs_keypoints'
 
-    with open(file, 'r') as f:
-        raw = json.load(f)
+    raw = load_json_raw(file)
 
     header = {'video_file': raw.get('video'),
               'fps': raw.get('fps'),
@@ -93,8 +150,7 @@ def load_type_2(file: Path):
     - Each detection is already a dict
     - 'key_points' contains 17 keypoints * 3 values (x, y, conf) flattened as [x0, y0, c0, x1, y1, c1, ..., x16, y16, c16]
     """
-    with open(file, 'r') as f:
-        raw = json.load(f)
+    raw = load_json_raw(file)
 
     header = {'video_file': raw['video'], 'fps': raw['fps'], 'sampling': raw['step'], 'version': '2.0'}
 
@@ -275,5 +331,4 @@ def json_to_box_frames( json_path, out_root, H:int=FRAME_H, W:int=FRAME_W, **kwa
                  'stat': stat,}
 
     return clip_name, clip_info
-
 

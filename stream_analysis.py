@@ -363,8 +363,9 @@ def analyze_stream_test(test_res: Path | str | dict, **kwargs):
     summary, roc = get_stream_summary(stream_ctx, video_reports, **kwargs)
 
     tst_name = res_path.stem if res_path is not None else 'stream_test'
-    out_name = kwargs.get('output_name', f"{tst_name}_stream-summary.json")
-    summary_path = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
+    out_name = kwargs.get('output_name', f"{tst_name}_stream-summary")
+    out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
+    summary_path = out_base.with_suffix('.json') if out_base is not None else None
     details_name = kwargs.get('details_name', f"{tst_name}_stream-events.json")
     save_events_json = kwargs.get('events_json', True)
     save_roc_csv = kwargs.get('roc_csv', True)
@@ -407,7 +408,7 @@ def analyze_stream_test(test_res: Path | str | dict, **kwargs):
         summary['timeline_csvs'] = []
 
     summary['roc_csv'] = (
-        summary_path.with_suffix('.csv').name if save_roc_csv and roc is not None and summary_path is not None else
+        out_base.with_suffix('.csv').name if save_roc_csv and roc is not None and out_base is not None else
         ('N/A' if save_roc_csv in {False, None} else None)
     )
     if summary_path is not None:
@@ -415,9 +416,9 @@ def analyze_stream_test(test_res: Path | str | dict, **kwargs):
     else:
         print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
 
-    if roc is not None and (summary_path is not None or bool(kwargs.get('show_roc', False))):
+    if roc is not None and (out_base is not None or bool(kwargs.get('show_roc', False))):
         plot_roc_curve(
-            roc, save_to=summary_path, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
+            roc, save_to=out_base, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
             title=kwargs.get('roc_title', f"Stream ROC for {tst_name} ({stream_ctx['score_name']})"),
         )
 

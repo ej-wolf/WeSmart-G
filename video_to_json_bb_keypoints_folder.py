@@ -48,6 +48,7 @@ TAG_FIGHT    = 4
 
 MODELS_DIR = 'models/'
 DEFAULT_YOLO = MODELS_DIR + "yolo26x-pose.pt"
+ZIP_JSONS = True
 #* "yolo26x-pose.pt" / "yolo11x-pose.pt" / "yolov8s.pt"
 
 def parse_sec_str(t):
@@ -221,7 +222,7 @@ def process_video(input_path: Path|str,
     fight_intervals = fight_intervals or []
     fall_intervals = fall_intervals or []
     allow_incomplete = bool(kwargs.get('allow_incomplete', False))
-    zip_output = bool(kwargs.get('zip_output', False))
+    # zip_output = bool(kwargs.get('zip_output', False))
 
     #* load model
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
@@ -405,8 +406,8 @@ def process_video(input_path: Path|str,
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-        if zip_output:
-            archive_path = _zip_one_path(json_path, protocol='zip')
+        if kwargs.get('zip', ZIP_JSONS): #  if zip_output:
+            archive_path = _zip_one_path(json_path, protocol=kwargs.get('zip_protocol','zip'))
             print_color(f"Archived to {archive_path}", 'b')
 
         print_color(f"Saved::{len(frames)} frame to {json_path}\n----------------\n'",'b')

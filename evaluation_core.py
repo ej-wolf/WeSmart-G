@@ -308,24 +308,22 @@ def analyze_clip_test(test_results: Path | str | dict, **kwargs):
     summary.update(roc_info)
 
     tst_name = results_path.stem if results_path is not None else 'clip_test'
-    out_name = kwargs.get('output_name', f"{tst_name}_clip-summary.json")
-    out_path = resolve_output_path(results_path, out_name, kwargs.get('out_path', None))
-    summary['output_dir'] = str(out_path.parent) if out_path is not None else None
+    out_name = kwargs.get('output_name', f"{tst_name}_clip-summary")
+    out_base = resolve_output_path(results_path, out_name, kwargs.get('out_path', None))
+    # out_path = out_base.with_suffix('.json') if out_base is not None else None
+    summary['output_dir'] = str(out_base.parent) if out_base is not None else None
     save_roc_csv = kwargs.get('roc_csv', True)
-    summary['roc_csv'] = (out_path.with_suffix('.csv').name if save_roc_csv and roc is not None and out_path is not None else
+    summary['roc_csv'] = (out_base.with_suffix('.csv').name if save_roc_csv and roc is not None and out_base is not None else
                           ('N/A' if save_roc_csv in {False, None} else None))
 
-    if out_path is not None:
-        out_path = _save_analyze_summary(summary, out_path)
+    if out_base is not None:
+        out_path = _save_analyze_summary(summary, out_base.with_suffix('.json'))
     else:
         print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
 
-    if roc is not None and (out_path is not None or bool(kwargs.get('show_roc', False))):
-        plot_roc_curve(
-            roc, save_to=out_path, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
-            title=kwargs.get('roc_title', f"ROC Curve for {tst_name} ({score_name})"),
-        )
-
+    if roc is not None and (out_base is not None or bool(kwargs.get('show_roc', False))):
+        plot_roc_curve( roc, save_to=out_base, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
+                             title=kwargs.get('roc_title', f"ROC Curve for {tst_name} ({score_name})"), )
     if kwargs.get('print', True):
         print_test_report(summary)
     return summary
@@ -408,26 +406,21 @@ def analyze_video_test(test_res: Path | str | dict, **kwargs):
     summary.update(roc_info)
 
     tst_name = res_path.stem if res_path is not None else 'video_test'
-    out_name = kwargs.get('output_name', f"{tst_name}_video-summary.json")
-    out_path = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
-    summary['output_dir'] = str(out_path.parent) if out_path is not None else None
+    out_name = kwargs.get('output_name', f"{tst_name}_video-summary")
+    out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
+    summary['output_dir'] = str(out_base.parent) if out_base is not None else None
     save_roc_csv = kwargs.get('roc_csv', True)
-    summary['roc_csv'] = (
-        out_path.with_suffix('.csv').name if save_roc_csv and roc is not None and out_path is not None else
-        ('N/A' if save_roc_csv in {False, None} else None)
-    )
+    summary['roc_csv'] = (out_base.with_suffix('.csv').name if save_roc_csv and roc is not None and out_base is not None else
+                          ('N/A' if save_roc_csv in {False, None} else None)    )
 
-    if out_path is not None:
-        out_path = _save_analyze_summary(summary, out_path)
+    if out_base is not None:
+        out_path = _save_analyze_summary(summary, out_base.with_suffix('.json'))
     else:
         print("[WARN] Summary file wasn't saved; invalid or missing out_path")
 
-    if roc is not None and (out_path is not None or bool(kwargs.get('show_roc', False))):
-        plot_roc_curve(
-            roc, save_to=out_path, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
-            title=kwargs.get('roc_title', f"Video ROC for {tst_name}"),
-        )
-
+    if roc is not None and (out_base is not None or bool(kwargs.get('show_roc', False))):
+        plot_roc_curve(roc, save_to=out_base, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
+                       title=kwargs.get('roc_title', f"Video ROC for {tst_name}"),)
     if kwargs.get('print', True):
         print_test_report(summary)
     return summary

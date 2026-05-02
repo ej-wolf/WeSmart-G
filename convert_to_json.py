@@ -40,7 +40,7 @@ def main():
     parser.add_argument( '-f', '--fight', action="append", help="Fight interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
     parser.add_argument( '-fa','--fall', action="append", help="Fall interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
     parser.add_argument( '-sw', '--show', action='store_true', help='Show video during processing')
-    parser.add_argument( '-z', '--zip', action='store_true', help='Archive each produced JSON as foo.zip after saving')
+    parser.add_argument( '-z', '--zip', action='store_true', help='save JSONs as zip file')
 
     args = parser.parse_args()
     if args.conf is not None:
