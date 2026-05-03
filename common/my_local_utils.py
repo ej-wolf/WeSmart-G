@@ -331,10 +331,10 @@ def _archive_rm_decision(rm_policy, n_items, action):
     if rm_policy == 'keep':
         return False
     try:
-        ans = input(f"{action} {n_items} item(s)? [y/N]: ").strip().lower()
+        ans = input(f"{action} {n_items} item(s)? [Y/N]: ").strip().lower()
     except EOFError:
         ans = ''
-    return ans in {'y', 'yes'}
+    return ans in {'y','Y', 'Yes', 'yes'}
 
 
 def _extract_zip_file(zip_path: str | Path, out_dir: str | Path | None = None):

@@ -151,8 +151,8 @@ def load_type_2(file: Path):
     - 'key_points' contains 17 keypoints * 3 values (x, y, conf) flattened as [x0, y0, c0, x1, y1, c1, ..., x16, y16, c16]
     """
     raw = load_json_raw(file)
-
-    header = {'video_file': raw['video'], 'fps': raw['fps'], 'sampling': raw['step'], 'version': '2.0'}
+    # header = {'video_file': raw['video'], 'fps': raw['fps'], 'sampling': raw['step'], 'version': '2.0'}
+    header = {'video_file': raw['video'], 'fps': raw.get('fps'), 'sampling': raw.get('step'), 'version': '2.0'}
 
     frames_out = []
     for frame in raw.get('frames', []):
@@ -163,7 +163,6 @@ def load_type_2(file: Path):
             #* Ensure list length consistency (should be 51 = 17 * 3)
             if key_pts_raw and len(key_pts_raw) % 3 != 0:
                 print_color(f"[WARN] key_points length not divisible by 3 in frame {frame.get('f')}",'y')
-
 
             detections.append({'class': det['class'],
                                'conf': det['conf'],

@@ -1,10 +1,13 @@
 import json, pickle
 import re
 from pathlib import Path
+from types import SimpleNamespace
 #* Imports from local project
-from precompute_clips import build_cache_from_json, merge_cache_npz, WINDOW_SEC, STRIDE_SEC
+from precompute_clips import (build_cache_from_json, merge_cache_npz, WINDOW_SEC, STRIDE_SEC,
+                              TEST_RATIO, RANDOM_SEED, DEFAULT_TYPE, _run_build_cache_ds)
 from tms_trainer import run_training, run_testing
 from evaluation_tools import analyze_clip_test, analyze_video_test, _support_pair
+from common.my_local_utils import as_collection
 
 #* general configuration
 RWF_DIR  = Path("data/json_files/RWF-2000/ds")
@@ -17,6 +20,43 @@ MAIN_CACHE_DIR = Path("data/cache")
 DATASETS = [('RWF', RWF_DIR), ('RLVS', RLVS_DIR)]
 JOINT_DS =  'J-RWL'
 RESULT_NAME = 'all_results'
+
+
+def build_cache_batch(json_dirs, output_path, **kwargs):
+    """Build train/test caches for multiple JSON dirs using one shared config."""
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    base_args = {'cache_name': None,
+                 'split_dir': None,
+                 'new_split': False,
+                 'test_ratio': TEST_RATIO,
+                 'random_seed': RANDOM_SEED,
+                 'window': WINDOW_SEC,
+                 'stride': STRIDE_SEC,
+                 'allow_empty': False,
+                 'pure_motion': False,
+                 'legacy': False,
+                 'no_temp_smooth': False,
+                 'json_type': DEFAULT_TYPE,}
+    base_args.update(kwargs)
+
+    built = []
+    for json_dir in as_collection(json_dirs):
+        json_dir = Path(json_dir)
+        if not json_dir.is_dir():
+            raise NotADirectoryError(json_dir)
+
+        run_args = SimpleNamespace(**base_args)
+        run_args.jsons_dir = json_dir
+        run_args.cache_dir = output_path
+        run_args.cache_name = run_args.cache_name or json_dir.name
+        run_args.split_dir = Path(run_args.split_dir) if run_args.split_dir else json_dir
+
+        _run_build_cache_ds(run_args)
+        built.append({'jsons_dir': json_dir,
+                      'train_cache': output_path/f"{run_args.cache_name}_train.npz",
+                      'test_cache': output_path/f"{run_args.cache_name}_test.npz",})
+    return built
 
 def build_window_study(): # 80 -> 65
     """  Small batch script for the window/stride cache study.

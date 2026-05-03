@@ -8,15 +8,16 @@
     5) (optional) Prints dataset statistics for inspection
 
     usage:
-    >> precompute_clips build  jsons_dir cache_dir [-h] [-cn CACHE_NAME] [-sd SPLIT_DIR]
-                        [-ns] [-r TEST_RATIO] [-rs RANDOM_SEED] [-w WINDOW] [-s STRIDE]
-                        [-e] [-p] [-l] [--no-temp-smooth] [--json-type {type_1,type_2,1,2}]
+    >> precompute_clips.py  build  jsons_dir cache_dir [-h] [-t CACHE_TAG] [-sd SPLIT_DIR]
+                            [-ns] [-r TEST_RATIO] [-rs RANDOM_SEED] [-w WINDOW] [-s STRIDE]
+                            [-e] [-p] [-l] [--no-temp-smooth] [--json-type {type_1,type_2,1,2}]
     positional arguments:
       jsons_dir                     : dir containing JSONs
       cache_dir                     : path for the cached NPZ feature files
     options:
       -h/ --help                    : Show help message and exit
-      -cn/--cache-name              : Name for the created npz
+      -t/ --cache-tag CACHE_TAG     : base tag for the output cache npz
+      -cn/--cache-name              : legacy name for cache-tag
       -sd/--split-dir [path]        : Path for the train/test list files
       -rs/--random-seed RANDOM_SEED : set the random seed (42)
       -ns/--new-split               : Force New split (default: False)
@@ -27,29 +28,26 @@
       -p/--pure-motion              : Use only motion features, drop the static overlap block
       -l/--legacy                   : Use only the original 18 motion features
       --no-temp-smooth              : Disable temporal smoothing
-      -jt/--json-type               : Used to run old (legacy) JSON formats
+      --json-type                   : input JSON format for loader
 
     *** stream_json ***
     preprocess and extract features from one long JSON stream into a single cache.
     usage:
-    >> precompute_clips.py stream_json json_path cache_dir [-h] [-t CACHE_TAG] [-w WINDOW]
-                                               [-s STRIDE] [-e] [-p] [-l] [--no-temp-smooth]
-                                               [--json-type {type_1,type_2,1,2}]
-
-    ***  info ***
-    Inspect an existing cache NPZ and print dataset/video statistics.
-    usage:
-    >> precompute_clips.py info npz_path [-h] [--list] [--details] [--sort SORT]
-                                        [--sample SAMPLE] [-rs RANDOM_SEED]
+    >> precompute_clips.py  stream_json json_path cache_dir [-h] [-t CACHE_TAG] [-w WINDOW]
+                            [-s STRIDE] [-e] [-p] [-l] [--no-temp-smooth] [--json-type ...}]
     positional arguments:
-      npz_path                      : dir containing JSONs
+      json_path                     : path to one long JSON stream file
+      cache_dir                     : output directory for the cached NPZ feature file
     options:
       -h/ --help                    : Show help message and exit
-      -l/ --list                    : print video names.
-      -d/ --details                 : print per-video table.
-      -sr/--sort SORT               : (str) options [duration, duration_rev] or None
-      -sm/--sample SAMPLE           : (int/float) sample size/portion for printing
-      -rs/--random-seed             : (int) seed for random sampling (default: 42)
+      -t/--cache-tag                : base tag for the output cache npz
+      -w/ --window WINDOW           : Clip window in seconds
+      -s/ --stride STRIDE           : Clip stride in seconds
+      -e/ --allow-empty             : Allow empty (None) labeling
+      -p/--pure-motion              : Use only motion features, drop the static overlap block
+      -l/--legacy                   : Use only the original 18 motion features
+      --no-temp-smooth              : Disable temporal smoothing
+      --json-type                   : input JSON format for loader
 
     ***  merge ***
     merges multiple cache npz files into one
@@ -59,6 +57,22 @@
        npz_paths                    : Cache npz files for merge
     options:
        -h/--help                    :show this help message and exit
+
+    ***  info ***
+    Inspect an existing cache NPZ and print dataset/video statistics.
+    usage:
+    >> precompute_clips.py info npz_path [-h] [--list] [--details] [--mode {auto,dataset,stream}] [--sort SORT]
+                                        [--sample SAMPLE] [-rs RANDOM_SEED]
+    positional arguments:
+      npz_path                      : dir containing JSONs
+    options:
+      -h/ --help                    : Show help message and exit
+      -l/ --list                    : print video names.
+      -d/ --details                 : print per-video table.
+      -m/ --mode MODE               : inspection wording mode
+      -sr/--sort SORT               : (str) options [duration, duration_rev] or None
+      -sm/--sample SAMPLE           : (int/float) sample size/portion for printing
+      -rs/--random-seed             : (int) seed for random sampling (default: 42)
 """
 
 import random, argparse, sys, numpy as np
@@ -157,21 +171,18 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158
     for json_path in json_paths:
         json_data = load_json_data(json_path, j_type=kwargs.get('json_type', DEFAULT_TYPE))
         clips = slice_json_stream(json_data,
-                                window_sec=kwargs.get('window', WINDOW_SEC),
-                                stride_sec=kwargs.get('stride', STRIDE_SEC),
-                                allow_empty_lbl=kwargs.get('allow_empty_lbl', False)
-                                )
-
+                                  window_sec=kwargs.get('window', WINDOW_SEC),
+                                  stride_sec=kwargs.get('stride', STRIDE_SEC),
+                                  allow_empty_lbl=kwargs.get('allow_empty_lbl', False),)
         for clip in clips:
             if clip['label'] is None:
                 continue
+            #* extract all the features and compose them into features vector
             motion_seq = extract_motion_features(clip['frames'],
                                  pure_motion=kwargs.get('pure_motion', False),
                                  legacy=kwargs.get('legacy', False),)
-
             if kwargs.get('temp_smooth', TEMPORAL_SMOOTHING):
                 motion_seq = _temporal_conv_1d(motion_seq, TEMP_KERNEL)
-
             clip_feat = _clip_pooling(motion_seq, mode=POOL_MODE)
 
             labels.append(int(clip['label']))
@@ -508,10 +519,11 @@ def _run_build_cache_ds(args):
 
     # if train_list.exists() and valid_list.exists() and not args.new_split:
     if not args.new_split and train_list.exists() and (valid_list.exists() or test_list.exists()):
-        print('[INFO] Using existing train/test split files')
+        print_color('[INFO] Using existing train/test split files','b')
     else:
-        print('[INFO] Creating new train/test split')
-        print('random seed : ', args.random_seed)
+        # print_color('[INFO] Creating new train/test split''')
+        # print('random seed : ', args.random_seed)
+        print_color('[INFO] Creating new train/test split\nrandom seed: { args.random_seed}','g')
         splits = split_json_ds(jsons_dir, random_seed=args.random_seed, test_ratio=args.test_ratio)
         save_vid_lists(splits, split_dir)
 
@@ -589,7 +601,8 @@ def main():
     build_p = sub.add_parser('build', help='build train/test cache files from JSON directory')
     build_p.add_argument('jsons_dir', type=Path, help="dataset path/ dir containing JSONs")
     build_p.add_argument('cache_dir', type=Path, help="path for the cached NPZ feature files")
-    build_p.add_argument('-cn', '--cache-name', type=Path, default=None, help="base name for output npz files")
+    build_p.add_argument('-t',  '--cache-tag',
+                                      '-cn', '--cache-name', type=Path, default=None, help="base name for output npz files")
     build_p.add_argument('-sd', '--split-dir' , type=Path, default=None, help="path for train_videos.txt/test_videos.txt")
     build_p.add_argument('-ns', '--new-split', action='store_true', help='force new train/test split')
     build_p.add_argument('-r',  '--test-ratio', '--valid-ratio', dest='test_ratio',
@@ -633,11 +646,8 @@ def main():
     else:
         parser.print_help()
 
-#627(1,1,)
+#627(1,1,) / #636(1,1,1)
 if __name__ == '__main__':
     pass
     main()
-    # cache_info(path="data/cache/Joint_RWFLV_test.npz")
-
-#444(,2,) -> 482(1,4,4)-
-#555(1,1,4)
+#444(,2,) -> 482(1,4,4)- #555(1,1,4)
