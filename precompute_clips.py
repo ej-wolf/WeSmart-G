@@ -14,38 +14,30 @@
     positional arguments:
       jsons_dir                     : dir containing JSONs
       cache_dir                     : path for the cached NPZ feature files
-    options:
-      -h/ --help                    : Show help message and exit
-      -t/ --cache-tag CACHE_TAG     : base tag for the output cache npz
+    dataset options:
       -cn/--cache-name              : legacy name for cache-tag
       -sd/--split-dir [path]        : Path for the train/test list files
       -rs/--random-seed RANDOM_SEED : set the random seed (42)
       -ns/--new-split               : Force New split (default: False)
       -r/--test-ratio TEST_RATIO    : Test split ratio (default: 0.2)
-      -w/ --window WINDOW           : Clip window in seconds
-      -s/ --stride STRIDE           : Clip stride in seconds
-      -e/ --allow-empty             : Allow empty (None) labeling
-      -p/--pure-motion              : Use only motion features, drop the static overlap block
-      -l/--legacy                   : Use only the original 18 motion features
-      --no-temp-smooth              : Disable temporal smoothing
-      --json-type                   : input JSON format for loader
 
-    *** stream_json ***
+    *** stream ***
     preprocess and extract features from one long JSON stream into a single cache.
     usage:
-    >> precompute_clips.py  stream_json json_path cache_dir [-h] [-t CACHE_TAG] [-w WINDOW]
+    >> precompute_clips.py  stream json_path cache_dir [-h] [-t CACHE_TAG] [-w WINDOW]
                             [-s STRIDE] [-e] [-p] [-l] [--no-temp-smooth] [--json-type ...}]
     positional arguments:
       json_path                     : path to one long JSON stream file
       cache_dir                     : output directory for the cached NPZ feature file
-    options:
+
+    *** common options for dataset (build) and stream commands : ***
       -h/ --help                    : Show help message and exit
-      -t/--cache-tag                : base tag for the output cache npz
+      -t/ --cache-tag               : base tag for the output cache npz
       -w/ --window WINDOW           : Clip window in seconds
       -s/ --stride STRIDE           : Clip stride in seconds
       -e/ --allow-empty             : Allow empty (None) labeling
-      -p/--pure-motion              : Use only motion features, drop the static overlap block
-      -l/--legacy                   : Use only the original 18 motion features
+      -p/ --pure-motion             : Use only motion features, drop the static overlap block
+      -l/ --legacy                  : Use only the original 18 motion features
       --no-temp-smooth              : Disable temporal smoothing
       --json-type                   : input JSON format for loader
 
@@ -75,7 +67,7 @@
       -rs/--random-seed             : (int) seed for random sampling (default: 42)
 """
 
-import random, argparse, sys, numpy as np
+import random, argparse, sys, glob, numpy as np
 from pathlib import Path
 #* ---- local imports  ----
 from json_utils import load_json_data, list_json_sources
@@ -300,8 +292,42 @@ def merge_cache_npz(npz_paths, out_path:str|Path):
     return out_path
 
 
+def _resolve_input_paths(npz_inputs) -> list[Path]:
+    """ Expand merge inputs where each item may be a file, dir, or glob mask."""
+    resolved = []
+    seen = set()
+
+    for item in as_collection(npz_inputs):
+        item = Path(item)
+        item_str = str(item)
+
+        if any(ch in item_str for ch in '*?[]'):
+            matches = [Path(p) for p in glob.glob(item_str)]
+        elif item.is_dir():
+            matches = sorted(p for p in item.iterdir() if p.is_file() and p.suffix == '.npz')
+        elif item.is_file():
+            matches = [item]
+        else:
+            matches = []
+
+        if not matches:
+            print_color(f"[WARN] No NPZ files matched: {item}", 'y')
+            continue
+
+        for path in matches:
+            if path.suffix != '.npz':
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(path)
+
+    return resolved
+
+
 def cache_info(path:str|Path, **kwargs):
-    """ Summarize a cached NPZ and optionally print per-video list/details.
+    """ Summarize a cached NPZ and optionally print per-videolist/details.
     Args:
         path: NPZ path with keys `X`, `y`, `meta`.
     kwargs:
@@ -311,7 +337,6 @@ def cache_info(path:str|Path, **kwargs):
         sample (int|float|None): sample size for list/details.
         sort (str|None): duration, duration_rev, clips, clips_rev.
         random_seed (int): seed for random sampling.
-
     """
 
     def _sample_count(sample_val, n_total: int) -> int:
@@ -364,9 +389,8 @@ def cache_info(path:str|Path, **kwargs):
         return {'path': str(path), 'n_videos': 0}
 
     # Build per-video aggregates from clip-level metadata.
+    clip_durations, stride_values = [],  []
     video_info = {}
-    clip_durations = []
-    stride_values = []
     valid_rows = 0
 
     for item in meta:
@@ -521,14 +545,12 @@ def _run_build_cache_ds(args):
     if not args.new_split and train_list.exists() and (valid_list.exists() or test_list.exists()):
         print_color('[INFO] Using existing train/test split files','b')
     else:
-        # print_color('[INFO] Creating new train/test split''')
-        # print('random seed : ', args.random_seed)
-        print_color('[INFO] Creating new train/test split\nrandom seed: { args.random_seed}','g')
+        print_color(f'[INFO] Creating new train/test split\nrandom seed: {args.random_seed}','g')
         splits = split_json_ds(jsons_dir, random_seed=args.random_seed, test_ratio=args.test_ratio)
         save_vid_lists(splits, split_dir)
 
     eval_list = test_list if test_list.exists() else valid_list
-    npz_name = args.cache_name or jsons_dir.name
+    npz_name = args.cache_tag or jsons_dir.name
     train_cache = build_cache_from_json(_json_paths_from_list(jsons_dir, train_list), cache_dir/f"{npz_name}_train",
                                         allow_empty_lbl=args.allow_empty,
                                         json_type=args.json_type,
@@ -552,13 +574,23 @@ def _run_build_cache_ds(args):
 
 
 def _run_info(args):
-    cache_info(args.npz_path, **vars(args))
-    # print(args)
-    # kwargs = vars(args).copy();  # kwargs.pop('cmd', None);  # cache_info(args.npz_path, **kwargs)
+    npz_inputs = _resolve_input_paths(args.npz_paths)
+    if not npz_inputs:
+        raise ValueError("No input NPZ files were resolved for info")
+
+    info_kwargs = vars(args).copy()
+    info_kwargs.pop('cmd', None)
+    info_kwargs.pop('npz_paths', None)
+
+    for npz_path in npz_inputs:
+        cache_info(npz_path, **info_kwargs)
 
 
 def _run_merge(args):
-    merge_cache_npz(args.npz_paths, args.out_path)
+    merge_inputs = _resolve_input_paths(args.npz_paths)
+    if not merge_inputs:
+        raise ValueError("No input NPZ files were resolved for merge")
+    merge_cache_npz(merge_inputs, args.out_path)
 
 
 def _run_stream_cache(args):
@@ -601,23 +633,24 @@ def main():
     build_p = sub.add_parser('build', help='build train/test cache files from JSON directory')
     build_p.add_argument('jsons_dir', type=Path, help="dataset path/ dir containing JSONs")
     build_p.add_argument('cache_dir', type=Path, help="path for the cached NPZ feature files")
-    build_p.add_argument('-t',  '--cache-tag',
-                                      '-cn', '--cache-name', type=Path, default=None, help="base name for output npz files")
+    build_p.add_argument('-t', '--cache-tag',
+                                      '-cn','--cache-name', dest='cache_tag', # cn - legacy name for tag
+                                       type=Path, default=None, help="base tag for output npz files")
     build_p.add_argument('-sd', '--split-dir' , type=Path, default=None, help="path for train_videos.txt/test_videos.txt")
     build_p.add_argument('-ns', '--new-split', action='store_true', help='force new train/test split')
-    build_p.add_argument('-r',  '--test-ratio', '--valid-ratio', dest='test_ratio',
-                         type=float, default=TEST_RATIO, help='test split ratio')
+    build_p.add_argument('-r',  '--test-ratio', '--valid-ratio', dest='test_ratio', type=float, default=TEST_RATIO, help='test split ratio')
     build_p.add_argument('-rs', '--random-seed', type=int, default=RANDOM_SEED)
     _add_cache_build_args(build_p)
 
-    stream_p = sub.add_parser('stream_json', help='build one cache npz from a single long JSON stream')
+    stream_p = sub.add_parser('stream', help='build one cache npz from a single long JSON stream')
     stream_p.add_argument('json_path', type=Path, help='path to one long JSON stream file')
     stream_p.add_argument('cache_dir', type=Path, help='output directory for the cached NPZ feature file')
     stream_p.add_argument('-t', '--cache-tag', type=Path, default=None, help='base tag for the output cache npz')
     _add_cache_build_args(stream_p)
 
-    info_p = sub.add_parser('info', help='print cache statistics from npz file')
-    info_p.add_argument('npz_path', type=Path, help='path to cache npz file')
+    info_p = sub.add_parser('info', help='print cache statistics from NPZ sources')
+    info_p.add_argument('npz_paths', nargs='+', type=Path,
+                        help='input NPZ sources: each may be a file, directory, or glob mask')
     info_p.add_argument('-l',  '--list',    action='store_true', help='print video names')
     info_p.add_argument('-d',  '--details', action='store_true', help='print details table per video')
     info_p.add_argument('-m',  '--mode',  type=str, choices=['auto', 'dataset', 'stream'],  default='auto', help='inspection wording mode')
@@ -627,17 +660,18 @@ def main():
 
     merge_p = sub.add_parser('merge', help='merge multiple cache npz files into one')
     merge_p.add_argument('out_path', type=Path, help='output merged npz path')
-    merge_p.add_argument('npz_paths', nargs='+', type=Path, help='input cache npz files to merge')
+    merge_p.add_argument('npz_paths', nargs='+', type=Path,
+                         help='input NPZ sources: each may be a file, directory, or glob mask')
 
     #* if subcommand is missing, route it to `build' for Backward compatibility
-    known_cmds = {'build', 'stream_json', 'info', 'merge'}
+    known_cmds = {'build', 'stream', 'info', 'merge'}
     if len(sys.argv) > 1 and not sys.argv[1].startswith('-') and sys.argv[1] not in known_cmds:
         sys.argv.insert(1, 'build')  #* set default
 
     args = parser.parse_args()
     if args.cmd == 'build':
         _run_build_cache_ds(args)
-    elif args.cmd == 'stream_json':
+    elif args.cmd == 'stream':
         _run_stream_cache(args)
     elif args.cmd == 'info':
         _run_info(args)

@@ -1,4 +1,4 @@
-import json, pickle
+import json, pickle, glob
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,8 +6,8 @@ from types import SimpleNamespace
 from precompute_clips import (build_cache_from_json, merge_cache_npz, WINDOW_SEC, STRIDE_SEC,
                               TEST_RATIO, RANDOM_SEED, DEFAULT_TYPE, _run_build_cache_ds)
 from tms_trainer import run_training, run_testing
-from evaluation_tools import analyze_clip_test, analyze_video_test, _support_pair
-from common.my_local_utils import as_collection
+from evaluation_tools import analyze_clip_test, analyze_video_test, analyze_stream_test, _support_pair
+from common.my_local_utils import as_collection, get_unique_name
 
 #* general configuration
 RWF_DIR  = Path("data/json_files/RWF-2000/ds")
@@ -58,6 +58,209 @@ def build_cache_batch(json_dirs, output_path, **kwargs):
                       'test_cache': output_path/f"{run_args.cache_name}_test.npz",})
     return built
 
+
+def resolve_default_name(model_tag, test_tag):
+    """Resolve a compact default artifact name from model/test tags or paths."""
+    def _strip_split_suffix(tag: str) -> str:
+        for suffix in ('_train', '_test'):
+            if tag.endswith(suffix):
+                return tag[:-len(suffix)]
+        return tag
+
+    def _strip_timestamp_prefix(tag: str) -> str:
+        return tag.split('_', 1)[1] if re.match(r'^\d{6}-\d{4}_.+', tag) else tag
+
+    def _parse_specs(tag: str) -> tuple[str | None, str | None]:
+        ft_match = re.search(r'(?:^|_)(?:ft(?P<ft1>\d+)|(?P<ft2>\d+)ft)(?:_|$)', tag)
+        ft = (ft_match.group('ft1') or ft_match.group('ft2')) if ft_match else None
+
+        ws_match = re.search(r'(?:^|_)(?:w(?P<w1>\d+)-(?P<s1>\d+)|(?P<w2>\d+(?:o\d+)?)w-(?P<s2>\d+(?:o\d+)?))(?:_|$)', tag)
+        if ws_match:
+            win = ws_match.group('w1') or ws_match.group('w2')
+            stride = ws_match.group('s1') or ws_match.group('s2')
+        else:
+            win = stride = None
+
+        parts = []
+        if ft is not None:
+            parts.append(f"ft{ft}")
+        if win is not None and stride is not None:
+            parts.append(f"w{win}-{stride}")
+        return ('_'.join(parts) if parts else None), ft_match.group(0).strip('_') if ft_match else None
+
+    def _strip_same_specs(tag: str, specs: str | None) -> str:
+        if not specs:
+            return tag
+        tag = re.sub(rf'(?:^|_){re.escape(specs)}(?:_|$)', '_', tag)
+        tag = re.sub(r'__+', '_', tag).strip('_')
+        return tag
+
+    def _resolve_model_parts(value) -> tuple[str, int | None]:
+        path = Path(value)
+        epoch = None
+        if path.suffix == '.pt':
+            match = re.fullmatch(r'best_model\.(\d+)', path.stem)
+            if match:
+                epoch = int(match.group(1))
+            tag = path.parent.name
+        elif path.exists() and path.is_dir():
+            tag = path.name
+            best_models = sorted(path.glob('best_model.*.pt'))
+            if len(best_models) == 1:
+                match = re.fullmatch(r'best_model\.(\d+)', best_models[0].stem)
+                if match:
+                    epoch = int(match.group(1))
+        else:
+            tag = path.stem if path.suffix else path.name
+
+        tag = _strip_split_suffix(_strip_timestamp_prefix(tag))
+        return tag, epoch
+
+    def _resolve_test_tag(value) -> str:
+        path = Path(value)
+        tag = path.stem if path.suffix else path.name
+        return _strip_split_suffix(tag)
+
+    model_name, best_epoch = _resolve_model_parts(model_tag)
+    test_name = _resolve_test_tag(test_tag)
+    same_tag = (test_name == model_name)
+
+    model_specs, _ = _parse_specs(model_name)
+    test_specs, _ = _parse_specs(test_name)
+    common_specs = model_specs or test_specs
+    if common_specs and common_specs not in model_name:
+        model_name = f"{model_name}_{common_specs}"
+
+    if same_tag:
+        test_name = ''
+    else:
+        test_name = _strip_same_specs(test_name, common_specs if test_specs == common_specs else None)
+    if test_name == model_name:
+        test_name = ''
+
+    parts = [model_name]
+    if best_epoch is not None:
+        parts.append(f"BM{best_epoch}")
+    if test_name:
+        parts.append(test_name)
+    return '_'.join(parts)
+
+
+def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs):
+    """Train models for all `*_train.npz` in `cache_dir` and run dataset/stream tests."""
+
+    def _resolve_npz_inputs(inputs, base_dir: Path) -> list[Path]:
+        resolved = []
+        seen = set()
+        for item in as_collection(inputs or []):
+            item = Path(item)
+            if not item.is_absolute():
+                item = base_dir/item
+            item_str = str(item)
+            if any(ch in item_str for ch in '*?[]'):
+                matches = [Path(p) for p in glob.glob(item_str)]
+            elif item.is_dir():
+                matches = sorted(p for p in item.iterdir() if p.is_file() and p.suffix == '.npz')
+            elif item.is_file():
+                matches = [item]
+            else:
+                matches = []
+
+            if not matches:
+                print(f"[WARN] No NPZ files matched: {item}")
+                continue
+
+            for path in matches:
+                key = str(path.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                resolved.append(path)
+        return resolved
+
+    def _dataset_tag(stem: str, split_suffix: str) -> str:
+        return stem[:-len(split_suffix)] if stem.endswith(split_suffix) else stem
+
+    def _best_model_info(model_dir: Path) -> tuple[Path, int]:
+        best_models = sorted(model_dir.glob("best_model.*.pt"))
+        if not best_models:
+            raise FileNotFoundError(f"No best_model.*.pt found in {model_dir}")
+        bm = best_models[-1]
+        return bm, int(bm.stem.split(".")[-1])
+
+    def _run_dataset_test(model_path: Path, test_npz: Path, out_dir: Path):
+        base_name = resolve_default_name(model_path, test_npz)
+        raw_tag = f"{base_name}_clip-tst"
+        summary_name = f"{base_name}_clip-summary"
+        res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag)
+        analyze_clip_test(res['path'], out_path=out_dir, output_name=summary_name, show_roc=False)
+
+    def _run_stream_test(model_path: Path, test_npz: Path, out_dir: Path):
+        base_name = resolve_default_name(model_path, test_npz)
+        raw_tag = f"{base_name}_stream-tst"
+        summary_name = f"{base_name}_stream-summary"
+        events_name = f"{base_name}_stream-events.json"
+        res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
+        analyze_stream_test(res['path'], out_path=out_dir, output_name=summary_name,
+                            details_name=events_name, show_roc=False)
+
+    cache_dir = Path(cache_dir)
+    main_op_dir = Path(main_op_dir)
+    if not cache_dir.is_dir():
+        raise NotADirectoryError(cache_dir)
+    main_op_dir.mkdir(parents=True, exist_ok=True)
+
+    ds_targets = _resolve_npz_inputs(ds_tests, cache_dir)
+    stm_targets = _resolve_npz_inputs(stm_tests, cache_dir)
+    train_caches = sorted(cache_dir.glob("*_train.npz"))
+    if not train_caches:
+        print(f"[WARN] No *_train.npz caches found in {cache_dir}")
+        return []
+
+    built_runs = []
+    for train_cache in train_caches:
+        train_tag = _dataset_tag(train_cache.stem, "_train")
+        model_dir = get_unique_name(main_op_dir/train_tag)
+        try:
+            run_dir = Path(run_training(train_cache, tag=train_tag, work_dir=model_dir.parent))
+            if run_dir != model_dir:
+                run_dir.rename(model_dir)
+                run_dir = model_dir
+            best_model, _ = _best_model_info(run_dir)
+        except Exception as exc:
+            print(f"[WARN] Training failed for {train_cache.name}: {type(exc).__name__}: {exc}")
+            continue
+
+        own_test = cache_dir/f"{train_tag}_test.npz"
+        if own_test.is_file():
+            try:
+                _run_dataset_test(best_model, own_test, run_dir)
+            except Exception as exc:
+                print(f"[WARN] Own dataset test failed for {train_tag}: {type(exc).__name__}: {exc}")
+        else:
+            print(f"[WARN] Missing own test cache for {train_tag}: {own_test}")
+
+        for test_npz in ds_targets:
+            try:
+                _run_dataset_test(best_model, test_npz, run_dir)
+            except Exception as exc:
+                print(f"[WARN] Dataset test failed for {train_tag} on {test_npz.name}: {type(exc).__name__}: {exc}")
+
+        for test_npz in stm_targets:
+            try:
+                _run_stream_test(best_model, test_npz, run_dir)
+            except Exception as exc:
+                print(f"[WARN] Stream test failed for {train_tag} on {test_npz.name}: {type(exc).__name__}: {exc}")
+
+        built_runs.append(run_dir)
+
+    try:
+        sum_all_results(main_op_dir, save_json=kwargs.get('save_summery',True))
+    except Exception as exc:
+        print(f"[WARN] sum_all_results failed for {main_op_dir}: {type(exc).__name__}: {exc}")
+
+    return built_runs
+
 def build_window_study(): # 80 -> 65
     """  Small batch script for the window/stride cache study.
     Builds train/test caches for  RWF-2000 and  RLVS datasets
@@ -106,7 +309,7 @@ def build_window_study(): # 80 -> 65
 
 
 def train_test_stdy(cache_dir:str|Path, **kwargs): #92 -> 63
-    """Train all `*_train.npz` caches in a directory and run clip/video tests."""
+    """ Train all `*_train.npz` caches in a directory and run clip/video tests."""
 
     def _dataset_tag(stem:str, split_suffix:str) -> str:
         """Strip the split suffix from a cache stem."""
@@ -122,13 +325,12 @@ def train_test_stdy(cache_dir:str|Path, **kwargs): #92 -> 63
         return bm, be
 
     def _existing_run_dir(tag: str, base_work_dir: Path) -> Path | None:
-        """Return the newest matching prior run dir for `tag`, if it is usable."""
+        """ Return the newest matching prior run dir for `tag`, if it is usable."""
         if not base_work_dir.is_dir():
             return None
 
         run_name = re.compile(rf"^\d{{6}}-\d{{4}}_{re.escape(tag)}$")
-        matches = [p for p in base_work_dir.iterdir()
-                   if p.is_dir() and run_name.fullmatch(p.name)]
+        matches = [p for p in base_work_dir.iterdir()  if p.is_dir() and run_name.fullmatch(p.name)]
         ready_runs = [p for p in matches if any(p.glob("best_model.*.pt"))]
         if ready_runs:
             return sorted(ready_runs)[-1]
@@ -217,13 +419,15 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
             return m.group("ds"), _fmt_num(WINDOW_SEC), _fmt_num(STRIDE_SEC)
 
         return tag, "", ""
-
-    def _model_disp(model_path: str) -> tuple[str, str]:
+                                    
+    def _model_disp(model_path:     str) -> tuple[str, str]:
         """Return compact model label and best-epoch string for printing/sorting."""
         mdl_path = Path(model_path)
         parent_name = mdl_path.parent.name
-        parts = parent_name.split("_", 2)
-        model_name = parts[2] if len(parts) >= 3 else parent_name
+        if re.match(r'^\d{6}-\d{4}_.+', parent_name):
+            model_name = parent_name.split("_", 1)[1]
+        else:
+            model_name = parent_name
         best_epoch = mdl_path.stem.split(".")[-1] if "." in mdl_path.stem else ""
         return model_name, best_epoch
 
@@ -293,7 +497,8 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
 
         cm = summary.get('confusion_matrix', [[None, None], [None, None]])
         return {'model': str(model_path), 'cache': test_cache.stem,
-                'train ds': train_ds, 'test ds': test_ds,
+                'train ds': train_tag or train_ds,
+                'test ds': test_tag or test_ds,
                 'unit': unit, 'samples': samples, 'support': support_str,
                 'window': window, 'stride': stride,
                 'FF': cm[0][0],
@@ -308,6 +513,10 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
 
     def _print_rows(rows: list[dict]):
         """Print the aggregated table in a simple aligned layout."""
+        def _clip_text(text, limit=24) -> str:
+            text = str(text)
+            return text if len(text) <= limit else text[:limit - 1] + '…'
+
         cols = ['model', 'BE', 'train ds', 'test ds', 'window', 'stride', 'unit',
                 'samples', 'support', 'FF', 'FT', 'TF', 'TT', 'Acc', 'Rec', 'FPR', 'AUC']
         header_labels = {c: c if c.isupper() else c.title() for c in cols}
@@ -316,6 +525,8 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
         for row in rows:
             disp = row.copy()
             disp['model'], disp['BE'] = _model_disp(disp['model'])
+            disp['train ds'] = _clip_text(disp['train ds'])
+            disp['test ds'] = _clip_text(disp['test ds'])
             for key in ('Acc', 'Rec', 'FPR', 'AUC'):
                 if isinstance(disp[key], float):
                     disp[key] = f'{disp[key]:.4f}'
@@ -371,8 +582,19 @@ if __name__ == "__main__":
     # study_dir = 'ftr-study'
     STUDY_CACHE_DIR = MAIN_CACHE_DIR/study_dir
 
+    #* train & test for win study
     # build_window_study()
-    train_test_stdy(STUDY_CACHE_DIR)
-    sum_all_results(MAIN_WORK_DIR/study_dir, sort=['win-str','vid-clp', 'trn-tst-R'],save_json=True)
+    # train_test_stdy(STUDY_CACHE_DIR)
+    # sum_all_results(MAIN_WORK_DIR/study_dir, sort=['win-str','vid-clp', 'trn-tst-R'],save_json=True)
+
+    #*
+    cache_dir = "data/cache/w30-15"
+    output_dir= "work_dirs/json_models/w30-15"
+    stream_testing = ["cam-6-11-5_ft25_w30-15.npz",
+                    "cam-6-11-8_FRes_Ana_ft25_w30-15.npz",
+                    "cam-6-11-8_FRes_Erz_ft25_w30-15.npz"]
+    ds_testsing = ['J-All_ft25_w30-15_test.npz']
+    # train_models(cache_dir, output_dir, ds_tests=stream_testing, stm_tests= stream_testing)
+    sum_all_results(output_dir)
 
 # 321(,6,2)->300(,6,2)

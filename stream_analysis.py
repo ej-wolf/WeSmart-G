@@ -5,19 +5,10 @@ import numpy as np
 
 from common.my_local_utils import print_color, serialize_json_data, resolve_output_path
 from visual_util import plot_roc_curve
-from evaluation_core import (
-    DEFAULT_ROC_RES,
-    DEFAULT_EVAL_THRESHOLD,
-    DEFAULT_REG_MODEL,
-    _cm_dict,
-    _get_eval_arrays,
-    _resolve_input,
-    _roc_summary,
-    _save_analyze_summary,
-    _support_counts,
-    binary_metrics,
-    print_test_report,
-)
+from evaluation_core import (DEFAULT_ROC_RES, DEFAULT_EVAL_THRESHOLD, DEFAULT_REG_MODEL, DEFAULT_THRESHOLD_RANGE,
+                             _cm_dict, _get_eval_arrays, _resolve_input, _roc_summary,
+                             _save_analyze_summary, _support_counts,
+                             binary_metrics, iter_thresholds, print_test_report, _require_prob_scores,)
 
 STREAM_MATCH_MIN_OVERLAP = 1e-9
 STREAM_MATCH_MAX_LAG = None
@@ -170,22 +161,21 @@ def process_stream_inputs(test_res, **kwargs):
         idx = np.asarray(idx, dtype=np.int64)[order]
         video_groups.append({'video': video_name, 'idx': idx})
 
-    return {
-        'raw_res': raw_res,
-        'res_path': res_path,
-        'y_true': y_true,
-        'y_pred': y_pred,
-        'scores': scores,
-        'score_name': score_name,
-        'meta_video': meta_video,
-        'meta_t_start': meta_t_start,
-        'meta_t_end': meta_t_end,
-        'meta_n_frames': meta_n_frames,
-        'match_min_overlap': match_min_overlap,
-        'match_max_lag': match_max_lag,
-        'max_event_gap': max_event_gap,
-        'video_groups': video_groups,
-    }
+    return {'raw_res': raw_res,
+            'res_path': res_path,
+            'y_true': y_true,
+            'y_pred': y_pred,
+            'scores': scores,
+            'score_name': score_name,
+            'meta_video': meta_video,
+            'meta_t_start': meta_t_start,
+            'meta_t_end': meta_t_end,
+            'meta_n_frames': meta_n_frames,
+            'match_min_overlap': match_min_overlap,
+            'match_max_lag': match_max_lag,
+            'max_event_gap': max_event_gap,
+            'video_groups': video_groups,
+            }
 
 
 def analyze_single_stream(stream_ctx, video_group):
@@ -336,6 +326,93 @@ def get_stream_summary(stream_ctx, video_results, **kwargs):
     )
     summary.update(roc_info)
     return summary, roc
+
+
+def _event_metrics(detected_events, missed_events, false_events):
+    """Return event precision/recall/F1 from aggregated event counts."""
+    detected_events = int(detected_events)
+    missed_events = int(missed_events)
+    false_events = int(false_events)
+    precision = detected_events / (detected_events + false_events) if (detected_events + false_events) > 0 else 0.0
+    recall = detected_events / (detected_events + missed_events) if (detected_events + missed_events) > 0 else 0.0
+    f1 = 2.0 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return precision, recall, f1
+
+
+def _stream_objective(row: dict, mode='event_f1') -> tuple[float, tuple]:
+    """Return one stream optimization objective value and tie-break key."""
+    if mode == 'event_f1':
+        objective = float(row['event_f1'])
+        tie_key = (objective, float(row['event_recall']), -float(row['false_events']), float(row['threshold']))
+        return objective, tie_key
+    if mode == 'sensitivity_first':
+        objective = float(row['event_recall'])
+        tie_key = (objective, -float(row['false_events']), float(row['event_f1']), float(row['threshold']))
+        return objective, tie_key
+    if mode == 'low_false_alarms':
+        objective = -float(row['false_events'])
+        tie_key = (objective, float(row['event_recall']), float(row['event_f1']), float(row['threshold']))
+        return objective, tie_key
+    raise ValueError(f"Unsupported stream optimization mode: {mode}")
+
+
+def optimize_stream_threshold(test_results: Path | str | dict, threshold_range=DEFAULT_THRESHOLD_RANGE, mode='event_f1', **kwargs):
+    """Sweep thresholds for stream event analysis and return the best operating point."""
+    raw_res, res_path = _resolve_input(test_results)
+    _require_prob_scores(raw_res)
+    thresholds = iter_thresholds(threshold_range)
+
+    rows = []
+    for threshold in thresholds:
+        stream_ctx = process_stream_inputs(test_results, threshold=float(threshold), **kwargs)
+        video_reports = []
+        for video_group in stream_ctx['video_groups']:
+            video_reports.append(analyze_single_stream(stream_ctx, video_group))
+        summary, _ = get_stream_summary(stream_ctx, video_reports, **kwargs)
+        event_precision, event_recall, event_f1 = _event_metrics(
+            summary.get('detected_events', 0),
+            summary.get('missed_events', 0),
+            summary.get('false_events_num', 0),
+        )
+        row = {
+            'threshold': float(threshold),
+            'accuracy': float(summary.get('accuracy', 0.0)),
+            'recall': float(summary.get('recall', 0.0)),
+            'FPR': float(summary.get('FPR', 0.0)),
+            'detected_events': int(summary.get('detected_events', 0)),
+            'missed_events': int(summary.get('missed_events', 0)),
+            'false_events': int(summary.get('false_events_num', 0)),
+            'pred_events': int(summary.get('pred_events_num', 0)),
+            'gt_events': int(summary.get('gt_events_num', 0)),
+            'event_precision': float(event_precision),
+            'event_recall': float(event_recall),
+            'event_f1': float(event_f1),
+            'false_positive_time': float(summary.get('false_positive_time', 0.0)),
+            'miss_time': float(summary.get('miss_time', 0.0)),
+            'num_videos': int(summary.get('num_videos', 0)),
+            'support_clips': _support_counts(stream_ctx['y_true']),
+        }
+        objective, tie_key = _stream_objective(row, mode=mode)
+        row['objective'] = float(objective)
+        row['_tie_key'] = tie_key
+        rows.append(row)
+
+    best_row = max(rows, key=lambda row: row['_tie_key'])
+    for row in rows:
+        row.pop('_tie_key', None)
+
+    return {
+        'raw_results_path': str(res_path) if res_path is not None else None,
+        'analysis_mode': 'stream',
+        'optimization_mode': mode,
+        'threshold_range': [float(v) for v in thresholds],
+        'model_path': raw_res.get('model_path', None),
+        'test_cache': raw_res.get('test_cache', None),
+        'best_threshold': best_row['threshold'],
+        'best_objective': best_row['objective'],
+        'best_metrics': {k: serialize_json_data(v) for k, v in best_row.items() if k != 'objective'},
+        'results_table': serialize_json_data(rows),
+    }
 
 
 def analyze_stream_test(test_res: Path | str | dict, **kwargs):

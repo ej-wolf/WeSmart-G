@@ -6,8 +6,10 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime, time as dt_time
 from matplotlib.ticker import FuncFormatter
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
-from common.my_local_utils import _load_log_lines, print_color
+from common.my_local_utils import _load_log_lines, print_color, get_unique_name
 
 def _close_all_on_key(event):
     if event.key in ('x', 'C'):
@@ -349,6 +351,8 @@ def draw_confusion_matrix(cm, **kwargs):
 
 def plot_timeline(csv_path, t_span=None, **kwargs):
     """Plot one stream timeline CSV produced by the stream analysis flow."""
+
+    BASE_TICK = 60.0 #s
     def _time_to_seconds(value):
         """Convert numeric/string/datetime-like time values into seconds."""
         if value is None:
@@ -356,10 +360,10 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
         if isinstance(value, (int, float, np.integer, np.floating)):
             return float(value)
         if isinstance(value, datetime):
-            return (value.hour * 3600.0 + value.minute * 60.0 +
+            return (value.hour * 3600.0 + value.minute * BASE_TICK +
                     value.second + value.microsecond / 1e6)
         if isinstance(value, dt_time):
-            return (value.hour * 3600.0 + value.minute * 60.0 +
+            return (value.hour * 3600.0 + value.minute * BASE_TICK +
                     value.second + value.microsecond / 1e6)
         if isinstance(value, str):
             txt = value.strip()
@@ -369,12 +373,12 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
             if len(parts) == 2:
                 mins = int(parts[0])
                 secs = float(parts[1])
-                return mins * 60.0 + secs
+                return mins*BASE_TICK + secs
             if len(parts) == 3:
                 hrs = int(parts[0])
                 mins = int(parts[1])
                 secs = float(parts[2])
-                return hrs * 3600.0 + mins * 60.0 + secs
+                return hrs * 3600.0 + mins*BASE_TICK + secs
         raise TypeError(f"unsupported time value: {value!r}")
 
     def _fmt_seconds_as_stamp(x_val, _pos=None):
@@ -387,6 +391,59 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
         if hours > 0:
             return f"{sign}{hours:02d}:{minutes:02d}:{seconds:05.2f}".rstrip('0').rstrip('.')
         return f"{sign}{minutes:02d}:{seconds:05.2f}".rstrip('0').rstrip('.')
+
+    def _merge_positive_spans(starts, ends, labels):
+        """Merge overlapping positive windows into continuous shaded spans."""
+        spans = []
+        active = None
+        for s, e, y in zip(starts, ends, labels):
+            if float(y) <= 0:
+                continue
+            s = float(s)
+            e = float(e)
+            if active is None:
+                active = [s, e]
+            elif s <= active[1]:
+                active[1] = max(active[1], e)
+            else:
+                spans.append(tuple(active))
+                active = [s, e]
+        if active is not None:
+            spans.append(tuple(active))
+        return spans
+
+    def _minute_tick_step(span_sec: float) -> int:
+        """ Pick a readable minute-based tick spacing for timestamp axes."""
+        if span_sec <= 10*60:
+            return 60
+        if span_sec <= 20*60:
+            return 2*60
+        if span_sec <= 40*60:
+            return 5*60
+        return 10*60
+
+    def _smooth_series(values, kernel_size: int):
+        """Apply light 1D moving-average smoothing; kernel=1 leaves data unchanged."""
+        if kernel_size <= 1 or len(values) == 0:
+            return values
+        kernel_size = int(kernel_size)
+        kernel = np.ones(kernel_size, dtype=np.float64) / float(kernel_size)
+        return np.convolve(values, kernel, mode='same')
+
+    def _default_title():
+        """Infer a short title from CSV content/name, preferring the stream JSON name."""
+        if rows and rows[0].get('video'):
+            return Path(rows[0]['video']).stem
+
+        base = csv_path.stem
+        for suffix in ('_stream-timeline', '_timeline'):
+            if base.endswith(suffix):
+                base = base[:-len(suffix)]
+                break
+        for marker in ('_stream-tst_', '_raw_'):
+            if marker in base:
+                return base.split(marker, 1)[1]
+        return base
 
     csv_path = Path(csv_path)
     if not csv_path.is_file():
@@ -401,19 +458,25 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
     if not rows:
         raise ValueError(f"timeline csv is empty: {csv_path}")
 
+    label_key = 'gt_label' if 'gt_label' in rows[0] else 'y_true' if 'y_true' in rows[0] else None
+    if 't_start' not in rows[0]:
+        raise KeyError(f"timeline csv has no 't_start' column: {csv_path}")
     t_frm = np.asarray([float(row['t_frm']) for row in rows], dtype=np.float64)
+    t_start = np.asarray([float(row['t_start']) for row in rows], dtype=np.float64)
     y_prob = np.asarray([float(row['y_prob']) for row in rows], dtype=np.float64)
     y_pred = np.asarray([float(row['y_pred']) for row in rows], dtype=np.float64)
-    gt_label = np.asarray([float(row['gt_label']) for row in rows], dtype=np.float64)
+    gt_label = (np.asarray([float(row[label_key]) for row in rows], dtype=np.float64)
+                if label_key is not None else None)
 
-    plot_gt = bool(kwargs.get('plot_gt', False))
-    gt_offset = float(kwargs.get('gt_offset', 0.05))
-    fig_size = kwargs.get('figsize', (10, 4.5))
+    plot_gt = bool(kwargs.get('plot_gt', gt_label is not None))
+    fig_size = kwargs.get('figsize', (13.5, 4.8))
     dpi = int(kwargs.get('dpi', 120))
-    title = kwargs.get('title', csv_path.stem)
+    title = kwargs.get('title', _default_title())
     x_format = kwargs.get('x_format', 'time_stamp')
     save_to = kwargs.get('save_to', None)
     show = bool(kwargs.get('show', save_to is None))
+    threshold = float(kwargs.get('threshold', 0.5))
+    smooth = max(1, int(kwargs.get('smooth', 1)))
 
     if x_format not in {'seconds', 's', 'time_stamp'}:
         raise ValueError(f"x_format must be 'seconds', 's', or 'time_stamp', got {x_format!r}")
@@ -451,40 +514,75 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
             mask[prev_idx[-1]] = True
 
     plot_t = t_frm[mask]
-    plot_prob = y_prob[mask]
+    plot_t_start = t_start[mask]
+    plot_prob = _smooth_series(y_prob[mask], smooth)
     plot_pred = y_pred[mask]
-    plot_gt_vals = gt_label[mask]
+    plot_gt_vals = gt_label[mask] if gt_label is not None else None
 
     fig, ax = plt.subplots(figsize=fig_size, dpi=dpi)
-    ax.plot(plot_t, plot_prob, color='black', linewidth=1.8, label='y_prob')
-    ax.step(plot_t, plot_pred, where='post', color='red', linewidth=1.1, label='y_pred')
-    plot_max = max(np.max(plot_prob), np.max(plot_pred)) if len(plot_t) > 0 else 0.0
-    if plot_gt:
-        gt_plot = plot_gt_vals + gt_offset
-        ax.step(plot_t, gt_plot, where='post', color='blue', linewidth=1.5, label='gt_label')
-        plot_max = max(plot_max, np.max(gt_plot)) if len(gt_plot) > 0 else plot_max
+    gt_spans = _merge_positive_spans(plot_t_start, plot_t, plot_gt_vals) if (plot_gt and plot_gt_vals is not None) else []
+    pred_spans = _merge_positive_spans(plot_t_start, plot_t, plot_pred)
 
-    ax.set_xlim(t1, t2)
-    if t2 > t1:
+    for s, e in gt_spans:
+        ax.fill_between([s, e], [0.0, 0.0], [0.17, 0.17],
+                        facecolor='#8BCB88', edgecolor='#63B56C',
+                        alpha=0.35, linewidth=1.0, zorder=0)
+    for s, e in pred_spans:
+        ax.fill_between([s, e], [0.65, 0.65], [1.0, 1.0],
+                        facecolor='#A9D3F0', edgecolor='#7FB9E5',
+                        alpha=0.40, linewidth=1.0, zorder=1)
+
+    ax.plot(plot_t, plot_prob, color='black', linewidth=1.9, label='raw probability', zorder=3)
+    plot_max = float(np.max(plot_prob)) if len(plot_t) > 0 else 0.0
+    if plot_gt:
+        if plot_gt_vals is None:
+            raise KeyError(f"timeline csv has no GT label column: {csv_path}")
+    ax.axhline(float(threshold), color='#E53935', linestyle='--', linewidth=1.4, zorder=2)
+    plot_max = max(plot_max, float(threshold), 1.0)
+
+    x_left, x_right = t1, t2
+    if x_format == 'time_stamp' and t2 > t1:
+        step_sec = _minute_tick_step(t2 - t1)
+        x_left = int(np.ceil(t1 / step_sec) * step_sec)
+        x_right = int(np.ceil(t2 / step_sec) * step_sec)
+        if x_right <= x_left:
+            x_right = x_left + step_sec
+        x_ticks = np.arange(x_left, x_right + 0.1, step_sec, dtype=np.float64)
+    elif t2 > t1:
         x_ticks = np.linspace(t1, t2, num=6)
     else:
         x_ticks = np.asarray([t1], dtype=np.float64)
+    ax.set_xlim(x_left, x_right)
     ax.set_xticks(x_ticks)
-    ax.set_xlabel('time [s]' if x_format in {'seconds', 's'} else 'time')
-    ax.set_ylabel('score / label')
+    ax.set_xlabel('Time (sec)' if x_format in {'seconds', 's'} else 'Time')
+    ax.set_ylabel('Probability')
     y_top = plot_max * 1.03 if plot_max > 0 else 1.0
     ax.set_ylim(0.0, y_top)
     ax.set_title(title)
     if x_format == 'time_stamp':
         ax.xaxis.set_major_formatter(FuncFormatter(_fmt_seconds_as_stamp))
-    ax.grid(alpha=0.25)
-    ax.legend(loc='upper right')
+    ax.grid(alpha=0.25, color='#B8B8B8', linewidth=0.8)
+
+    legend_handles = [Patch(facecolor='#8BCB88', edgecolor='#63B56C', alpha=0.35, label='GT positive'),
+                      Patch(facecolor='#A9D3F0', edgecolor='#7FB9E5', alpha=0.40, label='Predicted positive'),
+                      Line2D([0], [0], color='black', linewidth=1.9, label='raw probability')]
+    legend_handles.append(Line2D([0], [0], color='#E53935', linestyle='--', linewidth=1.4,
+                                 label=f'Threshold={float(threshold):.2f}'))
+    ax.legend(handles=legend_handles, loc='upper left', framealpha=0.9)
+
+    if pred_spans:
+        ax.text(t2 - 0.005 * max(t2 - t1, 1e-6), y_top * 0.90, 'Pred spans',
+                color='#1E73BE', ha='right', va='center', fontsize=11)
+    if gt_spans:
+        ax.text(t2 - 0.005 * max(t2 - t1, 1e-6), y_top * 0.09, 'GT spans',
+                color='#2E9B33', ha='right', va='center', fontsize=11)
     plt.tight_layout()
 
     if save_to is not None:
         save_to = Path(save_to)
         if save_to.suffix.lower() != '.png':
             save_to = save_to.with_suffix('.png')
+        save_to = get_unique_name(save_to)
         try:
             save_to.parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_to, dpi=dpi)

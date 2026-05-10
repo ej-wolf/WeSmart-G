@@ -8,6 +8,7 @@ from visual_util import plot_roc_curve
 DEFAULT_ROC_RES = 100
 DEFAULT_MIN_CLIPS = 2
 DEFAULT_EVAL_THRESHOLD = 0.5
+DEFAULT_THRESHOLD_RANGE = (0.0, 1.0, 0.01)
 DEFAULT_REG_MODEL = Path("work_dirs/json_models/win-study/260414-1721_J-RWL_25ft_3w-1o5-stream-tst/best_model.148.pt")
 
 
@@ -96,6 +97,19 @@ def _get_eval_arrays(raw: dict, threshold=DEFAULT_EVAL_THRESHOLD) -> tuple[np.nd
     if y_pred.ndim != 1 or len(y_pred) != len(y_true):
         raise ValueError(f"y_pred length mismatch: {y_pred.shape} vs {len(y_true)}")
     return y_true, y_pred, np.asarray(y_pred, dtype=np.float64), 'y_pred'
+
+
+def _require_prob_scores(raw: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Return y_true and y_prob for threshold sweeps, rejecting legacy y_pred-only payloads."""
+    y_true = _validate_raw_results(raw)
+    y_prob = raw.get('y_prob', None)
+    if y_prob is None:
+        raise KeyError("threshold optimization requires raw results with y_prob")
+
+    y_prob = np.asarray(y_prob, dtype=np.float64)
+    if y_prob.ndim != 1 or len(y_prob) != len(y_true):
+        raise ValueError(f"y_prob length mismatch: {y_prob.shape} vs {len(y_true)}")
+    return y_true, y_prob
 
 
 # -----------------------------------------------------------------------
@@ -206,6 +220,161 @@ def _min_clips_pool(clip_pred, clip_score=None, min_val=DEFAULT_MIN_CLIPS):
     else:
         raise TypeError(f"min_val must be int or float, got {type(min_val).__name__}")
     return int(score >= target), score
+
+
+def _balanced_accuracy(metrics: dict) -> float:
+    """Return balanced accuracy from the standard binary metric dict."""
+    return 0.5 * (float(metrics.get('recall', 0.0)) + (1.0 - float(metrics.get('FPR', 0.0))))
+
+
+def _f1_from_cm(cm) -> float:
+    """Return F1 score from a 2x2 confusion matrix."""
+    tn, fp = cm[0]
+    fn, tp = cm[1]
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    return 2.0 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+
+def pred_from_threshold(probability_vector, threshold=DEFAULT_EVAL_THRESHOLD) -> np.ndarray:
+    """Convert one probability vector into hard 0/1 predictions."""
+    if threshold is None:
+        threshold = DEFAULT_EVAL_THRESHOLD
+    probs = np.asarray(probability_vector, dtype=np.float64)
+    if probs.ndim != 1:
+        raise ValueError(f"probability_vector must be 1D, got {probs.shape}")
+    return (probs >= float(threshold)).astype(np.int64)
+
+
+def iter_thresholds(threshold_range=DEFAULT_THRESHOLD_RANGE) -> np.ndarray:
+    """Expand one fixed-grid threshold range into a 1D float array."""
+    if threshold_range is None:
+        threshold_range = DEFAULT_THRESHOLD_RANGE
+
+    if isinstance(threshold_range, np.ndarray):
+        thresholds = np.asarray(threshold_range, dtype=np.float64).reshape(-1)
+    elif isinstance(threshold_range, (list, tuple)) and len(threshold_range) == 3:
+        start, stop, step = [float(v) for v in threshold_range]
+        if step <= 0:
+            raise ValueError(f"threshold step must be positive, got {step}")
+        thresholds = np.arange(start, stop + (step * 0.5), step, dtype=np.float64)
+    else:
+        thresholds = np.asarray(list(threshold_range), dtype=np.float64).reshape(-1)
+
+    if thresholds.size == 0:
+        raise ValueError("threshold_range produced no thresholds")
+    return np.unique(np.round(thresholds, 10))
+
+
+def _clip_metrics_for_threshold(y_true, y_prob, threshold) -> dict:
+    """Evaluate one clip threshold without saving side effects."""
+    y_pred = pred_from_threshold(y_prob, threshold)
+    metrics = binary_metrics(y_true, y_pred)
+    metrics.update({
+        'threshold': float(threshold),
+        'f1': _f1_from_cm(metrics['confusion_matrix']),
+        'balanced_acc': _balanced_accuracy(metrics),
+    })
+    return metrics
+
+
+def _video_level_arrays(raw: dict, threshold=DEFAULT_EVAL_THRESHOLD, **kwargs):
+    """Pool clip predictions to video-level arrays using the standard analyzer logic."""
+    y_true, y_pred, scores, score_name = _get_eval_arrays(raw, threshold=threshold)
+
+    if 'meta_video' not in raw or len(y_true) != len(y_pred):
+        raise KeyError("Results file meta data are defective")
+
+    meta_video = np.asarray(raw['meta_video'])
+    if len(meta_video) != len(y_true):
+        raise ValueError(f"meta_video length mismatch: {len(meta_video)} vs {len(y_true)}")
+
+    clip_scores = scores if score_name == 'y_prob' else None
+    pool_func = kwargs.get('pool_func', _min_clips_pool)
+    min_val = kwargs.get('min_val', DEFAULT_MIN_CLIPS)
+
+    video_to_idx = {}
+    for i, vid in enumerate(meta_video):
+        video_to_idx.setdefault(str(vid), []).append(i)
+
+    vid_true, vid_pred, vid_score = [], [], []
+    excluded_videos = []
+    for vid, idx in video_to_idx.items():
+        clip_true = y_true[idx]
+        uniq_true = np.unique(clip_true)
+        if len(uniq_true) != 1:
+            excluded_videos.append(vid)
+            continue
+
+        clip_pred = y_pred[idx]
+        clip_score = clip_scores[idx] if clip_scores is not None else None
+        if pool_func is _min_clips_pool:
+            pooled = pool_func(clip_pred, clip_score, min_val=min_val)
+        else:
+            pooled = pool_func(clip_pred, clip_score)
+
+        if isinstance(pooled, tuple):
+            video_pred, video_score = pooled
+        else:
+            video_pred = pooled
+            _, video_score = _min_clips_pool(clip_pred, clip_score, min_val=min_val)
+
+        vid_true.append(int(uniq_true[0]))
+        vid_pred.append(int(video_pred))
+        vid_score.append(float(video_score))
+
+    if len(vid_true) == 0:
+        raise ValueError("No valid videos left for analysis after excluding inconsistent GT videos")
+
+    return (
+        np.asarray(vid_true, dtype=np.int64),
+        np.asarray(vid_pred, dtype=np.int64),
+        np.asarray(vid_score, dtype=np.float64),
+        excluded_videos,
+    )
+
+
+def _objective_from_row(row: dict, mode='balanced_acc', **kwargs) -> tuple[float, tuple]:
+    """Return objective value plus tie-break key for one sweep row."""
+    if mode == 'balanced_acc':
+        return float(row['balanced_acc']), (float(row['balanced_acc']), float(row['f1']), -float(row['FPR']), float(row['threshold']))
+    if mode == 'f1':
+        return float(row['f1']), (float(row['f1']), float(row['balanced_acc']), -float(row['FPR']), float(row['threshold']))
+    if mode == 'recall_floor':
+        target_recall = kwargs.get('target_recall', None)
+        if target_recall is None:
+            raise ValueError("recall_floor mode requires target_recall")
+        valid = float(row['recall']) >= float(target_recall)
+        objective = 1.0 if valid else 0.0
+        tie_key = (objective, -float(row['FPR']), float(row['balanced_acc']), float(row['threshold']))
+        return objective, tie_key
+    raise ValueError(f"Unsupported optimization mode: {mode}")
+
+
+def _finalize_threshold_sweep(test_results, analysis_mode, thresholds, rows, mode, **kwargs) -> dict:
+    """Choose the best sweep row and normalize one optimization result payload."""
+    raw, res_path = _resolve_input(test_results)
+    best_row = None
+    best_key = None
+    for row in rows:
+        objective, tie_key = _objective_from_row(row, mode=mode, **kwargs)
+        row['objective'] = float(objective)
+        if best_key is None or tie_key > best_key:
+            best_key = tie_key
+            best_row = row
+
+    return {
+        'raw_results_path': str(res_path) if res_path is not None else None,
+        'analysis_mode': analysis_mode,
+        'optimization_mode': mode,
+        'threshold_range': [float(v) for v in thresholds],
+        'model_path': raw.get('model_path', None),
+        'test_cache': raw.get('test_cache', None),
+        'best_threshold': best_row['threshold'],
+        'best_objective': best_row['objective'],
+        'best_metrics': {k: serialize_json_data(v) for k, v in best_row.items() if k != 'objective'},
+        'results_table': serialize_json_data(rows),
+    }
 
 
 def binary_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
@@ -336,56 +505,10 @@ def analyze_video_test(test_res: Path | str | dict, **kwargs):
     """Analyze clip probabilities at video level and build one video summary report."""
     raw_res, res_path = _resolve_input(test_res)
     threshold = kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD)
-    y_true, y_pred, scores, score_name = _get_eval_arrays(raw_res, threshold=threshold)
-
-    if 'meta_video' not in raw_res or len(y_true) != len(y_pred):
-        raise KeyError("Results file meta data are defective")
-
-    meta_video = np.asarray(raw_res['meta_video'])
-    if len(meta_video) != len(y_true):
-        raise ValueError(f"meta_video length mismatch: {len(meta_video)} vs {len(y_true)}")
-
-    clip_scores = scores if score_name == 'y_prob' else None
-    pool_func = kwargs.get('pool_func', _min_clips_pool)
-    min_val = kwargs.get('min_val', DEFAULT_MIN_CLIPS)
-
-    video_to_idx = {}
-    for i, vid in enumerate(meta_video):
-        video_to_idx.setdefault(str(vid), []).append(i)
-
-    vid_true, vid_pred, vid_score = [], [], []
-    excluded_videos = []
-    for vid, idx in video_to_idx.items():
-        clip_true = y_true[idx]
-        uniq_true = np.unique(clip_true)
-        if len(uniq_true) != 1:
-            print_color(f"[WARN] Inconsistent GT in video {vid}; excluded from video test", 'o')
-            excluded_videos.append(vid)
-            continue
-
-        clip_pred = y_pred[idx]
-        clip_score = clip_scores[idx] if clip_scores is not None else None
-        if pool_func is _min_clips_pool:
-            pooled = pool_func(clip_pred, clip_score, min_val=min_val)
-        else:
-            pooled = pool_func(clip_pred, clip_score)
-
-        if isinstance(pooled, tuple):
-            videof_pred, video_score = pooled
-        else:
-            video_pred = pooled
-            _, video_score = _min_clips_pool(clip_pred, clip_score, min_val=min_val)
-
-        vid_true.append(int(uniq_true[0]))
-        vid_pred.append(int(video_pred))
-        vid_score.append(float(video_score))
-
-    if len(vid_true) == 0:
-        raise ValueError("No valid videos left for analysis after excluding inconsistent GT videos")
-
-    vid_true = np.asarray(vid_true, dtype=np.int64)
-    vid_pred = np.asarray(vid_pred, dtype=np.int64)
-    vid_score = np.asarray(vid_score, dtype=np.float64)
+    y_true, _, _, score_name = _get_eval_arrays(raw_res, threshold=threshold)
+    vid_true, vid_pred, vid_score, excluded_videos = _video_level_arrays(raw_res, threshold=threshold, **kwargs)
+    for vid in excluded_videos:
+        print_color(f"[WARN] Inconsistent GT in video {vid}; excluded from video test", 'o')
 
     summary = binary_metrics(vid_true, vid_pred)
     summary.update({
@@ -424,6 +547,42 @@ def analyze_video_test(test_res: Path | str | dict, **kwargs):
     if kwargs.get('print', True):
         print_test_report(summary)
     return summary
+
+
+def optimize_clip_threshold(test_results: Path | str | dict, threshold_range=DEFAULT_THRESHOLD_RANGE, mode='balanced_acc', **kwargs):
+    """Sweep clip thresholds and return the best clip-level operating point."""
+    raw_res, _ = _resolve_input(test_results)
+    y_true, y_prob = _require_prob_scores(raw_res)
+    thresholds = iter_thresholds(threshold_range)
+
+    rows = []
+    for threshold in thresholds:
+        row = _clip_metrics_for_threshold(y_true, y_prob, threshold)
+        rows.append(row)
+    return _finalize_threshold_sweep(test_results, 'clip', thresholds, rows, mode, **kwargs)
+
+
+def optimize_video_threshold(test_results: Path | str | dict, threshold_range=DEFAULT_THRESHOLD_RANGE, mode='balanced_acc', **kwargs):
+    """Sweep clip thresholds and score them after video-level pooling."""
+    raw_res, _ = _resolve_input(test_results)
+    _require_prob_scores(raw_res)
+    thresholds = iter_thresholds(threshold_range)
+
+    rows = []
+    for threshold in thresholds:
+        vid_true, vid_pred, vid_score, excluded_videos = _video_level_arrays(raw_res, threshold=threshold, **kwargs)
+        row = binary_metrics(vid_true, vid_pred)
+        row.update({
+            'threshold': float(threshold),
+            'f1': _f1_from_cm(row['confusion_matrix']),
+            'balanced_acc': _balanced_accuracy(row),
+            'num_videos': int(len(vid_true)),
+            'support_video': _support_counts(vid_true),
+            'num_videos_excluded': int(len(excluded_videos)),
+            'video_score_mean': float(np.mean(vid_score)) if len(vid_score) > 0 else None,
+        })
+        rows.append(row)
+    return _finalize_threshold_sweep(test_results, 'video', thresholds, rows, mode, **kwargs)
 
 
 def print_test_report(results, **kwargs):
