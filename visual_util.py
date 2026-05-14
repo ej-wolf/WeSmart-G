@@ -229,17 +229,19 @@ def plot_roc_curve(roc: dict, **kwargs):
     auc = float(roc['auc'])
 
     title = kwargs.get('title', "ROC Curve")
-    plt.figure(figsize=fig_size)
-    plt.plot(fpr, tpr, label=f"AUC = {auc:.4f}", linewidth=2)
-    plt.plot([0, 1], [0, 1], linestyle='--', linewidth=1, alpha=0.7)
-    plt.xlim(0, 1)
-    plt.ylim(0, 1)
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title(title)
-    plt.grid(alpha=0.25)
-    plt.legend(loc='lower right')
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=fig_size)
+    ax.plot(fpr, tpr, label=f"AUC = {auc:.4f}", linewidth=2)
+    ax.plot([0, 1], [0, 1], linestyle='--', linewidth=1, alpha=0.7)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel('False Positive Rate')
+    ax.set_ylabel('True Positive Rate')
+    ax.grid(alpha=0.25)
+    ax.legend(loc='lower right')
+    if title:
+        ax.text(0.02, 0.98, str(title), transform=ax.transAxes,
+                ha='left', va='top', fontsize=12)
+    fig.tight_layout()
 
     if save_to is not None:
         save_to = Path(save_to)
@@ -247,7 +249,7 @@ def plot_roc_curve(roc: dict, **kwargs):
             save_to = save_to.with_suffix('.png')
         try:
             save_to.parent.mkdir(parents=True, exist_ok=True)
-            plt.savefig(save_to, dpi=dpi)
+            fig.savefig(save_to, dpi=dpi)
             if save_csv:
                 csv_path = save_to.with_suffix('.csv')
                 roc_table = np.column_stack([fpr, tpr, thresholds])
@@ -261,7 +263,7 @@ def plot_roc_curve(roc: dict, **kwargs):
 
     if show:
         plt.show()
-    plt.close()
+    plt.close(fig)
 
 
 def draw_confusion_matrix(cm, **kwargs):
