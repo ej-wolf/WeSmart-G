@@ -8,6 +8,7 @@ from precompute_clips import (build_cache_from_json, merge_cache_npz, WINDOW_SEC
 from tms_trainer import run_training, run_testing
 from evaluation_tools import analyze_clip_test, analyze_video_test, analyze_stream_test, _support_pair
 from common.my_local_utils import as_collection, get_unique_name
+from project_utils import build_test_artifact_name
 
 #* general configuration
 RWF_DIR  = Path("data/json_files/RWF-2000/ds")
@@ -20,6 +21,7 @@ MAIN_CACHE_DIR = Path("data/cache")
 DATASETS = [('RWF', RWF_DIR), ('RLVS', RLVS_DIR)]
 JOINT_DS =  'J-RWL'
 RESULT_NAME = 'all_results'
+DEFAULT_REG_MODEL = Path("work_dirs/json_models/win-study/260414-1721_J-RWL_25ft_3w-1o5-stream-tst/best_model.148.pt")
 
 
 def build_cache_batch(json_dirs, output_path, **kwargs):
@@ -57,93 +59,6 @@ def build_cache_batch(json_dirs, output_path, **kwargs):
                       'train_cache': output_path/f"{run_args.cache_name}_train.npz",
                       'test_cache': output_path/f"{run_args.cache_name}_test.npz",})
     return built
-
-
-def resolve_default_name(model_tag, test_tag):
-    """Resolve a compact default artifact name from model/test tags or paths."""
-    def _strip_split_suffix(tag: str) -> str:
-        for suffix in ('_train', '_test'):
-            if tag.endswith(suffix):
-                return tag[:-len(suffix)]
-        return tag
-
-    def _strip_timestamp_prefix(tag: str) -> str:
-        return tag.split('_', 1)[1] if re.match(r'^\d{6}-\d{4}_.+', tag) else tag
-
-    def _parse_specs(tag: str) -> tuple[str | None, str | None]:
-        ft_match = re.search(r'(?:^|_)(?:ft(?P<ft1>\d+)|(?P<ft2>\d+)ft)(?:_|$)', tag)
-        ft = (ft_match.group('ft1') or ft_match.group('ft2')) if ft_match else None
-
-        ws_match = re.search(r'(?:^|_)(?:w(?P<w1>\d+)-(?P<s1>\d+)|(?P<w2>\d+(?:o\d+)?)w-(?P<s2>\d+(?:o\d+)?))(?:_|$)', tag)
-        if ws_match:
-            win = ws_match.group('w1') or ws_match.group('w2')
-            stride = ws_match.group('s1') or ws_match.group('s2')
-        else:
-            win = stride = None
-
-        parts = []
-        if ft is not None:
-            parts.append(f"ft{ft}")
-        if win is not None and stride is not None:
-            parts.append(f"w{win}-{stride}")
-        return ('_'.join(parts) if parts else None), ft_match.group(0).strip('_') if ft_match else None
-
-    def _strip_same_specs(tag: str, specs: str | None) -> str:
-        if not specs:
-            return tag
-        tag = re.sub(rf'(?:^|_){re.escape(specs)}(?:_|$)', '_', tag)
-        tag = re.sub(r'__+', '_', tag).strip('_')
-        return tag
-
-    def _resolve_model_parts(value) -> tuple[str, int | None]:
-        path = Path(value)
-        epoch = None
-        if path.suffix == '.pt':
-            match = re.fullmatch(r'best_model\.(\d+)', path.stem)
-            if match:
-                epoch = int(match.group(1))
-            tag = path.parent.name
-        elif path.exists() and path.is_dir():
-            tag = path.name
-            best_models = sorted(path.glob('best_model.*.pt'))
-            if len(best_models) == 1:
-                match = re.fullmatch(r'best_model\.(\d+)', best_models[0].stem)
-                if match:
-                    epoch = int(match.group(1))
-        else:
-            tag = path.stem if path.suffix else path.name
-
-        tag = _strip_split_suffix(_strip_timestamp_prefix(tag))
-        return tag, epoch
-
-    def _resolve_test_tag(value) -> str:
-        path = Path(value)
-        tag = path.stem if path.suffix else path.name
-        return _strip_split_suffix(tag)
-
-    model_name, best_epoch = _resolve_model_parts(model_tag)
-    test_name = _resolve_test_tag(test_tag)
-    same_tag = (test_name == model_name)
-
-    model_specs, _ = _parse_specs(model_name)
-    test_specs, _ = _parse_specs(test_name)
-    common_specs = model_specs or test_specs
-    if common_specs and common_specs not in model_name:
-        model_name = f"{model_name}_{common_specs}"
-
-    if same_tag:
-        test_name = ''
-    else:
-        test_name = _strip_same_specs(test_name, common_specs if test_specs == common_specs else None)
-    if test_name == model_name:
-        test_name = ''
-
-    parts = [model_name]
-    if best_epoch is not None:
-        parts.append(f"BM{best_epoch}")
-    if test_name:
-        parts.append(test_name)
-    return '_'.join(parts)
 
 
 def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs):
@@ -189,17 +104,15 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
         return bm, int(bm.stem.split(".")[-1])
 
     def _run_dataset_test(model_path: Path, test_npz: Path, out_dir: Path):
-        base_name = resolve_default_name(model_path, test_npz)
-        raw_tag = f"{base_name}_clip-tst"
-        summary_name = f"{base_name}_clip-summary"
+        raw_tag = build_test_artifact_name(model_path, test_npz, 'raw', unit='clip')
+        summary_name = build_test_artifact_name(model_path, test_npz, 'summary', unit='clip')
         res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag)
         analyze_clip_test(res['path'], out_path=out_dir, output_name=summary_name, show_roc=False)
 
     def _run_stream_test(model_path: Path, test_npz: Path, out_dir: Path):
-        base_name = resolve_default_name(model_path, test_npz)
-        raw_tag = f"{base_name}_stream-tst"
-        summary_name = f"{base_name}_stream-summary"
-        events_name = f"{base_name}_stream-events.json"
+        raw_tag = build_test_artifact_name(model_path, test_npz, 'raw', unit='stream')
+        summary_name = build_test_artifact_name(model_path, test_npz, 'summary', unit='stream')
+        events_name = f"{build_test_artifact_name(model_path, test_npz, 'events')}.json"
         res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
         analyze_stream_test(res['path'], out_path=out_dir, output_name=summary_name,
                             details_name=events_name, show_roc=False)
@@ -261,54 +174,184 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
 
     return built_runs
 
-def build_window_study(): # 80 -> 65
-    """  Small batch script for the window/stride cache study.
-    Builds train/test caches for  RWF-2000 and  RLVS datasets
-    using the existing split files in each dataset directory, then merges the
-    matching train/test caches into a joint dataset per window/stride option.
-    """
-    # WINDOW_SETTINGS = [(2.0, 1.0), (3.0, 1.5), (3.0, 1.0), (4.0, 2.0), ]
-    WINDOW_SETTINGS = [(0.6, 0.4),
-                       (1.2, 0.6),
-                       (3.6, 1.2),
-                       (5.0, 2.5),]
+
+def test_models(models, general_tests=None, stream_tests=None, **kwargs):
+    """Run own-test, shared dataset tests, and shared stream tests for trained models."""
+
+    def _dataset_tag(stem: str, split_suffix: str) -> str:
+        """Strip one split suffix from a cache stem."""
+        return stem[:-len(split_suffix)] if stem.endswith(split_suffix) else stem
+
+    def _resolve_model_ref(model_ref) -> tuple[Path, Path]:
+        """Resolve a model ref to `(best_model_path, run_dir)`."""
+        path = Path(model_ref)
+        if path.is_file():
+            return path, path.parent
+        if path.is_dir():
+            best_models = sorted(path.glob("best_model.*.pt"))
+            if best_models:
+                return best_models[-1], path
+            model_pt = path/'model.pt'
+            if model_pt.is_file():
+                return model_pt, path
+            checkpoints = sorted(path.glob("checkpoint_ep-*.pt"))
+            if checkpoints:
+                return checkpoints[-1], path
+            raise FileNotFoundError(f"No model checkpoint found in {path}")
+        raise FileNotFoundError(path)
+
+    def _threshold_dir(run_dir: Path) -> Path:
+        """Resolve one shared threshold dir for the active batch threshold."""
+        thr = float(kwargs.get('threshold', 0.5))
+        return Path(f"th-{int(round(thr*100)):03d}")
+
+    def _resolve_npz_inputs(inputs, base_dir: Path) -> list[Path]:
+        """Resolve files, dirs, or masks into one ordered unique NPZ list."""
+        resolved = []
+        seen = set()
+        for item in as_collection(inputs or []):
+            item = Path(item)
+            if not item.is_absolute():
+                item = base_dir/item
+            item_str = str(item)
+            if any(ch in item_str for ch in '*?[]'):
+                matches = [Path(p) for p in glob.glob(item_str)]
+            elif item.is_dir():
+                matches = sorted(p for p in item.iterdir() if p.is_file() and p.suffix == '.npz')
+            elif item.is_file():
+                matches = [item]
+            else:
+                matches = []
+
+            if not matches:
+                print(f"[WARN] No NPZ files matched: {item}")
+                continue
+
+            for path in matches:
+                key = str(path.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                resolved.append(path)
+        return resolved
+
+    def _run_dataset_test(model_path: Path, test_npz: Path, out_dir: Path, run_video=False):
+        """Run one dataset test with clip-only or clip+video post-analysis."""
+        raw_tag = build_test_artifact_name(model_path, test_npz, 'raw', unit='clip')
+        thr_dir = _threshold_dir(out_dir)
+        res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
+        if run_video:
+            video_summary = build_test_artifact_name(model_path, test_npz, 'summary', unit='video')
+            analyze_video_test(
+                res['path'], out_path=out_dir, output_name=video_summary,
+                threshold=kwargs.get('threshold', 0.5),
+                threshold_dir=thr_dir, overwrite=True,
+                show_roc=bool(kwargs.get('show_roc', False)),
+                roc_csv=bool(kwargs.get('roc_csv', True)),
+                print=bool(kwargs.get('print_report', False)),
+            )
+        else:
+            clip_summary = build_test_artifact_name(model_path, test_npz, 'summary', unit='clip')
+            analyze_clip_test(
+                res['path'], out_path=out_dir, output_name=clip_summary,
+                threshold=kwargs.get('threshold', 0.5),
+                threshold_dir=thr_dir, overwrite=True,
+                show_roc=bool(kwargs.get('show_roc', False)),
+                roc_csv=bool(kwargs.get('roc_csv', True)),
+                print=bool(kwargs.get('print_report', False)),
+            )
+
+    def _run_stream_test(model_path: Path, test_npz: Path, out_dir: Path):
+        """Run one stream-level test and summary."""
+        raw_tag = build_test_artifact_name(model_path, test_npz, 'raw', unit='stream')
+        summary_name = build_test_artifact_name(model_path, test_npz, 'summary', unit='stream')
+        events_name = f"{build_test_artifact_name(model_path, test_npz, 'events')}.json"
+        thr_dir = _threshold_dir(out_dir)
+        res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
+        analyze_stream_test(
+            res['path'], out_path=out_dir, output_name=summary_name, details_name=events_name,
+            threshold=kwargs.get('threshold', 0.5),
+            threshold_dir=thr_dir, overwrite=True,
+            show_roc=bool(kwargs.get('show_roc', False)),
+            roc_csv=bool(kwargs.get('roc_csv', True)),
+            events_json=bool(kwargs.get('events_json', True)),
+            print=bool(kwargs.get('print_report', False)),
+        )
+
+    tested = []
+    for model_ref in as_collection(models):
+        try:
+            best_model, run_dir = _resolve_model_ref(model_ref)
+        except Exception as exc:
+            print(f"[WARN] Bad model ref {model_ref}: {type(exc).__name__}: {exc}")
+            continue
+
+        cache_group = run_dir.parent.name
+        model_tag = run_dir.name.split('_', 1)[1] if re.match(r'^\d{6}-\d{4}_.+', run_dir.name) else run_dir.name
+        cache_dir = Path(kwargs.get('cache_dir', Path('data/cache') / cache_group))
+        own_test = cache_dir / f"{model_tag}_test.npz"
+
+        dataset_tests = []
+        seen = set()
+        if own_test.is_file():
+            dataset_tests.append((own_test, False))
+            seen.add(str(own_test.resolve()))
+        else:
+            print(f"[WARN] Missing own test cache for {run_dir.name}: {own_test}")
+
+        for path in _resolve_npz_inputs(general_tests, cache_dir):
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            dataset_tests.append((path, bool(kwargs.get('run_video', False))))
+
+        stream_targets = _resolve_npz_inputs(stream_tests, cache_dir)
+
+        for test_npz, use_video in dataset_tests:
+            try:
+                _run_dataset_test(best_model, test_npz, run_dir, run_video=use_video)
+            except Exception as exc:
+                print(f"[WARN] Dataset test failed for {run_dir.name} on {test_npz.name}: {type(exc).__name__}: {exc}")
+
+        if bool(kwargs.get('run_stream', True)):
+            for test_npz in stream_targets:
+                try:
+                    _run_stream_test(best_model, test_npz, run_dir)
+                except Exception as exc:
+                    print(f"[WARN] Stream test failed for {run_dir.name} on {test_npz.name}: {type(exc).__name__}: {exc}")
+
+        tested.append(run_dir)
+
+    return tested
 
 
-    def _fmt_num(x: float) -> str:
-        """ Format numeric values for filenames, replacing '.' with 'o'."""
-        return str(int(x)) if float(x).is_integer() else str(x).replace(".", "o")
+def run_core_regression_suite(phase='refactor', **kwargs):
+    """Run clip/video regression outputs from cache NPZ files."""
+    model_path = Path(kwargs.get('model_path', DEFAULT_REG_MODEL))
+    out_root = Path(kwargs.get('out_root', "work_dirs/json_models/testing")) / phase / 'evaluation_core'
+    show_roc = bool(kwargs.get('show_roc', False))
+    save_roc_csv = bool(kwargs.get('roc_csv', True))
+    threshold = float(kwargs.get('threshold', 0.5))
 
-    def _cache_name(name: str) -> str:
-        """Return the requested cache filename format."""
-        return f"{name}_25ft_{_fmt_num(window)}w-{_fmt_num(stride)}_{split}.npz"
+    cases =(('train_clip' , Path("data/cache/win-study/J-RWL_25ft_3w-1o5_train.npz"), False),
+            ('train_video', Path("data/cache/win-study/J-RWL_25ft_3w-1o5_train.npz"), True),
+            ('test_clip'  , Path("data/cache/win-study/J-RWL_25ft_3w-1o5_test.npz"), False),
+            ('test_video' , Path("data/cache/win-study/J-RWL_25ft_3w-1o5_test.npz"), True),)
 
-    # def _build_one(ds_name: str, ds_dir: Path) -> Path:
-    def _build_one() -> Path:
-        """Build one cache file for a dataset/split/window configuration."""
-        list_file = ds_dir/f"{split}_videos.txt"
-        out_path = STUDY_CACHE_DIR / _cache_name(ds_name)
-
-        if not list_file.is_file():
-            raise FileNotFoundError(f"Missing split file: {list_file}")
-
-        with open(list_file, 'r') as f:
-            json_paths = [ds_dir / ln.strip() for ln in f if ln.strip()]
-
-        build_cache_from_json(json_paths, out_path, window=window, stride=stride)
-        return out_path.with_suffix(".npz")
-
-    STUDY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-    for window, stride in WINDOW_SETTINGS:
-        for split in ("train", "test"):
-            built = []
-            for ds_name, ds_dir in DATASETS:
-                built.append(_build_one())
-            merge_cache_npz(built, STUDY_CACHE_DIR / _cache_name(JOINT_DS))
+    outputs = {}
+    for tag, cache_path, video_mode in cases:
+        out_dir = out_root / tag
+        out_dir.mkdir(parents=True, exist_ok=True)
+        raw_tag = f"{tag}_raw"
+        res = run_testing(model_path, cache_path, out_dir=out_dir, output_tag=raw_tag, video_mode=video_mode)
+        eval_kw = {'out_path': out_dir, 'show_roc': show_roc, 'roc_csv': save_roc_csv, 'print': False, 'threshold': threshold}
+        report = analyze_video_test(res['path'], **eval_kw) if video_mode else analyze_clip_test(res['path'], **eval_kw)
+        outputs[tag] = {'raw_results': res['path'], 'summary': report}
+    return outputs
 
 
-
-def train_test_stdy(cache_dir:str|Path, **kwargs): #92 -> 63
+def train_test_study(cache_dir: str | Path, **kwargs): #92 -> 63
     """ Train all `*_train.npz` caches in a directory and run clip/video tests."""
 
     def _dataset_tag(stem:str, split_suffix:str) -> str:
@@ -338,9 +381,8 @@ def train_test_stdy(cache_dir:str|Path, **kwargs): #92 -> 63
 
     def _run_one_test(test_npz:Path, test_mode: str):
         """Run one test job and the matching analysis."""
-        test_name = _dataset_tag(test_npz.stem, "_test")
-        output_tag = f"{train_tag}_BM{best_epoch}_{test_name}_{test_mode}-tst.npz"
-        output_name = f"{train_tag}_BM{best_epoch}_{test_name}_{test_mode}-summary.json"
+        output_tag = f"{build_test_artifact_name(best_model, test_npz, 'raw', unit=test_mode)}.npz"
+        output_name = f"{build_test_artifact_name(best_model, test_npz, 'summary', unit=test_mode)}.json"
 
         if test_mode == 'clip':
             res = run_testing(best_model, test_npz, out_dir=run_dir, output_tag=output_tag)
@@ -388,7 +430,7 @@ def train_test_stdy(cache_dir:str|Path, **kwargs): #92 -> 63
                 if p.is_file():
                     test_targets.append(p)
                 else:
-                    print(f"[train_test_stdy] Missing test cache for {train_tag}: {p}")
+                    print(f"[train_test_study] Missing test cache for {train_tag}: {p}")
 
         if not test_targets:
             print(f"[train_test_stdy] No test caches available for {train_tag}; skipping tests")
@@ -400,6 +442,52 @@ def train_test_stdy(cache_dir:str|Path, **kwargs): #92 -> 63
                     _run_one_test(test_cache, test_mode)
                 except Exception as exc:
                     print(f"[train_test_stdy] Test failed for {train_tag} on {test_cache.name} ({test_mode}): {type(exc).__name__}: {exc}")
+
+
+def build_window_study(): # 80 -> 65
+    """  Small batch script for the window/stride cache study.
+    Builds train/test caches for  RWF-2000 and  RLVS datasets
+    using the existing split files in each dataset directory, then merges the
+    matching train/test caches into a joint dataset per window/stride option.
+    """
+    # WINDOW_SETTINGS = [(2.0, 1.0), (3.0, 1.5), (3.0, 1.0), (4.0, 2.0), ]
+    WINDOW_SETTINGS = [(0.6, 0.4),
+                       (1.2, 0.6),
+                       (3.6, 1.2),
+                       (5.0, 2.5),]
+
+
+    def _fmt_num(x: float) -> str:
+        """ Format numeric values for filenames, replacing '.' with 'o'."""
+        return str(int(x)) if float(x).is_integer() else str(x).replace(".", "o")
+
+    def _cache_name(name: str) -> str:
+        """Return the requested cache filename format."""
+        return f"{name}_25ft_{_fmt_num(window)}w-{_fmt_num(stride)}_{split}.npz"
+
+    # def _build_one(ds_name: str, ds_dir: Path) -> Path:
+    def _build_one() -> Path:
+        """Build one cache file for a dataset/split/window configuration."""
+        list_file = ds_dir/f"{split}_videos.txt"
+        out_path = STUDY_CACHE_DIR / _cache_name(ds_name)
+
+        if not list_file.is_file():
+            raise FileNotFoundError(f"Missing split file: {list_file}")
+
+        with open(list_file, 'r') as f:
+            json_paths = [ds_dir / ln.strip() for ln in f if ln.strip()]
+
+        build_cache_from_json(json_paths, out_path, window=window, stride=stride)
+        return out_path.with_suffix(".npz")
+
+    STUDY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    for window, stride in WINDOW_SETTINGS:
+        for split in ("train", "test"):
+            built = []
+            for ds_name, ds_dir in DATASETS:
+                built.append(_build_one())
+            merge_cache_npz(built, STUDY_CACHE_DIR / _cache_name(JOINT_DS))
 
 
 def sum_all_results(work_dir: str | Path, **kwargs): #107
@@ -597,4 +685,4 @@ if __name__ == "__main__":
     # train_models(cache_dir, output_dir, ds_tests=stream_testing, stm_tests= stream_testing)
     sum_all_results(output_dir)
 
-# 321(,6,2)->300(,6,2)
+# 321(,6,2)->300(,6,2)   (23,6)

@@ -118,6 +118,14 @@ def eval_one_epoch(model, loader, criterion):
     return total_loss/len(loader.dataset), preds, targets
 
 
+def _infer_hidden_dim_from_state(state: dict) -> int:
+    """Infer the hidden layer width from one saved MLP state dict."""
+    weight = state.get('net.0.weight', None)
+    if weight is None or getattr(weight, 'ndim', None) != 2:
+        raise ValueError("Could not infer hidden_dim from model state")
+    return int(weight.shape[0])
+
+
 def _labels_from_dataset(ds) -> np.ndarray:
     """ Return label array for ClipFeatureDataset or Subset(ClipFeatureDataset)."""
     if hasattr(ds, 'y'):
@@ -276,7 +284,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
             tb_writer.add_scalar('auc/valid', val_auc, epoch)
 
         if save_every and epoch % save_every == 0:
-            torch.save(model.state_dict(), run_dir/f"model_ep{epoch:03d}.pt")
+            torch.save(model.state_dict(), run_dir/f"checkpoint_ep-{epoch:03d}.pt")
 
         auc_str = f"{val_auc:.4f}" if val_auc is not None else "N/A"
         print(f"Epoch {epoch:03d} | train loss: {train_loss:.4f} | val loss: {val_loss:.4f} | val auc: {auc_str}")
@@ -303,16 +311,16 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
 
 
 def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_mode=False, **kwargs):
-    """     Run model inference on a cache NPZ and save predictions NPZ file.
-        NPZ file stores raw per-clip predictions. Model setting are loaded from config.json (file
-        Default format uses `cache_index` as clip identifier.
-        Video mode uses (`video_name`, `time_stamp`) as identifiers.
+    """Run model inference on a cache NPZ and save raw prediction arrays.
+        By default the saved NPZ uses one unified format that includes any available
+        grouping/timing metadata needed for clip/video/stream analysis.
+        `pure_clips=True` saves one minimal clip-only payload for batch throughput.
         parameters:
         :param test_cache : path to test cache NPZ.
         :param test_model : path to `model.pt`
         :param vid_info   : legacy no-op flag kept for compatibility.
-        :param video_mode : if True save `video_name` and `time_stamp` instead of `cache_index`.
-        :param kwargs     : batch_size, out_dir, out_name
+        :param video_mode : legacy no-op flag kept for compatibility.
+        :param kwargs     : batch_size, out_dir, out_name, pure_clips
         :return           : Dict with saved `path` and in-memory prediction arrays.
     """
     model_path = Path(test_model)
@@ -320,20 +328,22 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_
 
     batch_size = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
 
+    state = torch.load(model_path, map_location=DEFAULT_DEVICE)
     # Rebuild model shape from the training config saved with the checkpoint.
     cfg_path = model_path.parent/LOCAL_CONFIG
-    if not cfg_path.is_file():
-        # raise FileNotFoundError(f"{LOCAL_CONFIG} is missing")
-        print_color(f"{LOCAL_CONFIG} is missing",'o')
-        return None
-    try:
-        with cfg_path.open('r') as f:
-            cfg = json.load(f)
-        hidden_dim = int(cfg['hidden_dim'])
-    except Exception as e:
-        raise ValueError(f"Invalid hidden_dim value in run_config.json: {cfg.get('hidden_dim')}") from e
+    cfg = {}
+    hidden_dim = None
+    if cfg_path.is_file():
+        try:
+            with cfg_path.open('r') as f:
+                cfg = json.load(f)
+            hidden_dim = int(cfg['hidden_dim'])
+        except Exception as e:
+            raise ValueError(f"Invalid hidden_dim value in run_config.json: {cfg.get('hidden_dim')}") from e
+    else:
+        print_color(f"{LOCAL_CONFIG} is missing, inferring hidden_dim from model state", 'o')
+        hidden_dim = _infer_hidden_dim_from_state(state)
 
-    state = torch.load(model_path, map_location=DEFAULT_DEVICE)
     test_ds = ClipFeatureDataset(test_npz)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
@@ -363,11 +373,13 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_
     out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
 
     save_payload = {'model_path': str(model_path), 'test_cache': str(test_npz),
-                    'y_true': y_true, 'y_prob': y_prob}
+                    'y_true': y_true, 'y_prob': y_prob,
+                    'cache_index': np.arange(len(y_true), dtype=np.int64)}
+    pure_clips = bool(kwargs.get('pure_clips', False))
 
     test_data = np.load(test_npz, allow_pickle=True)
     has_meta = 'meta' in test_data.files
-    if has_meta:
+    if has_meta and not pure_clips:
         meta = test_data['meta']
         if len(meta) != len(y_true):
             raise ValueError(f"meta length mismatch: {len(meta)} vs {len(y_true)} predictions")
@@ -381,14 +393,8 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_
         save_payload['meta_t_start'] = meta_t_start
         save_payload['meta_t_end'] = meta_t_end
         save_payload['meta_n_frames'] = meta_n_frames
-
-    if video_mode:
-        if not has_meta:
-            raise KeyError(f"{test_npz} does not contain 'meta', cannot add stream/video info")
         save_payload['video_name'] = meta_video
         save_payload['time_stamp'] = meta_t_end
-    else:
-        save_payload['cache_index'] = np.arange(len(y_true), dtype=np.int64)
 
     np.savez_compressed(out_path, **save_payload)
 

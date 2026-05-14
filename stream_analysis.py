@@ -4,15 +4,17 @@ import json
 import numpy as np
 
 from common.my_local_utils import print_color, serialize_json_data, resolve_output_path
-from visual_util import plot_roc_curve
-from evaluation_core import (DEFAULT_ROC_RES, DEFAULT_EVAL_THRESHOLD, DEFAULT_REG_MODEL, DEFAULT_THRESHOLD_RANGE,
-                             _cm_dict, _get_eval_arrays, _resolve_input, _roc_summary,
+from project_utils import build_test_artifact_name
+from evaluation_core import (DEFAULT_ROC_RES, DEFAULT_EVAL_THRESHOLD, DEFAULT_THRESHOLD_RANGE,
+                             _cm_dict, _companion_summary_name, _get_eval_arrays, _resolve_input, _roc_summary,
                              _save_analyze_summary, _support_counts,
-                             binary_metrics, iter_thresholds, print_test_report, _require_prob_scores,)
+                             analyze_clip_predictions, analyze_clip_scores, binary_metrics, iter_thresholds,
+                             resolve_threshold_dir, _require_prob_scores, )
 
 STREAM_MATCH_MIN_OVERLAP = 1e-9
 STREAM_MATCH_MAX_LAG = None
 STREAM_MAX_EVENT_GAP = 1
+DEFAULT_REG_MODEL = Path("work_dirs/json_models/win-study/260414-1721_J-RWL_25ft_3w-1o5-stream-tst/best_model.148.pt")
 
 
 def _build_stream_events(mask, t_frm, step, max_event_gap=STREAM_MAX_EVENT_GAP):
@@ -116,10 +118,9 @@ def _match_stream_events(gt_events, pred_events, min_overlap, max_lag):
     return detected_events, missed_events, false_events
 
 
-def process_stream_inputs(test_res, **kwargs):
+def process_stream_inputs(test_res, threshold: float, **kwargs):
     """Load and normalize raw stream results into one grouped analysis context."""
     raw_res, res_path = _resolve_input(test_res)
-    threshold = kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD)
     y_true, y_pred, scores, score_name = _get_eval_arrays(raw_res, threshold=threshold)
 
     required_meta = ('meta_video', 'meta_t_start', 'meta_t_end')
@@ -167,6 +168,7 @@ def process_stream_inputs(test_res, **kwargs):
             'y_pred': y_pred,
             'scores': scores,
             'score_name': score_name,
+            'threshold': float(threshold),
             'meta_video': meta_video,
             'meta_t_start': meta_t_start,
             'meta_t_end': meta_t_end,
@@ -270,8 +272,8 @@ def analyze_single_stream(stream_ctx, video_group):
     }
 
 
-def get_stream_summary(stream_ctx, video_results, **kwargs):
-    """Aggregate per-video stream reports into one stream-level summary."""
+def _build_stream_event_summary(stream_ctx, video_results):
+    """Aggregate per-video stream reports into one threshold-dependent stream summary."""
     all_onset_delays = []
     all_offset_errs = []
     agg_cm = {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}
@@ -318,8 +320,19 @@ def get_stream_summary(stream_ctx, video_results, **kwargs):
             'max_lag': stream_ctx['match_max_lag'],
             'max_event_gap': stream_ctx['max_event_gap'],
         },
+        'analysis_config': {
+            'threshold': float(stream_ctx['threshold']),
+            'match_min_overlap': stream_ctx['match_min_overlap'],
+            'match_max_lag': stream_ctx['match_max_lag'],
+            'max_event_gap': stream_ctx['max_event_gap'],
+        },
     })
+    return summary
 
+
+def get_stream_summary(stream_ctx, video_results, **kwargs):
+    """Aggregate per-video stream reports and attach clip/window ROC info."""
+    summary = _build_stream_event_summary(stream_ctx, video_results)
     roc, roc_info = _roc_summary(
         stream_ctx['y_true'], stream_ctx['scores'], stream_ctx['score_name'],
         max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES),
@@ -368,7 +381,7 @@ def optimize_stream_threshold(test_results: Path | str | dict, threshold_range=D
         video_reports = []
         for video_group in stream_ctx['video_groups']:
             video_reports.append(analyze_single_stream(stream_ctx, video_group))
-        summary, _ = get_stream_summary(stream_ctx, video_reports, **kwargs)
+        summary = _build_stream_event_summary(stream_ctx, video_reports)
         event_precision, event_recall, event_f1 = _event_metrics(
             summary.get('detected_events', 0),
             summary.get('missed_events', 0),
@@ -415,8 +428,8 @@ def optimize_stream_threshold(test_results: Path | str | dict, threshold_range=D
     }
 
 
-def analyze_stream_test(test_res: Path | str | dict, **kwargs):
-    """Analyze raw clip probabilities as one or more temporal streams."""
+def analyze_stream_events(test_res: Path | str | dict, **kwargs):
+    """Analyze thresholded clip/window predictions as stream events and timelines only."""
     csv_fieldnames = ['win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob', 'y_pred']
 
     def _save_stream_timeline_csv(csv_path):
@@ -430,20 +443,32 @@ def analyze_stream_test(test_res: Path | str | dict, **kwargs):
         print_color(f"  Timeline CSV saved to  :{csv_path}", 'b')
         return csv_path
 
-    stream_ctx = process_stream_inputs(test_res, **kwargs)
+    threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
+    stream_ctx = process_stream_inputs(test_res, threshold=threshold, **kwargs)
     raw_res = stream_ctx['raw_res']
     res_path = stream_ctx['res_path']
 
     video_reports = []
     for video_group in stream_ctx['video_groups']:
         video_reports.append(analyze_single_stream(stream_ctx, video_group))
-    summary, roc = get_stream_summary(stream_ctx, video_reports, **kwargs)
+    summary = _build_stream_event_summary(stream_ctx, video_reports)
 
     tst_name = res_path.stem if res_path is not None else 'stream_test'
-    out_name = kwargs.get('output_name', f"{tst_name}_stream-summary")
+    out_name = kwargs.get('output_name',
+                          build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
+                                                   'summary', unit='stream'))
     out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
-    summary_path = out_base.with_suffix('.json') if out_base is not None else None
-    details_name = kwargs.get('details_name', f"{tst_name}_stream-events.json")
+    roc_mode_code = kwargs.get('roc_mode_code', 'stm')
+    roc_base = (out_base.parent / build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
+                                                           'roc', unit=roc_mode_code, short=True)
+                if out_base is not None else None)
+    thr_dir = (resolve_threshold_dir(out_base.parent, threshold,
+                                     overwrite=bool(kwargs.get('overwrite', False)),
+                                     threshold_dir=kwargs.get('threshold_dir', None))
+               if out_base is not None else None)
+    summary_path = (thr_dir/out_base.with_suffix('.json').name) if out_base is not None and thr_dir is not None else None
+    details_name = kwargs.get('details_name',
+                              f"{build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None), 'events')}.json")
     save_events_json = kwargs.get('events_json', True)
     save_roc_csv = kwargs.get('roc_csv', True)
 
@@ -451,28 +476,32 @@ def analyze_stream_test(test_res: Path | str | dict, **kwargs):
     if summary_path is not None and save_events_json not in {False, None}:
         details_path = summary_path.with_name(details_name)
         details_path.parent.mkdir(parents=True, exist_ok=True)
-        output_dir = str(summary_path.parent)
+        output_dir = str(out_base.parent)
         for report in video_reports:
             video_name = report['video']
             video_tag = str(video_name).replace('/', '_').replace('\\', '_').replace(' ', '_')
             timeline_rows = report.pop('timeline_rows')
             report.pop('onset_delays', None)
             report.pop('offset_errs', None)
-            timeline_csv_path = summary_path.with_name(f"{tst_name}_{video_tag}_timeline.csv")
+            timeline_base = build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None), 'timeline')
+            timeline_csv_path = summary_path.with_name(f"{timeline_base}_{video_tag}_timeline.csv")
             timeline_csv_path = _save_stream_timeline_csv(timeline_csv_path)
             report['timeline_csv'] = timeline_csv_path.name
             timeline_csvs.append(timeline_csv_path.name)
 
         summary['output_dir'] = output_dir
+        summary['threshold_dir'] = thr_dir.name
         summary['events_info'] = details_path.name
         summary['timeline_csvs'] = timeline_csvs
         details_payload = {
             'raw_results_path': str(res_path),
             'model_path': raw_res.get('model_path', None),
             'output_dir': output_dir,
+            'threshold_dir': thr_dir.name,
             'events_info': details_path.name,
             'analysis_mode': 'stream',
             'test_cache': raw_res.get('test_cache', None),
+            'analysis_config': summary['analysis_config'],
             'match_config': summary['match_config'],
             'videos': video_reports,
         }
@@ -480,12 +509,13 @@ def analyze_stream_test(test_res: Path | str | dict, **kwargs):
             json.dump(serialize_json_data(details_payload), f, indent=2)
         print_color(f"  Stream events saved to :{details_path}", 'b')
     else:
-        summary['output_dir'] = str(summary_path.parent) if summary_path is not None else None
+        summary['output_dir'] = str(out_base.parent) if out_base is not None else None
+        summary['threshold_dir'] = thr_dir.name if thr_dir is not None else None
         summary['events_info'] = 'N/A' if save_events_json in {False, None} else None
         summary['timeline_csvs'] = []
 
     summary['roc_csv'] = (
-        out_base.with_suffix('.csv').name if save_roc_csv and roc is not None and out_base is not None else
+        roc_base.with_suffix('.csv').name if save_roc_csv and roc_base is not None else
         ('N/A' if save_roc_csv in {False, None} else None)
     )
     if summary_path is not None:
@@ -493,16 +523,34 @@ def analyze_stream_test(test_res: Path | str | dict, **kwargs):
     else:
         print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
 
-    if roc is not None and (out_base is not None or bool(kwargs.get('show_roc', False))):
-        plot_roc_curve(
-            roc, save_to=out_base, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
-            title=kwargs.get('roc_title', f"Stream ROC for {tst_name} ({stream_ctx['score_name']})"),
-        )
-
     if kwargs.get('print', True):
+        from evaluation_cli import print_test_report
         print_test_report(summary)
 
     return {'summary': summary, 'videos': video_reports}
+
+
+def analyze_stream_test(test_res: Path | str | dict, **kwargs):
+    """Run clip/window score analysis, clip predictions, and stream event analysis."""
+    raw_res, _ = _resolve_input(test_res)
+    out_name = kwargs.get('output_name',
+                          build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
+                                                   'summary', unit='stream'))
+
+    score_kwargs = dict(kwargs)
+    score_kwargs['print'] = False
+    score_kwargs['roc_mode_code'] = 'stm'
+    analyze_clip_scores(test_res, **score_kwargs)
+
+    clip_kwargs = dict(kwargs)
+    clip_kwargs['print'] = False
+    clip_kwargs['output_name'] = _companion_summary_name(out_name, 'clip')
+    clip_kwargs['roc_mode_code'] = 'stm'
+    analyze_clip_predictions(test_res, **clip_kwargs)
+
+    event_kwargs = dict(kwargs)
+    event_kwargs['roc_mode_code'] = 'stm'
+    return analyze_stream_events(test_res, **event_kwargs)
 
 
 def run_regression_suite(phase='refactor', **kwargs):

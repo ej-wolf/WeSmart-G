@@ -1,21 +1,20 @@
 import json
 from pathlib import Path
 import numpy as np
-
-from common.my_local_utils import print_color, serialize_json_data, resolve_output_path
+#* project imports
+from common.my_local_utils import get_unique_name, print_color, serialize_json_data, resolve_output_path
+from project_utils import build_test_artifact_name, get_test_title_lines
 from visual_util import plot_roc_curve
 
 DEFAULT_ROC_RES = 100
 DEFAULT_MIN_CLIPS = 2
 DEFAULT_EVAL_THRESHOLD = 0.5
 DEFAULT_THRESHOLD_RANGE = (0.0, 1.0, 0.01)
-DEFAULT_REG_MODEL = Path("work_dirs/json_models/win-study/260414-1721_J-RWL_25ft_3w-1o5-stream-tst/best_model.148.pt")
 
 
+#* region Raw input / validation   --------------------------------------
 # -----------------------------------------------------------------------
-#* IO / raw-results helpers
-# -----------------------------------------------------------------------
-def _load_raw_results_npz(npz_path: str | Path) -> dict:
+def _load_raw_results_npz(npz_path: str|Path) -> dict:
     """ Load a raw test-results NPZ file into a normalized dictionary."""
     def _scalar_or_none(arr):
         """Convert scalar-like numpy values to plain Python scalars."""
@@ -64,7 +63,7 @@ def _resolve_input(test_results):
 
 
 def _validate_raw_results(raw: dict) -> np.ndarray:
-    """Validate raw payload and return `y_true` as a 1D int64 array."""
+    """ Validate raw payload and return `y_true` as a 1D int64 array."""
     if not isinstance(raw, dict):
         raise TypeError("raw results must be a dict")
     if 'y_true' not in raw:
@@ -76,20 +75,18 @@ def _validate_raw_results(raw: dict) -> np.ndarray:
     return y_true
 
 
-def _get_eval_arrays(raw: dict, threshold=DEFAULT_EVAL_THRESHOLD) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
-    """Return y_true, derived y_pred, scoring array, and score type."""
+def _get_eval_arrays(raw: dict, threshold: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
+    """ Return y_true, derived y_pred, scoring array, and score type."""
     y_true = _validate_raw_results(raw)
-    if threshold is None:
-        threshold = DEFAULT_EVAL_THRESHOLD
     y_prob = raw.get('y_prob', None)
     if y_prob is not None:
         y_prob = np.asarray(y_prob, dtype=np.float64)
         if y_prob.ndim != 1 or len(y_prob) != len(y_true):
             raise ValueError(f"y_prob length mismatch: {y_prob.shape} vs {len(y_true)}")
-        y_pred = (y_prob >= float(threshold)).astype(np.int64)
+        y_pred = apply_threshold(y_prob, threshold)
         return y_true, y_pred, y_prob, 'y_prob'
 
-    # Backward compatibility for older raw NPZ files.
+    #* Backward compatibility for older raw NPZ files.
     y_pred = raw.get('y_pred', None)
     if y_pred is None:
         raise KeyError("raw results missing y_prob (or legacy y_pred)")
@@ -111,39 +108,12 @@ def _require_prob_scores(raw: dict) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"y_prob length mismatch: {y_prob.shape} vs {len(y_true)}")
     return y_true, y_prob
 
+# endregion
 
+#* region Summary / output helpers --------------------------------------
 # -----------------------------------------------------------------------
-#* Core metrics / report helpers
-# -----------------------------------------------------------------------
-def _support_counts(y_true):
-    """Return class counts as [class_0_count, class_1_count]."""
-    y_true = np.asarray(y_true, dtype=np.int64)
-    return [int(np.sum(y_true == 0)), int(np.sum(y_true == 1))]
-
-
-def _support_pair(obj) -> tuple[int, int] | None:
-    """Normalize current list and older dict/json support formats."""
-    try:
-        if obj is None:
-            return None
-        if isinstance(obj, dict):
-            return int(obj.get(0, obj.get('0'))), int(obj.get(1, obj.get('1')))
-        if isinstance(obj, (list, tuple, np.ndarray)):
-            return (int(obj[0]), int(obj[1])) if len(obj) == 2 else None
-        return None
-    except (TypeError, ValueError):
-        return None
-
-
-def _cm_dict(cm) -> dict[str, int] | None:
-    """Convert a 2x2 confusion matrix to a named dict."""
-    if cm is None or len(cm) != 2 or len(cm[0]) != 2 or len(cm[1]) != 2:
-        return None
-    return {'tn': int(cm[0][0]), 'fp': int(cm[0][1]), 'fn': int(cm[1][0]), 'tp': int(cm[1][1])}
-
-
-def _save_analyze_summary(summary, out_path: Path | str):
-    """Write one normalized summary JSON to `out_path`."""
+def _save_analyze_summary(summary, out_path:Path|str):
+    """ Write one normalized summary JSON to out_path."""
     # TODO: Consider generalizing this into a common JSON report writer.
     if not Path(out_path).parent.is_dir():
         print(f"[WARN] Bad out_path; {Path(out_path).name} was not saved")
@@ -170,6 +140,8 @@ def _save_analyze_summary(summary, out_path: Path | str):
     save_summary = {'raw_results_path': summary.get('raw_results_path', None),
                     'model': summary.get('model_path', ''),
                     'output_dir': output_dir,
+                    'threshold_dir': summary.get('threshold_dir', None),
+                    'analysis_config': serialize_json_data(summary.get('analysis_config', None)),
                     'events_info': Path(events_info).name if events_info not in {None, 'N/A'} else events_info,
                     'timeline_csvs': serialize_json_data(timeline_csvs),
                     'analysis_mode': analysis_mode,
@@ -201,30 +173,77 @@ def _save_analyze_summary(summary, out_path: Path | str):
     return out_path
 
 
-def _roc_summary(y_true, scores, score_name, max_resolution=DEFAULT_ROC_RES):
-    """Return ROC curve data plus the summary fields derived from it."""
+def _roc_csv_name(roc, roc_base, save_roc_csv=True):
+    """ Return the saved ROC CSV filename or its disabled marker."""
+    if save_roc_csv in {False, None}:
+        return 'N/A'
+    if roc is None or roc_base is None:
+        return None
+    return roc_base.with_suffix('.csv').name
+
+
+def resolve_threshold_dir(base_dir, threshold: float, overwrite=False, threshold_dir=None) -> Path:
+    """ Resolve one threshold-scoped output dir, reusing an explicit dir when provided."""
+    base_dir = Path(base_dir)
+    if threshold_dir is not None:
+        thr_dir = Path(threshold_dir)
+        if not thr_dir.is_absolute():
+            thr_dir = base_dir / thr_dir
+        thr_dir.mkdir(parents=True, exist_ok=True)
+        return thr_dir
+
+    thr_value = int(round(float(threshold) * 100.0))
+    thr_dir = base_dir / f"th-{thr_value:03d}"
+    if overwrite:
+        thr_dir.mkdir(parents=True, exist_ok=True)
+        return thr_dir
+
+    thr_dir = get_unique_name(thr_dir)
+    thr_dir.mkdir(parents=True, exist_ok=False)
+    return thr_dir
+
+
+def _companion_summary_name(output_name: str, mode='clip')-> str:
+    """ Build a related summary filename for clip/video companion outputs."""
+    for suffix in ('_clip-summary', '_video-summary', '_stream-summary'):
+        if output_name.endswith(suffix):
+            return f"{output_name[:-len(suffix)]}_{mode}-summary"
+    return f"{output_name}_{mode}-summary"
+
+# endregion
+
+# region Core metrics/ small helpers   ----------------------------------
+# -----------------------------------------------------------------------
+def _support_counts(y_true):
+    """ Return class counts as [class_0_count, class_1_count]."""
+    y_true = np.asarray(y_true, dtype=np.int64)
+    return [int(np.sum(y_true == 0)), int(np.sum(y_true == 1))]
+
+
+def _support_pair(obj) -> tuple[int, int]|None:
+    """ Normalize current list and older dict/json support formats."""
     try:
-        roc = roc_from_scores(y_true, scores, max_resolution=max_resolution)
-        return roc, {'roc_auc': roc['auc']}
-    except Exception as e:
-        return None, {'roc_auc': None, 'roc_error': str(e)}
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return int(obj.get(0, obj.get('0'))), int(obj.get(1, obj.get('1')))
+        if isinstance(obj, (list, tuple, np.ndarray)):
+            return (int(obj[0]), int(obj[1])) if len(obj) == 2 else None
+        return None
+    except (TypeError, ValueError):
+        return None
 
 
-def _min_clips_pool(clip_pred, clip_score=None, min_val=DEFAULT_MIN_CLIPS):
-    """Pool clip predictions by a minimum count or fraction of positive clips."""
-    score = float(np.sum(np.asarray(clip_pred, dtype=np.int64) == 1))
-    if isinstance(min_val, int):
-        target = min_val
-    elif isinstance(min_val, float):
-        target = round(len(clip_pred) * min_val)
-    else:
-        raise TypeError(f"min_val must be int or float, got {type(min_val).__name__}")
-    return int(score >= target), score
+def _cm_dict(cm) -> dict[str, int] | None:
+    """ Convert a 2x2 confusion matrix to a named dict."""
+    if cm is None or len(cm) != 2 or len(cm[0]) != 2 or len(cm[1]) != 2:
+        return None
+    return {'tn': int(cm[0][0]), 'fp': int(cm[0][1]), 'fn': int(cm[1][0]), 'tp': int(cm[1][1])}
 
 
 def _balanced_accuracy(metrics: dict) -> float:
-    """Return balanced accuracy from the standard binary metric dict."""
-    return 0.5 * (float(metrics.get('recall', 0.0)) + (1.0 - float(metrics.get('FPR', 0.0))))
+    """ Return balanced accuracy from the standard binary metric dict."""
+    return 0.5*(float(metrics.get('recall', 0.0)) + (1.0 - float(metrics.get('FPR', 0.0))))
 
 
 def _f1_from_cm(cm) -> float:
@@ -233,163 +252,40 @@ def _f1_from_cm(cm) -> float:
     fn, tp = cm[1]
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    return 2.0 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-
-
-def pred_from_threshold(probability_vector, threshold=DEFAULT_EVAL_THRESHOLD) -> np.ndarray:
-    """Convert one probability vector into hard 0/1 predictions."""
-    if threshold is None:
-        threshold = DEFAULT_EVAL_THRESHOLD
-    probs = np.asarray(probability_vector, dtype=np.float64)
-    if probs.ndim != 1:
-        raise ValueError(f"probability_vector must be 1D, got {probs.shape}")
-    return (probs >= float(threshold)).astype(np.int64)
-
-
-def iter_thresholds(threshold_range=DEFAULT_THRESHOLD_RANGE) -> np.ndarray:
-    """Expand one fixed-grid threshold range into a 1D float array."""
-    if threshold_range is None:
-        threshold_range = DEFAULT_THRESHOLD_RANGE
-
-    if isinstance(threshold_range, np.ndarray):
-        thresholds = np.asarray(threshold_range, dtype=np.float64).reshape(-1)
-    elif isinstance(threshold_range, (list, tuple)) and len(threshold_range) == 3:
-        start, stop, step = [float(v) for v in threshold_range]
-        if step <= 0:
-            raise ValueError(f"threshold step must be positive, got {step}")
-        thresholds = np.arange(start, stop + (step * 0.5), step, dtype=np.float64)
-    else:
-        thresholds = np.asarray(list(threshold_range), dtype=np.float64).reshape(-1)
-
-    if thresholds.size == 0:
-        raise ValueError("threshold_range produced no thresholds")
-    return np.unique(np.round(thresholds, 10))
-
-
-def _clip_metrics_for_threshold(y_true, y_prob, threshold) -> dict:
-    """Evaluate one clip threshold without saving side effects."""
-    y_pred = pred_from_threshold(y_prob, threshold)
-    metrics = binary_metrics(y_true, y_pred)
-    metrics.update({
-        'threshold': float(threshold),
-        'f1': _f1_from_cm(metrics['confusion_matrix']),
-        'balanced_acc': _balanced_accuracy(metrics),
-    })
-    return metrics
-
-
-def _video_level_arrays(raw: dict, threshold=DEFAULT_EVAL_THRESHOLD, **kwargs):
-    """Pool clip predictions to video-level arrays using the standard analyzer logic."""
-    y_true, y_pred, scores, score_name = _get_eval_arrays(raw, threshold=threshold)
-
-    if 'meta_video' not in raw or len(y_true) != len(y_pred):
-        raise KeyError("Results file meta data are defective")
-
-    meta_video = np.asarray(raw['meta_video'])
-    if len(meta_video) != len(y_true):
-        raise ValueError(f"meta_video length mismatch: {len(meta_video)} vs {len(y_true)}")
-
-    clip_scores = scores if score_name == 'y_prob' else None
-    pool_func = kwargs.get('pool_func', _min_clips_pool)
-    min_val = kwargs.get('min_val', DEFAULT_MIN_CLIPS)
-
-    video_to_idx = {}
-    for i, vid in enumerate(meta_video):
-        video_to_idx.setdefault(str(vid), []).append(i)
-
-    vid_true, vid_pred, vid_score = [], [], []
-    excluded_videos = []
-    for vid, idx in video_to_idx.items():
-        clip_true = y_true[idx]
-        uniq_true = np.unique(clip_true)
-        if len(uniq_true) != 1:
-            excluded_videos.append(vid)
-            continue
-
-        clip_pred = y_pred[idx]
-        clip_score = clip_scores[idx] if clip_scores is not None else None
-        if pool_func is _min_clips_pool:
-            pooled = pool_func(clip_pred, clip_score, min_val=min_val)
-        else:
-            pooled = pool_func(clip_pred, clip_score)
-
-        if isinstance(pooled, tuple):
-            video_pred, video_score = pooled
-        else:
-            video_pred = pooled
-            _, video_score = _min_clips_pool(clip_pred, clip_score, min_val=min_val)
-
-        vid_true.append(int(uniq_true[0]))
-        vid_pred.append(int(video_pred))
-        vid_score.append(float(video_score))
-
-    if len(vid_true) == 0:
-        raise ValueError("No valid videos left for analysis after excluding inconsistent GT videos")
-
-    return (
-        np.asarray(vid_true, dtype=np.int64),
-        np.asarray(vid_pred, dtype=np.int64),
-        np.asarray(vid_score, dtype=np.float64),
-        excluded_videos,
-    )
-
-
-def _objective_from_row(row: dict, mode='balanced_acc', **kwargs) -> tuple[float, tuple]:
-    """Return objective value plus tie-break key for one sweep row."""
-    if mode == 'balanced_acc':
-        return float(row['balanced_acc']), (float(row['balanced_acc']), float(row['f1']), -float(row['FPR']), float(row['threshold']))
-    if mode == 'f1':
-        return float(row['f1']), (float(row['f1']), float(row['balanced_acc']), -float(row['FPR']), float(row['threshold']))
-    if mode == 'recall_floor':
-        target_recall = kwargs.get('target_recall', None)
-        if target_recall is None:
-            raise ValueError("recall_floor mode requires target_recall")
-        valid = float(row['recall']) >= float(target_recall)
-        objective = 1.0 if valid else 0.0
-        tie_key = (objective, -float(row['FPR']), float(row['balanced_acc']), float(row['threshold']))
-        return objective, tie_key
-    raise ValueError(f"Unsupported optimization mode: {mode}")
-
-
-def _finalize_threshold_sweep(test_results, analysis_mode, thresholds, rows, mode, **kwargs) -> dict:
-    """Choose the best sweep row and normalize one optimization result payload."""
-    raw, res_path = _resolve_input(test_results)
-    best_row = None
-    best_key = None
-    for row in rows:
-        objective, tie_key = _objective_from_row(row, mode=mode, **kwargs)
-        row['objective'] = float(objective)
-        if best_key is None or tie_key > best_key:
-            best_key = tie_key
-            best_row = row
-
-    return {
-        'raw_results_path': str(res_path) if res_path is not None else None,
-        'analysis_mode': analysis_mode,
-        'optimization_mode': mode,
-        'threshold_range': [float(v) for v in thresholds],
-        'model_path': raw.get('model_path', None),
-        'test_cache': raw.get('test_cache', None),
-        'best_threshold': best_row['threshold'],
-        'best_objective': best_row['objective'],
-        'best_metrics': {k: serialize_json_data(v) for k, v in best_row.items() if k != 'objective'},
-        'results_table': serialize_json_data(rows),
-    }
+    return 2.0*precision*recall/(precision + recall) if (precision + recall) > 0 else 0.0
 
 
 def binary_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """Compute the basic binary metrics and 2x2 confusion matrix."""
+    """ Compute the basic binary metrics and 2x2 confusion matrix."""
     tn = int(np.sum((y_pred == 0) & (y_true == 0)))
     fp = int(np.sum((y_pred == 1) & (y_true == 0)))
     fn = int(np.sum((y_pred == 0) & (y_true == 1)))
     tp = int(np.sum((y_pred == 1) & (y_true == 1)))
     n = len(y_true)
-    return {
-        'confusion_matrix': [[tn, fp], [fn, tp]],
-        'accuracy': (tn + tp) / n if n > 0 else 0.0,
-        'recall': tp / (tp + fn) if (tp + fn) > 0 else 0.0,
-        'FPR': fp / (fp + tn) if (fp + tn) > 0 else 0.0,
-    }
+    return {'confusion_matrix': [[tn, fp], [fn, tp]],
+             'accuracy': (tn + tp)/n  if n > 0 else 0.0,
+             'recall':   tp/(tp + fn) if (tp + fn) > 0 else 0.0,
+             'FPR':      fp/(fp + tn) if (fp + tn) > 0 else 0.0,}
+
+
+def apply_threshold(probability_vector, threshold: float) -> np.ndarray:
+    """ Convert one probability vector into hard 0/1 clip/window predictions."""
+    probs = np.asarray(probability_vector, dtype=np.float64)
+    if probs.ndim != 1:
+        raise ValueError(f"probability_vector must be 1D, got {probs.shape}")
+    return (probs >= float(threshold)).astype(np.int64)
+
+# endregion
+
+#* region ROC/ score helpers    -----------------------------------------
+# -----------------------------------------------------------------------
+def _roc_summary(y_true, scores, score_name, max_resolution=DEFAULT_ROC_RES):
+    """ Return ROC curve data plus the summary fields derived from it."""
+    try:
+        roc = roc_from_scores(y_true, scores, max_resolution=max_resolution)
+        return roc, {'roc_auc': roc['auc']}
+    except Exception as e:
+        return None, {'roc_auc': None, 'roc_error': str(e)}
 
 
 def roc_from_scores(y_true: np.ndarray, scores: np.ndarray, max_resolution=DEFAULT_ROC_RES):
@@ -453,113 +349,378 @@ def roc_from_scores(y_true: np.ndarray, scores: np.ndarray, max_resolution=DEFAU
     auc = np.trapz(tpr, fpr)
     return {'fpr': fpr, 'tpr': tpr, 'thresholds': thresholds, 'auc': auc}
 
+# endregion
 
+#* region Aggregation/ optimization -------------------------------------
 # -----------------------------------------------------------------------
-#* Clip evaluation
+def min_clips_pool(clip_pred, clip_score=None, min_val=DEFAULT_MIN_CLIPS):
+    """ Pool clip predictions by a minimum count or fraction of positive clips."""
+    score = float(np.sum(np.asarray(clip_pred, dtype=np.int64) == 1))
+    if isinstance(min_val, int):
+        target = min_val
+    elif isinstance(min_val, float):
+        target = round(len(clip_pred) * min_val)
+    else:
+        raise TypeError(f"min_val must be int or float, got {type(min_val).__name__}")
+    return int(score >= target), score
+
+
+def iter_thresholds(threshold_range=DEFAULT_THRESHOLD_RANGE) -> np.ndarray:
+    """ Expand one fixed-grid threshold range into a 1D float array."""
+    if threshold_range is None:
+        threshold_range = DEFAULT_THRESHOLD_RANGE
+
+    if isinstance(threshold_range, np.ndarray):
+        thresholds = np.asarray(threshold_range, dtype=np.float64).reshape(-1)
+    elif isinstance(threshold_range, (list, tuple)) and len(threshold_range) == 3:
+        start, stop, step = [float(v) for v in threshold_range]
+        if step <= 0:
+            raise ValueError(f"threshold step must be positive, got {step}")
+        thresholds = np.arange(start, stop + (step * 0.5), step, dtype=np.float64)
+    else:
+        thresholds = np.asarray(list(threshold_range), dtype=np.float64).reshape(-1)
+
+    if thresholds.size == 0:
+        raise ValueError("threshold_range produced no thresholds")
+    return np.unique(np.round(thresholds, 10))
+
+
+def clip_metrics_for_threshold(y_true, y_prob, threshold: float) -> dict:
+    """Evaluate one clip threshold without saving side effects."""
+    y_pred = apply_threshold(y_prob, threshold)
+    metrics = binary_metrics(y_true, y_pred)
+    metrics.update({'threshold': float(threshold),
+                    'f1': _f1_from_cm(metrics['confusion_matrix']),
+                    'balanced_acc': _balanced_accuracy(metrics),
+                    })
+    return metrics
+
+
+def video_level_arrays(raw: dict, threshold: float, **kwargs):
+    """ Pool clip predictions to video-level arrays using the standard analyzer logic."""
+    y_true, y_pred, scores, score_name = _get_eval_arrays(raw, threshold=threshold)
+
+    if 'meta_video' not in raw or len(y_true) != len(y_pred):
+        raise KeyError("Results file meta data are defective")
+
+    meta_video = np.asarray(raw['meta_video'])
+    if len(meta_video) != len(y_true):
+        raise ValueError(f"meta_video length mismatch: {len(meta_video)} vs {len(y_true)}")
+
+    clip_scores = scores if score_name == 'y_prob' else None
+    pool_func = kwargs.get('pool_func', min_clips_pool)
+    min_val = kwargs.get('min_val', DEFAULT_MIN_CLIPS)
+
+    video_to_idx = {}
+    for i, vid in enumerate(meta_video):
+        video_to_idx.setdefault(str(vid), []).append(i)
+
+    vid_true, vid_pred, vid_score = [], [], []
+    excluded_videos = []
+    for vid, idx in video_to_idx.items():
+        clip_true = y_true[idx]
+        uniq_true = np.unique(clip_true)
+        if len(uniq_true) != 1:
+            excluded_videos.append(vid)
+            continue
+
+        clip_pred = y_pred[idx]
+        clip_score = clip_scores[idx] if clip_scores is not None else None
+        if pool_func is min_clips_pool:
+            pooled = pool_func(clip_pred, clip_score, min_val=min_val)
+        else:
+            pooled = pool_func(clip_pred, clip_score)
+
+        if isinstance(pooled, tuple):
+            video_pred, video_score = pooled
+        else:
+            video_pred = pooled
+            _, video_score = min_clips_pool(clip_pred, clip_score, min_val=min_val)
+
+        vid_true.append(int(uniq_true[0]))
+        vid_pred.append(int(video_pred))
+        vid_score.append(float(video_score))
+
+    if len(vid_true) == 0:
+        raise ValueError("No valid videos left for analysis after excluding inconsistent GT videos")
+
+    return (np.asarray(vid_true, dtype=np.int64),
+            np.asarray(vid_pred, dtype=np.int64),
+            np.asarray(vid_score, dtype=np.float64),
+            excluded_videos,)
+
+
+def objective_from_row(row: dict, mode='balanced_acc', **kwargs) -> tuple[float, tuple]:
+    """ Return objective value plus tie-break key for one sweep row."""
+    if mode == 'balanced_acc':
+        return float(row['balanced_acc']), (float(row['balanced_acc']), float(row['f1']), -float(row['FPR']), float(row['threshold']))
+    if mode == 'f1':
+        return float(row['f1']), (float(row['f1']), float(row['balanced_acc']), -float(row['FPR']), float(row['threshold']))
+    if mode == 'recall_floor':
+        target_recall = kwargs.get('target_recall', None)
+        if target_recall is None:
+            raise ValueError("recall_floor mode requires target_recall")
+        valid = float(row['recall']) >= float(target_recall)
+        objective = 1.0 if valid else 0.0
+        tie_key = (objective, -float(row['FPR']), float(row['balanced_acc']), float(row['threshold']))
+        return objective, tie_key
+    raise ValueError(f"Unsupported optimization mode: {mode}")
+
+
+def finalize_threshold_sweep(test_results, analysis_mode, thresholds, rows, mode, **kwargs) -> dict:
+    """Choose the best sweep row and normalize one optimization result payload."""
+    raw, res_path = _resolve_input(test_results)
+    best_row = None
+    best_key = None
+    for row in rows:
+        objective, tie_key = objective_from_row(row, mode=mode, **kwargs)
+        row['objective'] = float(objective)
+        if best_key is None or tie_key > best_key:
+            best_key, best_row = tie_key, row
+
+    return {'raw_results_path': str(res_path) if res_path is not None else None,
+            'analysis_mode': analysis_mode,
+            'optimization_mode': mode,
+            'threshold_range': [float(v) for v in thresholds],
+            'model_path': raw.get('model_path', None),
+            'test_cache': raw.get('test_cache', None),
+            'best_threshold': best_row['threshold'],
+            'best_objective': best_row['objective'],
+            'best_metrics': {k: serialize_json_data(v) for k, v in best_row.items() if k != 'objective'},
+            'results_table': serialize_json_data(rows),
+            }
+
+# endregion
+
+#* region Public API   --------------------------------------------------
 # -----------------------------------------------------------------------
-def analyze_clip_test(test_results: Path | str | dict, **kwargs):
-    """Analyze raw clip probabilities and build one clip-level summary report."""
+def analyze_clip_scores(test_results: Path | str | dict, **kwargs):
+    """ Analyze clip/window probability scores only and save clip ROC outputs."""
     raw_res, results_path = _resolve_input(test_results)
-    threshold = kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD)
-    y_true, y_pred, scores, score_name = _get_eval_arrays(raw_res, threshold=threshold)
+    y_true = _validate_raw_results(raw_res)
+    y_prob = raw_res.get('y_prob', None)
+    score_name = 'y_prob'
+    scores = y_prob
+    if y_prob is None:
+        y_pred = raw_res.get('y_pred', None)
+        if y_pred is None:
+            raise KeyError("raw results missing y_prob (or legacy y_pred)")
+        scores = np.asarray(y_pred, dtype=np.float64)
+        score_name = 'y_pred'
+    else:
+        scores = np.asarray(y_prob, dtype=np.float64)
 
+    summary = {'raw_results_path': str(results_path) if results_path is not None else None,
+               'raw_results_type': score_name,
+               'analysis_mode': 'clip_scores',
+               'model_path': raw_res.get('model_path', None),
+               'test_cache': raw_res.get('test_cache', None),
+               'num_clips': len(y_true),
+               'support_clips': _support_counts(y_true),
+               }
+    roc, roc_info = _roc_summary(y_true, scores, score_name, max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES))
+    summary.update(roc_info)
+
+    tst_name = results_path.stem if results_path is not None else 'clip_test'
+    out_name = kwargs.get('output_name', f"{tst_name}_clip-scores")
+    out_base = resolve_output_path(results_path, out_name, kwargs.get('out_path', None))
+    roc_mode_code = kwargs.get('roc_mode_code', 'clp')
+    roc_base = (out_base.parent/build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
+               'roc', unit=roc_mode_code, short=True) if out_base is not None else None)
+    summary['output_dir'] = str(out_base.parent) if out_base is not None else None
+
+    save_roc_csv = kwargs.get('roc_csv', True)
+    summary['roc_csv'] = _roc_csv_name(roc, roc_base, save_roc_csv)
+    if kwargs.get('save_roc', True) and roc is not None and (roc_base is not None or bool(kwargs.get('show_roc', False))):
+        plot_roc_curve(roc, save_to=roc_base, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
+                       title=kwargs.get('roc_title', "\n".join(get_test_title_lines(raw_res.get('model_path', None),
+                                                                                    raw_res.get('test_cache', None)))),)
+    return summary
+
+
+def analyze_clip_predictions(test_results: Path | str | dict, **kwargs):
+    """Analyze thresholded clip/window predictions only and save clip summary output."""
+    raw_res, results_path = _resolve_input(test_results)
+    threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
+    y_true, y_pred, _, score_name = _get_eval_arrays(raw_res, threshold=threshold)
     summary = binary_metrics(y_true, y_pred)
-    summary.update({'raw_results_path': str(results_path),
+    summary.update({'raw_results_path': str(results_path) if results_path is not None else None,
                     'raw_results_type': score_name,
                     'analysis_mode': 'clip',
                     'model_path': raw_res.get('model_path', None),
                     'test_cache': raw_res.get('test_cache', None),
                     'num_clips': len(y_true),
                     'support_clips': _support_counts(y_true),
+                    'analysis_config': {'threshold': threshold},
                     })
-
-    roc, roc_info = _roc_summary(y_true, scores, score_name, max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES))
-    summary.update(roc_info)
-
-    tst_name = results_path.stem if results_path is not None else 'clip_test'
-    out_name = kwargs.get('output_name', f"{tst_name}_clip-summary")
+    out_name = kwargs.get('output_name', build_test_artifact_name(raw_res.get('model_path', None),
+                                                                  raw_res.get('test_cache', None),
+                                                                  'summary', unit='clip'))
     out_base = resolve_output_path(results_path, out_name, kwargs.get('out_path', None))
-    # out_path = out_base.with_suffix('.json') if out_base is not None else None
+    roc_mode_code = kwargs.get('roc_mode_code', 'clp')
+    roc_base = (out_base.parent/build_test_artifact_name(raw_res.get('model_path', None),
+                                                         raw_res.get('test_cache', None),
+                                                         'roc', unit=roc_mode_code, short=True)
+                if out_base is not None else None
+                )
+    thr_dir = (resolve_threshold_dir(out_base.parent, threshold,
+                                     overwrite=bool(kwargs.get('overwrite', False)),
+                                     threshold_dir=kwargs.get('threshold_dir', None))
+                if out_base is not None else None
+               )
     summary['output_dir'] = str(out_base.parent) if out_base is not None else None
+    summary['threshold_dir'] = thr_dir.name if thr_dir is not None else None
     save_roc_csv = kwargs.get('roc_csv', True)
-    summary['roc_csv'] = (out_base.with_suffix('.csv').name if save_roc_csv and roc is not None and out_base is not None else
-                          ('N/A' if save_roc_csv in {False, None} else None))
+    summary['roc_csv'] = _roc_csv_name(True, roc_base, save_roc_csv)
 
-    if out_base is not None:
-        out_path = _save_analyze_summary(summary, out_base.with_suffix('.json'))
+    if thr_dir is not None:
+        _save_analyze_summary(summary, thr_dir/out_base.with_suffix('.json').name)
     else:
         print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
-
-    if roc is not None and (out_base is not None or bool(kwargs.get('show_roc', False))):
-        plot_roc_curve( roc, save_to=out_base, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
-                             title=kwargs.get('roc_title', f"ROC Curve for {tst_name} ({score_name})"), )
     if kwargs.get('print', True):
+        from evaluation_cli import print_test_report
         print_test_report(summary)
     return summary
 
 
-# -----------------------------------------------------------------------
-#* Video evaluation
-# -----------------------------------------------------------------------
-def analyze_video_test(test_res: Path | str | dict, **kwargs):
-    """Analyze clip probabilities at video level and build one video summary report."""
+def analyze_clip_test(test_results: Path | str | dict, **kwargs):
+    """ Run clip score analysis and threshold-dependent clip prediction analysis."""
+    score_kwargs = dict(kwargs)
+    score_kwargs['print'] = False
+    analyze_clip_scores(test_results, **score_kwargs)
+    return analyze_clip_predictions(test_results, **kwargs)
+
+
+def analyze_video_scores(test_res: Path | str | dict, **kwargs):
+    """Analyze video-level pooled scores only and save video ROC outputs."""
     raw_res, res_path = _resolve_input(test_res)
-    threshold = kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD)
+    threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
     y_true, _, _, score_name = _get_eval_arrays(raw_res, threshold=threshold)
-    vid_true, vid_pred, vid_score, excluded_videos = _video_level_arrays(raw_res, threshold=threshold, **kwargs)
+    video_kwargs = dict(kwargs)
+    video_kwargs.pop('threshold', None)
+    vid_true, vid_pred, vid_score, excluded_videos = video_level_arrays(raw_res, threshold=threshold, **video_kwargs)
+
+    summary = {'raw_results_path': str(res_path) if res_path is not None else None,
+               'raw_results_type': score_name if score_name == 'y_prob' else 'video_score',
+               'analysis_mode': 'video_scores',
+               'model_path': raw_res.get('model_path', None),
+               'test_cache': raw_res.get('test_cache', None),
+               'num_clips': len(y_true),
+               'support_clips': _support_counts(y_true),
+               'num_videos': len(vid_true),
+               'support_video': _support_counts(vid_true),
+               'num_videos_excluded': len(excluded_videos),
+               'excluded_videos': excluded_videos,
+               'analysis_config': {'threshold': threshold,
+                                   'pool_func': getattr(kwargs.get('pool_func', min_clips_pool),
+                                                        '__name__', str(kwargs.get('pool_func', min_clips_pool))),
+                                   'min_val': kwargs.get('min_val', DEFAULT_MIN_CLIPS), },
+               }
+    roc, roc_info = _roc_summary(vid_true, vid_score, 'video_score', max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES))
+    summary.update(roc_info)
     for vid in excluded_videos:
         print_color(f"[WARN] Inconsistent GT in video {vid}; excluded from video test", 'o')
 
-    summary = binary_metrics(vid_true, vid_pred)
-    summary.update({
-        'raw_results_path': str(res_path),
-        'raw_results_type': score_name if score_name == 'y_prob' else 'video_score',
-        'analysis_mode': 'video',
-        'model_path': raw_res.get('model_path', None),
-        'test_cache': raw_res.get('test_cache', None),
-        'num_clips': len(y_true),
-        'support_clips': _support_counts(y_true),
-        'num_videos': len(vid_true),
-        'support_video': _support_counts(vid_true),
-        'num_videos_excluded': len(excluded_videos),
-        'excluded_videos': excluded_videos,
-    })
-
-    roc, roc_info = _roc_summary(vid_true, vid_score, 'video_score', max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES))
-    summary.update(roc_info)
-
     tst_name = res_path.stem if res_path is not None else 'video_test'
-    out_name = kwargs.get('output_name', f"{tst_name}_video-summary")
+    out_name = kwargs.get('output_name', f"{tst_name}_video-scores")
     out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
+    roc_base = (out_base.parent/build_test_artifact_name(raw_res.get('model_path', None),
+                                                         raw_res.get('test_cache', None), 'roc', unit='vid', short=True)
+                                                         if out_base is not None else None)
     summary['output_dir'] = str(out_base.parent) if out_base is not None else None
     save_roc_csv = kwargs.get('roc_csv', True)
-    summary['roc_csv'] = (out_base.with_suffix('.csv').name if save_roc_csv and roc is not None and out_base is not None else
-                          ('N/A' if save_roc_csv in {False, None} else None)    )
+    summary['roc_csv'] = _roc_csv_name(roc, roc_base, save_roc_csv)
 
-    if out_base is not None:
-        out_path = _save_analyze_summary(summary, out_base.with_suffix('.json'))
+    if kwargs.get('save_roc', True) and roc is not None and (roc_base is not None or bool(kwargs.get('show_roc', False))):
+        plot_roc_curve(roc, save_to=roc_base, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
+                       title=kwargs.get('roc_title', "\n".join(get_test_title_lines(raw_res.get('model_path', None),
+                                                                                    raw_res.get('test_cache', None)))),)
+    return summary
+
+
+def analyze_video_predictions(test_res: Path | str | dict, **kwargs):
+    """ Analyze thresholded video predictions only and save video summary output."""
+    raw_res, res_path = _resolve_input(test_res)
+    threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
+    build_kwargs = dict(kwargs)
+    build_kwargs.pop('threshold', None)
+    y_true, _, _, score_name = _get_eval_arrays(raw_res, threshold=threshold)
+    vid_true, vid_pred, _, excluded_videos = video_level_arrays(raw_res, threshold=threshold, **build_kwargs)
+    summary = binary_metrics(vid_true, vid_pred)
+    summary.update({'raw_results_path': str(res_path) if res_path is not None else None,
+                    'raw_results_type': score_name if score_name == 'y_prob' else 'video_score',
+                    'analysis_mode': 'video',
+                    'model_path': raw_res.get('model_path', None),
+                    'test_cache': raw_res.get('test_cache', None),
+                    'num_clips': len(y_true),
+                    'support_clips': _support_counts(y_true),
+                    'num_videos': len(vid_true),
+                    'support_video': _support_counts(vid_true),
+                    'num_videos_excluded': len(excluded_videos),
+                    'excluded_videos': excluded_videos,
+                    'analysis_config': {'threshold': threshold,
+                                        'pool_func': getattr(kwargs.get('pool_func', min_clips_pool),
+                                                             '__name__', str(kwargs.get('pool_func', min_clips_pool))),
+                                        'min_val': kwargs.get('min_val', DEFAULT_MIN_CLIPS),},
+                    })
+    for vid in excluded_videos:
+        print_color(f"[WARN] Inconsistent GT in video {vid}; excluded from video test", 'o')
+
+    out_name = kwargs.get('output_name',
+                          build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
+                                                   'summary', unit='video'))
+    out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
+    roc_base = (out_base.parent/build_test_artifact_name(raw_res.get('model_path', None),
+                                                         raw_res.get('test_cache', None), 'roc', unit='vid', short=True)
+                                                        if out_base is not None else None)
+    thr_dir = (resolve_threshold_dir(out_base.parent, threshold,
+                                     overwrite=bool(kwargs.get('overwrite', False)),
+                                     threshold_dir=kwargs.get('threshold_dir', None))
+                                            if out_base is not None else None)
+    summary['output_dir'] = str(out_base.parent) if out_base is not None else None
+    summary['threshold_dir'] = thr_dir.name if thr_dir is not None else None
+    save_roc_csv = kwargs.get('roc_csv', True)
+    summary['roc_csv'] = _roc_csv_name(True, roc_base, save_roc_csv)
+
+    if thr_dir is not None:
+        _save_analyze_summary(summary, thr_dir/out_base.with_suffix('.json').name)
     else:
         print("[WARN] Summary file wasn't saved; invalid or missing out_path")
-
-    if roc is not None and (out_base is not None or bool(kwargs.get('show_roc', False))):
-        plot_roc_curve(roc, save_to=out_base, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
-                       title=kwargs.get('roc_title', f"Video ROC for {tst_name}"),)
     if kwargs.get('print', True):
+        from evaluation_cli import print_test_report
         print_test_report(summary)
     return summary
 
 
+def analyze_video_test(test_res: Path | str | dict, **kwargs):
+    """ Run clip/video score analysis and threshold-dependent clip/video prediction analysis."""
+    _, res_path = _resolve_input(test_res)
+    tst_name = res_path.stem if res_path is not None else 'video_test'
+    out_name = kwargs.get('output_name', f"{tst_name}_video-summary")
+
+    score_kwargs = dict(kwargs)
+    score_kwargs['print'] = False
+    analyze_clip_scores(test_res, **score_kwargs)
+    analyze_video_scores(test_res, **score_kwargs)
+
+    clip_kwargs = dict(kwargs)
+    clip_kwargs['print'] = False
+    clip_kwargs['output_name'] = _companion_summary_name(out_name, 'clip')
+    analyze_clip_predictions(test_res, **clip_kwargs)
+    return analyze_video_predictions(test_res, **kwargs)
+
+
 def optimize_clip_threshold(test_results: Path | str | dict, threshold_range=DEFAULT_THRESHOLD_RANGE, mode='balanced_acc', **kwargs):
-    """Sweep clip thresholds and return the best clip-level operating point."""
+    """ Sweep clip thresholds and return the best clip-level operating point."""
     raw_res, _ = _resolve_input(test_results)
     y_true, y_prob = _require_prob_scores(raw_res)
     thresholds = iter_thresholds(threshold_range)
 
     rows = []
     for threshold in thresholds:
-        row = _clip_metrics_for_threshold(y_true, y_prob, threshold)
+        row = clip_metrics_for_threshold(y_true, y_prob, threshold)
         rows.append(row)
-    return _finalize_threshold_sweep(test_results, 'clip', thresholds, rows, mode, **kwargs)
+    return finalize_threshold_sweep(test_results, 'clip', thresholds, rows, mode, **kwargs)
 
 
 def optimize_video_threshold(test_results: Path | str | dict, threshold_range=DEFAULT_THRESHOLD_RANGE, mode='balanced_acc', **kwargs):
@@ -570,120 +731,20 @@ def optimize_video_threshold(test_results: Path | str | dict, threshold_range=DE
 
     rows = []
     for threshold in thresholds:
-        vid_true, vid_pred, vid_score, excluded_videos = _video_level_arrays(raw_res, threshold=threshold, **kwargs)
+        vid_true, vid_pred, vid_score, excluded_videos = video_level_arrays(raw_res, threshold=threshold, **kwargs)
         row = binary_metrics(vid_true, vid_pred)
-        row.update({
-            'threshold': float(threshold),
-            'f1': _f1_from_cm(row['confusion_matrix']),
-            'balanced_acc': _balanced_accuracy(row),
-            'num_videos': int(len(vid_true)),
-            'support_video': _support_counts(vid_true),
-            'num_videos_excluded': int(len(excluded_videos)),
-            'video_score_mean': float(np.mean(vid_score)) if len(vid_score) > 0 else None,
-        })
+        row.update({'threshold': float(threshold),
+                    'f1': _f1_from_cm(row['confusion_matrix']),
+                    'balanced_acc': _balanced_accuracy(row),
+                    'num_videos': int(len(vid_true)),
+                    'support_video': _support_counts(vid_true),
+                    'num_videos_excluded': int(len(excluded_videos)),
+                    'video_score_mean': float(np.mean(vid_score)) if len(vid_score) > 0 else None,
+                    })
         rows.append(row)
-    return _finalize_threshold_sweep(test_results, 'video', thresholds, rows, mode, **kwargs)
+    return finalize_threshold_sweep(test_results, 'video', thresholds, rows, mode, **kwargs)
 
+# endregion
 
-def print_test_report(results, **kwargs):
-    """Print a compact aligned CLI view of one saved or in-memory summary."""
-    def _fmt(v):
-        if isinstance(v, (float, np.floating)):
-            return f"{v:.{precision}f}"
-        if isinstance(v, np.integer):
-            return str(int(v))
-        return str(v)
-
-    if isinstance(results, (str, Path)):
-        with Path(results).open('r') as f:
-            summary = json.load(f)
-    elif isinstance(results, dict):
-        summary = results
-    else:
-        raise TypeError("results must be dict or path to summary json")
-
-    precision = kwargs.get('precision', 4)
-    label_w = kwargs.get('label_width', 20)
-    analysis_mode = summary.get('analysis_mode', None)
-
-    cm = summary.get('confusion_matrix', None)
-    if analysis_mode == 'stream' and cm is None:
-        cm_clips = summary.get('cm_clips', None)
-        if isinstance(cm_clips, dict):
-            cm = [[cm_clips.get('tn', 0), cm_clips.get('fp', 0)],
-                  [cm_clips.get('fn', 0), cm_clips.get('tp', 0)]]
-
-    testing_set = summary.get('testing_set', {})
-    support = summary.get('support_video', summary.get('support_clips', None))
-    if support is None:
-        support = testing_set.get('videos_support', testing_set.get('clips_support', None))
-    support_pair = _support_pair(support)
-    support_str = f"{support_pair[0]}/ {support_pair[1]}" if support_pair is not None else 'N/A'
-    num_samples = summary.get('num_videos', summary.get('num_clips', None))
-    if num_samples is None:
-        num_samples = testing_set.get('videos_num', testing_set.get('clips_num', None))
-
-
-    rows = [("Predictions file", Path(summary.get('raw_results_path', '')).name),
-            ("Num_samples", num_samples),
-            ("GT_counts 0/1", support_str),
-            ("accuracy", summary.get('accuracy', None)),
-            ("recall", summary.get('recall', None)),
-            ("FPR", summary.get('FPR', None)),
-            ("AUC", summary.get('roc_auc', summary.get('ROC AUC', None))),
-            ]
-    if analysis_mode == 'stream':
-        pass
-
-    rows.extend([("False positive time", summary.get('false_positive_time', None)),
-                 ("Miss time", summary.get('miss_time', None)),
-                 ("GT events", summary.get('gt_events_num', None)),
-                 ("Pred_events", summary.get('pred_events_num', None)),
-                 ("Detected events", summary.get('detected_events', None)),
-                 ("Missed events", summary.get('missed_events', None)),
-                 ("False events", summary.get('false_events_num', None)),
-                 ("Detection lag", summary.get('detection_lag', None)),
-                 ("Onset delay", summary.get('mean_onset_delay', None)),
-                 ("Offset error", summary.get('mean_offset_err', None)),
-                 ])
-
-    print("\n===== Test Summary =====")
-    for k, v in rows:
-        if v is not None:
-            print(f"{k:<{label_w}}: {_fmt(v)}")
-
-    if cm is not None and len(cm) == 2 and len(cm[0]) == 2 and len(cm[1]) == 2:
-        print(f"{'Confusion Matrix':<{label_w}}: pred-0  pred-1\n"
-              f"{'True: 0':<{label_w}}[[{cm[0][0]:>5}, {cm[0][1]:>5}]\n"
-              f"{'True: 1':<{label_w}} [{cm[1][0]:>5}, {cm[1][1]:>5}]]\n\n")
-
-    return summary
-
-
-def run_regression_suite(phase='refactor', **kwargs):
-    """Run clip/video regression outputs from cache NPZ files."""
-    from torch_clip_model import run_testing
-
-    model_path = Path(kwargs.get('model_path', DEFAULT_REG_MODEL))
-    out_root = Path(kwargs.get('out_root', "work_dirs/json_models/testing"))/phase/'evaluation_core'
-    show_roc = bool(kwargs.get('show_roc', False))
-    save_roc_csv = bool(kwargs.get('roc_csv', True))
-    threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
-
-    cases = (('train_clip', Path("data/cache/win-study/J-RWL_25ft_3w-1o5_train.npz"), False),
-             ('train_video', Path("data/cache/win-study/J-RWL_25ft_3w-1o5_train.npz"), True),
-             ('test_clip', Path("data/cache/win-study/J-RWL_25ft_3w-1o5_test.npz"), False),
-             ('test_video', Path("data/cache/win-study/J-RWL_25ft_3w-1o5_test.npz"), True),)
-
-    outputs = {}
-    for tag, cache_path, video_mode in cases:
-        out_dir = out_root / tag
-        out_dir.mkdir(parents=True, exist_ok=True)
-        raw_tag = f"{tag}_raw"
-        res = run_testing(model_path, cache_path, out_dir=out_dir, output_tag=raw_tag, video_mode=video_mode)
-        eval_kw = {'out_path': out_dir, 'show_roc': show_roc, 'roc_csv': save_roc_csv, 'print': False, 'threshold': threshold}
-        report = analyze_video_test(res['path'], **eval_kw) if video_mode else analyze_clip_test(res['path'], **eval_kw)
-        outputs[tag] = {'raw_results': res['path'], 'summary': report}
-    return outputs
-
-#547(1,3,)
+#547(1,3,) -> threshold dependency resolution -> 936
+# 936-> 865(3,1,1)-># 835(2,1,1)-> 833 ->822 -> pm 748(2,,)
