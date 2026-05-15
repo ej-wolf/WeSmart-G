@@ -1,0 +1,89 @@
+# Example config for scripts/rtsp_yolo_pose_multistream.py.
+# Keep real RTSP credentials in a local, uncommitted YAML file.
+
+streams:
+  - id: office_1
+    display_name: Office 1
+    enabled: true
+    url: "rtsp://admin:Ab123456!@192.168.0.55:554/Streaming/Channels/101"
+  - id: office_2
+    display_name: Office 2
+    enabled: true
+    url: "rtsp://admin:Ab123456!@192.168.0.56:554/Streaming/Channels/101"
+  - id: office_3
+    display_name: Office 3
+    enabled: true
+    url: "rtsp://root:Ab123456!@192.168.0.48:554/axis-media/media.amp?videocodec=h264"
+  - id: office_4
+    display_name: Office 4
+    enabled: true
+    url: "rtsp://root:Ab123456!@192.168.0.49:554/axis-media/media.amp?videocodec=h264"
+
+model:
+  yolo_pose: "yolo_weights/yolo_pose/yolo26x-pose.pt"
+  conf: 0.5
+  imgsz: 736
+  half: true
+  ignored_classes: [3, 4]
+
+runtime:
+  device: "cuda:0"
+  max_batch_size: 8
+  poll_sleep_sec: 0.005
+  status_interval_sec: 5.0
+
+capture:
+  backend: "ffmpeg"
+  reconnect_delay_sec: 2.0
+  read_sleep_sec: 0.0
+
+sampling:
+  # auto prefers sample_period_sec or tcn.training_config data fps/step.
+  # For live RTSP, time-based sampling is usually better than frame modulo.
+  mode: "auto"
+  step_frames: 5
+  sample_period_sec: 0.2
+
+tcn:
+  enabled: true
+  # Use either run_dir alone, or run_dir plus checkpoint.
+  # If checkpoint is omitted, the script uses <run_dir>/checkpoints/best.pt.
+  run_dir: "runs/2026-05-10_101659_tcn_pair_branch_box_orient_keyp_5hz_8_2_soft_v3_new_reference"
+  checkpoint: "checkpoints/best.pt"
+  # Optional fallback if you want to load only a config without a run_dir.
+  # Leave empty when run_dir points to a run with config_resolved.yaml.
+  training_config:
+  window_size: 8
+  stride: 1
+  max_persons: 25
+  threshold: 0.4
+  use_hysteresis: false
+  thr_on: 0.85
+  thr_off: 0.5
+  k_on: 3
+  k_off: 3
+  N: 6
+  smooth_mode: "off"  # off, ema, mean
+  ema_beta: 0.8
+  mean_window: 5
+
+display:
+  enabled: true
+  window_name: "rtsp_yolo_pose_multistream"
+  fps: 10
+  columns: 2
+  tile_width: 640
+  tile_height: 360
+  # Optional final dashboard limit. Useful when many tiles exceed screen size.
+  max_width: 1280
+  max_height: 720
+  show_boxes: true
+  show_keypoints: true
+  show_skeleton: true
+  show_status: true
+  keypoint_conf: 0.25
+
+output:
+  # Set this to a directory if you want one JSON file per stream with the
+  # latest TCN-ready frame and rolling window.
+  latest_payload_dir:
