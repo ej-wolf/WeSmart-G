@@ -633,12 +633,11 @@ def main():
     build_p = sub.add_parser('build', help='build train/test cache files from JSON directory')
     build_p.add_argument('jsons_dir', type=Path, help="dataset path/ dir containing JSONs")
     build_p.add_argument('cache_dir', type=Path, help="path for the cached NPZ feature files")
-    build_p.add_argument('-t', '--cache-tag',
-                                      '-cn','--cache-name', dest='cache_tag', # cn - legacy name for tag
-                                       type=Path, default=None, help="base tag for output npz files")
-    build_p.add_argument('-sd', '--split-dir' , type=Path, default=None, help="path for train_videos.txt/test_videos.txt")
+    build_p.add_argument('-t', '--cache-tag', '-cn','--cache-name',  # cn - legacy name for tag
+                                      dest= 'cache_tag', type=Path, default=None, help="base tag for output npz files")
+    build_p.add_argument('-sd', '--split-dir', type=Path, default=None, help="path for train_videos.txt/test_videos.txt")
     build_p.add_argument('-ns', '--new-split', action='store_true', help='force new train/test split')
-    build_p.add_argument('-r',  '--test-ratio', '--valid-ratio', dest='test_ratio', type=float, default=TEST_RATIO, help='test split ratio')
+    build_p.add_argument('-r',   '--test-ratio', '--valid-ratio', dest='test_ratio', type=float, default=TEST_RATIO, help='test split ratio')
     build_p.add_argument('-rs', '--random-seed', type=int, default=RANDOM_SEED)
     _add_cache_build_args(build_p)
 

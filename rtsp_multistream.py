@@ -44,7 +44,7 @@ from ultralytics import YOLO
 
 from tms_runtime import (
     TemporalWindowSpec,
-    collect_temporal_probe_window,
+    collect_probe_window,
     resolve_temporal_probes,
     temporal_probe_status_line,
 )
@@ -604,22 +604,15 @@ def status_lines(state: StreamState, sampling: SamplingConfig, temporal_probes: 
     else:
         sample_text = f"sample={sampling.step_frames}f"
 
-    lines = [
-        f"{state.display_name}",
-        f"frame={state.frame_index} infer={state.inferred_count} det={state.latest_det_count}",
-        (
-            f"{sample_text} payload={len(state.sample_window)} "
-            f"span={state.payload_window_span_sec:.1f}/{state.payload_history_sec:.1f}s"
-        ),
-        f"age={frame_age:.1f}s infer_age={infer_age:.1f}s",
-        (
-            f"CRITICAL low buffer <{state.payload_min_frames}/{state.payload_history_sec:.1f}s"
-            if state.critical_low_buffer else
-            f"buffer_ok min={state.payload_min_frames}"
-        ),
-        "connected" if state.connected else f"disconnected r={state.reconnect_count}",
-        state.last_error[:80] if state.last_error else "",
-    ]
+    lines = [f"{state.display_name}",
+             f"frame={state.frame_index} infer={state.inferred_count} det={state.latest_det_count}",
+             f"{sample_text} payload={len(state.sample_window)} span={state.payload_window_span_sec:.1f}/{state.payload_history_sec:.1f}s",
+             f"age={frame_age:.1f}s infer_age={infer_age:.1f}s",
+            (f"CRITICAL low buffer <{state.payload_min_frames}/{state.payload_history_sec:.1f}s"
+             if state.critical_low_buffer else f"buffer_ok min={state.payload_min_frames}" ) ,
+             "connected" if state.connected else f"disconnected r={state.reconnect_count}",
+             state.last_error[:80] if state.last_error else "",
+             ]
     for spec in temporal_probes:
         lines.append(temporal_probe_status_line(state, spec))
     return lines
@@ -848,11 +841,8 @@ def main() -> None:
           f"payload_min_frames={states[0].payload_min_frames}",
           flush=True,)
     print("[INFO] temporal_probes="
-          + ", ".join(
-              f"{spec.name}(window={spec.window_sec:.2f}s every={spec.infer_every_sec:.2f}s "
-              f"min_frames={spec.min_frames} tol={spec.tolerance_sec:.3f}s)"
-              for spec in temporal_probes
-          ),
+          + ", ".join(f"{spec.tag}(span={spec.window_span:.2f}s every={spec.t_infer:.2f}s "
+            f"min_frames={spec.min_frames} tol={spec.tolerance:.3f}s)"  for spec in temporal_probes),
           flush=True)
     print(f"[INFO] capture_backend={str(capture_cfg.get('backend', 'ffmpeg'))} "
           f"loop_files={loop_files} play_in_realtime={play_in_realtime}",
@@ -944,7 +934,7 @@ def main() -> None:
                     # the shared payload history without running the model yet.
                     with item.state.lock:
                         for spec in temporal_probes:
-                            collect_temporal_probe_window(item.state, spec, latest_t=float(payload["t"]))
+                            collect_probe_window(item.state, spec, latest_t=float(payload["t"]))
                     # `sample_window` is the rolling pose-payload history. A TMS
                     # RGB model should not use this deque directly unless it was
                     # trained on pose payloads; add a separate raw-frame deque
