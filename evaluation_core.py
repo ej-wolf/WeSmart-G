@@ -112,12 +112,22 @@ def _require_prob_scores(raw: dict) -> tuple[np.ndarray, np.ndarray]:
 
 #* region Summary / output helpers --------------------------------------
 # -----------------------------------------------------------------------
-def _save_analyze_summary(summary, out_path:Path|str):
+def resolve_unique_output_file(path: Path | str, overwrite=False) -> Path:
+    """Return one writable file path, enumerating only the filename when needed."""
+    path = Path(path)
+    if overwrite or not path.exists():
+        return path
+    return get_unique_name(path)
+
+
+def _save_analyze_summary(summary, out_path:Path|str, overwrite=False):
     """ Write one normalized summary JSON to out_path."""
     # TODO: Consider generalizing this into a common JSON report writer.
-    if not Path(out_path).parent.is_dir():
-        print(f"[WARN] Bad out_path; {Path(out_path).name} was not saved")
+    out_path = Path(out_path)
+    if not out_path.parent.is_dir():
+        print(f"[WARN] Bad out_path; {out_path.name} was not saved")
         return out_path
+    out_path = resolve_unique_output_file(out_path, overwrite=overwrite)
 
     analysis_mode = summary.get('analysis_mode', None)
     testing_set = {'test_cache': summary.get('test_cache', None)}
@@ -166,7 +176,7 @@ def _save_analyze_summary(summary, out_path:Path|str):
             if key in summary:
                 save_summary[key] = serialize_json_data(summary.get(key))
 
-    with Path(out_path).open('w') as f:
+    with out_path.open('w') as f:
         json.dump(serialize_json_data(save_summary), f, indent=2)
     print("Analysis complete")
     print_color(f"  Summary saved to   :{out_path}", 'b')
@@ -183,23 +193,24 @@ def _roc_csv_name(roc, roc_base, save_roc_csv=True):
 
 
 def resolve_threshold_dir(base_dir, threshold: float, overwrite=False, threshold_dir=None) -> Path:
-    """ Resolve one threshold-scoped output dir, reusing an explicit dir when provided."""
+    """Resolve one stable threshold-scoped output dir."""
     base_dir = Path(base_dir)
     if threshold_dir is not None:
         thr_dir = Path(threshold_dir)
         if not thr_dir.is_absolute():
-            thr_dir = base_dir / thr_dir
+            # If the caller already passed a repo-relative path like
+            # `work_dirs/.../th-50`, do not prepend `base_dir` again.
+            if base_dir.parts and len(thr_dir.parts) >= len(base_dir.parts) and tuple(thr_dir.parts[:len(base_dir.parts)]) == base_dir.parts:
+                thr_dir = Path.cwd() / thr_dir
+            else:
+                thr_dir = base_dir / thr_dir
+        thr_dir = thr_dir.resolve()
         thr_dir.mkdir(parents=True, exist_ok=True)
         return thr_dir
 
     thr_value = int(round(float(threshold) * 100.0))
-    thr_dir = base_dir / f"th-{thr_value:03d}"
-    if overwrite:
-        thr_dir.mkdir(parents=True, exist_ok=True)
-        return thr_dir
-
-    thr_dir = get_unique_name(thr_dir)
-    thr_dir.mkdir(parents=True, exist_ok=False)
+    thr_dir = base_dir / f"th-{thr_value}"
+    thr_dir.mkdir(parents=True, exist_ok=True)
     return thr_dir
 
 
@@ -574,7 +585,9 @@ def analyze_clip_predictions(test_results: Path | str | dict, **kwargs):
     summary['roc_csv'] = _roc_csv_name(True, roc_base, save_roc_csv)
 
     if thr_dir is not None:
-        _save_analyze_summary(summary, thr_dir/out_base.with_suffix('.json').name)
+        _save_analyze_summary(summary,
+                              thr_dir/out_base.with_suffix('.json').name,
+                              overwrite=bool(kwargs.get('overwrite', False)))
     else:
         print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
     if kwargs.get('print', True):
@@ -585,10 +598,25 @@ def analyze_clip_predictions(test_results: Path | str | dict, **kwargs):
 
 def analyze_clip_test(test_results: Path | str | dict, **kwargs):
     """ Run clip score analysis and threshold-dependent clip prediction analysis."""
+    raw_res, results_path = _resolve_input(test_results)
+    threshold_dir = kwargs.get('threshold_dir', None)
+    if threshold_dir is None and results_path is not None:
+        out_name = kwargs.get('output_name',
+                              build_test_artifact_name(raw_res.get('model_path', None),
+                                                       raw_res.get('test_cache', None),
+                                                       'summary', unit='clip'))
+        out_base = resolve_output_path(results_path, out_name, kwargs.get('out_path', None))
+        if out_base is not None:
+            threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
+            threshold_dir = resolve_threshold_dir(out_base.parent, threshold,
+                                                 overwrite=bool(kwargs.get('overwrite', False)))
     score_kwargs = dict(kwargs)
     score_kwargs['print'] = False
     analyze_clip_scores(test_results, **score_kwargs)
-    return analyze_clip_predictions(test_results, **kwargs)
+    pred_kwargs = dict(kwargs)
+    if threshold_dir is not None:
+        pred_kwargs['threshold_dir'] = threshold_dir
+    return analyze_clip_predictions(test_results, **pred_kwargs)
 
 
 def analyze_video_scores(test_res: Path | str | dict, **kwargs):
@@ -683,7 +711,9 @@ def analyze_video_predictions(test_res: Path | str | dict, **kwargs):
     summary['roc_csv'] = _roc_csv_name(True, roc_base, save_roc_csv)
 
     if thr_dir is not None:
-        _save_analyze_summary(summary, thr_dir/out_base.with_suffix('.json').name)
+        _save_analyze_summary(summary,
+                              thr_dir/out_base.with_suffix('.json').name,
+                              overwrite=bool(kwargs.get('overwrite', False)))
     else:
         print("[WARN] Summary file wasn't saved; invalid or missing out_path")
     if kwargs.get('print', True):
@@ -697,6 +727,13 @@ def analyze_video_test(test_res: Path | str | dict, **kwargs):
     _, res_path = _resolve_input(test_res)
     tst_name = res_path.stem if res_path is not None else 'video_test'
     out_name = kwargs.get('output_name', f"{tst_name}_video-summary")
+    threshold_dir = kwargs.get('threshold_dir', None)
+    if threshold_dir is None and res_path is not None:
+        out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
+        if out_base is not None:
+            threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
+            threshold_dir = resolve_threshold_dir(out_base.parent, threshold,
+                                                  overwrite=bool(kwargs.get('overwrite', False)))
 
     score_kwargs = dict(kwargs)
     score_kwargs['print'] = False
@@ -706,8 +743,13 @@ def analyze_video_test(test_res: Path | str | dict, **kwargs):
     clip_kwargs = dict(kwargs)
     clip_kwargs['print'] = False
     clip_kwargs['output_name'] = _companion_summary_name(out_name, 'clip')
+    if threshold_dir is not None:
+        clip_kwargs['threshold_dir'] = threshold_dir
     analyze_clip_predictions(test_res, **clip_kwargs)
-    return analyze_video_predictions(test_res, **kwargs)
+    pred_kwargs = dict(kwargs)
+    if threshold_dir is not None:
+        pred_kwargs['threshold_dir'] = threshold_dir
+    return analyze_video_predictions(test_res, **pred_kwargs)
 
 
 def optimize_clip_threshold(test_results: Path | str | dict, threshold_range=DEFAULT_THRESHOLD_RANGE, mode='balanced_acc', **kwargs):

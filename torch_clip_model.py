@@ -21,6 +21,12 @@ from torch.utils.tensorboard import SummaryWriter
 from common.my_local_utils import print_color
 # from evaluation_tools import (analyze_clip_test, analyze_video_test, print_test_report plot_roc_curve)
 import evaluation_tools as evl
+from motion_feature_schema import (
+    assert_feature_schema_match,
+    load_cache_contract_compat,
+    schema_has_na,
+    temporal_schema_compatible,
+)
 
 #* config constants ToDo: make proper config file
 DEFAULT_WORKDIR = "work_dirs/json_models"
@@ -40,6 +46,8 @@ DEFAULT_SAVE_EVERY = 10
 #*
 DEFAULT_PATIENCE = 30
 DEFAULT_MIN_DELTA = 0.002
+DEFAULT_WINDOW_TOLERANCE = 0.25
+DEFAULT_STRIDE_TOLERANCE = 0.25
 
 DEFAULT_DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -164,6 +172,61 @@ def _binary_auc(y_true, y_score):
     pos_ranks = ranks[y_true == 1]
     return (np.sum(pos_ranks) - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
 
+
+def _training_contract_from_cache(train_cache: str | Path, **kwargs) -> tuple[list[dict[str, object]], dict[str, object], dict[str, float]]:
+    """Load and validate the canonical feature/temporal contract for one train cache."""
+    contract, used_legacy_fallback = load_cache_contract_compat(train_cache)
+    train_caches = [dict(item) for item in contract["source_caches"]]
+    if not train_caches:
+        raise ValueError(f"{train_cache} did not provide any source cache provenance")
+
+    canonical_feature_schema = dict(contract["feature_schema"])
+    canonical_temporal_schema = dict(train_caches[0]["temporal_schema"])
+    window_tolerance = float(kwargs.get("window_tolerance", DEFAULT_WINDOW_TOLERANCE))
+    stride_tolerance = float(kwargs.get("stride_tolerance", DEFAULT_STRIDE_TOLERANCE))
+    if used_legacy_fallback:
+        print_color(
+            f"[WARN] {train_cache} is missing cache metadata; training will continue with 'N/A' contract fields.",
+            "o",
+        )
+
+    for index, cache_rec in enumerate(train_caches):
+        feature_schema = dict(cache_rec["feature_schema"])
+        temporal_schema = dict(cache_rec["temporal_schema"])
+        if schema_has_na(canonical_feature_schema) or schema_has_na(feature_schema):
+            if index > 0:
+                print_color(
+                    f"[WARN] Skipping strict feature-schema validation for {train_cache} source_caches[{index}] because metadata is incomplete.",
+                    "o",
+                )
+        else:
+            assert_feature_schema_match(canonical_feature_schema,
+                                        feature_schema,
+                                        context=f"{train_cache} source_caches[{index}]")
+        if schema_has_na(canonical_temporal_schema) or schema_has_na(temporal_schema):
+            if index > 0:
+                print_color(
+                    f"[WARN] Skipping strict temporal-schema validation for {train_cache} source_caches[{index}] because metadata is incomplete.",
+                    "o",
+                )
+        elif not temporal_schema_compatible(canonical_temporal_schema,
+                                            temporal_schema,
+                                            window_tolerance=window_tolerance,
+                                            stride_tolerance=stride_tolerance):
+            raise ValueError(
+                f"Temporal schema mismatch for {train_cache} source_caches[{index}]: "
+                f"expected target around window={canonical_temporal_schema['window']} stride={canonical_temporal_schema['stride']}, "
+                f"got window={temporal_schema['window']} stride={temporal_schema['stride']}"
+            )
+
+    temporal_profile = {
+        "target_window": canonical_temporal_schema["window"],
+        "target_stride": canonical_temporal_schema["stride"],
+        "window_tolerance": window_tolerance,
+        "stride_tolerance": stride_tolerance,
+    }
+    return train_caches, canonical_feature_schema, temporal_profile
+
 # --------------------------------------------------
 # * main/ API functions
 # --------------------------------------------------
@@ -204,6 +267,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     if max_epochs < 1:
         raise ValueError(f"Invalid max_epochs={max_epochs}. Expected positive integer.")
     min_epochs = min(min_epochs, max_epochs)
+    train_caches, feature_schema, temporal_profile = _training_contract_from_cache(train_npz, **kwargs)
 
     # Build train/valid datasets;
     full_train_ds = ClipFeatureDataset(train_npz)
@@ -226,6 +290,9 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
 
     #* Save lightweight run config for later testing/evaluation.
     run_cfg = {'train_cache': str(train_npz), 'valid_cache': valid_used, #* datasets configs
+               'train_caches': train_caches,
+               'feature_schema': feature_schema,
+               'temporal_profile': temporal_profile,
                'min_epochs': min_epochs, 'max_epochs': max_epochs,  #* epoch related configs
                'save_every': save_every,
                'patience': patience, 'min_delta': min_delta,  #* early stop condition

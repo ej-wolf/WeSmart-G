@@ -18,6 +18,7 @@ def print_color(msg:str, clr=Fore.RED):
     elif clr in ['BLUE', 'Blue', 'blue', 'r']   :  clr = Fore.BLUE
     elif clr in ['GREEN', 'Green', 'green', 'g']:  clr = Fore.GREEN
     elif clr in ['ORANGE', 'orange', 'o']       :  clr = rgb(255, 165, 0)
+    elif clr in ['dark_orange', 'do']           :  clr = rgb(210, 100, 30)
 
     print( f"{clr}{msg}{Style.RESET_ALL}")
 

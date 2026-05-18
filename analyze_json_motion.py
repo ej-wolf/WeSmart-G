@@ -44,7 +44,7 @@ DEFAULT_VERSION = 2.0
 # --------------------------------------------------
 
 def extract_motion_features(frames, j_version:float=DEFAULT_VERSION, **kwargs):
-    """Convert frames into a T x C motion sequence.
+    """ Convert frames into a T x C motion sequence.
     Kwargs:
         pure_motion: if True, drop the static overlap features (22-25).
         legacy: if True, return only the original 18 features.

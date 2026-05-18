@@ -115,7 +115,7 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
         events_name = f"{build_test_artifact_name(model_path, test_npz, 'events')}.json"
         res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
         analyze_stream_test(res['path'], out_path=out_dir, output_name=summary_name,
-                            details_name=events_name, show_roc=False)
+                            details_name=events_name, show_roc=False, plotting= 'save')
 
     cache_dir = Path(cache_dir)
     main_op_dir = Path(main_op_dir)
@@ -203,7 +203,7 @@ def test_models(models, general_tests=None, stream_tests=None, **kwargs):
     def _threshold_dir(run_dir: Path) -> Path:
         """Resolve one shared threshold dir for the active batch threshold."""
         thr = float(kwargs.get('threshold', 0.5))
-        return Path(f"th-{int(round(thr*100)):03d}")
+        return Path(f"th-{int(round(thr*100))}")
 
     def _resolve_npz_inputs(inputs, base_dir: Path) -> list[Path]:
         """Resolve files, dirs, or masks into one ordered unique NPZ list."""
@@ -242,25 +242,22 @@ def test_models(models, general_tests=None, stream_tests=None, **kwargs):
         res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
         if run_video:
             video_summary = build_test_artifact_name(model_path, test_npz, 'summary', unit='video')
-            analyze_video_test(
-                res['path'], out_path=out_dir, output_name=video_summary,
-                threshold=kwargs.get('threshold', 0.5),
-                threshold_dir=thr_dir, overwrite=True,
-                show_roc=bool(kwargs.get('show_roc', False)),
-                roc_csv=bool(kwargs.get('roc_csv', True)),
-                print=bool(kwargs.get('print_report', False)),
-            )
+            analyze_video_test(res['path'], out_path=out_dir, output_name=video_summary,
+                               threshold=kwargs.get('threshold', 0.5),
+                               threshold_dir=thr_dir, overwrite=True,
+                               show_roc=bool(kwargs.get('show_roc', False)),
+                               roc_csv=bool(kwargs.get('roc_csv', True)),
+                               print=bool(kwargs.get('print_report', False)),
+                               )
         else:
             clip_summary = build_test_artifact_name(model_path, test_npz, 'summary', unit='clip')
-            analyze_clip_test(
-                res['path'], out_path=out_dir, output_name=clip_summary,
-                threshold=kwargs.get('threshold', 0.5),
-                threshold_dir=thr_dir, overwrite=True,
-                show_roc=bool(kwargs.get('show_roc', False)),
-                roc_csv=bool(kwargs.get('roc_csv', True)),
-                print=bool(kwargs.get('print_report', False)),
-            )
-
+            analyze_clip_test(res['path'], out_path=out_dir, output_name=clip_summary,
+                              threshold=kwargs.get('threshold', 0.5),
+                              threshold_dir=thr_dir, overwrite=True,
+                              show_roc=bool(kwargs.get('show_roc', False)),
+                              roc_csv=bool(kwargs.get('roc_csv', True)),
+                              print=bool(kwargs.get('print_report', False)),
+                             )
     def _run_stream_test(model_path: Path, test_npz: Path, out_dir: Path):
         """Run one stream-level test and summary."""
         raw_tag = build_test_artifact_name(model_path, test_npz, 'raw', unit='stream')
@@ -268,15 +265,14 @@ def test_models(models, general_tests=None, stream_tests=None, **kwargs):
         events_name = f"{build_test_artifact_name(model_path, test_npz, 'events')}.json"
         thr_dir = _threshold_dir(out_dir)
         res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
-        analyze_stream_test(
-            res['path'], out_path=out_dir, output_name=summary_name, details_name=events_name,
-            threshold=kwargs.get('threshold', 0.5),
-            threshold_dir=thr_dir, overwrite=True,
-            show_roc=bool(kwargs.get('show_roc', False)),
-            roc_csv=bool(kwargs.get('roc_csv', True)),
-            events_json=bool(kwargs.get('events_json', True)),
-            print=bool(kwargs.get('print_report', False)),
-        )
+        analyze_stream_test(res['path'], out_path=out_dir, output_name=summary_name, details_name=events_name,
+                            threshold=kwargs.get('threshold', 0.5),
+                            threshold_dir=thr_dir, overwrite=True,
+                            show_roc=bool(kwargs.get('show_roc', False)),
+                            roc_csv=bool(kwargs.get('roc_csv', True)),
+                            events_json=bool(kwargs.get('events_json', True)),
+                            print=bool(kwargs.get('print_report', False)),
+                            )
 
     tested = []
     for model_ref in as_collection(models):
@@ -567,28 +563,31 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
             summary = json.load(f)
 
         testing_set = summary.get('testing_set', {})
-        test_cache = Path(testing_set.get('test_cache', ''))
-        model_path = Path(summary.get('model', ''))
+        test_cache = Path(testing_set.get('test_cache', summary.get('test_cache', '')))
+        model_path = Path(summary.get('model', summary.get('model_path', '')))
         train_tag = model_path.parent.name.split('_', 1)[1] if '_' in model_path.parent.name else model_path.parent.name
         test_tag = test_cache.stem[:-5] if test_cache.stem.endswith('_test') else test_cache.stem
         train_ds, window, stride = _parse_ds_tag(train_tag)
         test_ds, _, _ = _parse_ds_tag(test_tag)
         unit = summary.get('analysis_mode', '')
+        analysis_cfg = summary.get('analysis_config', {})
+        threshold = analysis_cfg.get('threshold', summary.get('threshold', None))
 
-        if unit == 'video':
+        if unit.startswith('video'):
             samples = testing_set.get('videos_num', None)
             support = _support_pair(testing_set.get('videos_support', None))
         else:
-            samples = testing_set.get('clips_num', None)
-            support = _support_pair(testing_set.get('clips_support', None))
+            samples = testing_set.get('clips_num', summary.get('num_samples', None))
+            support = _support_pair(testing_set.get('clips_support', summary.get('support', None)))
         support_str = f'{support[0]}/{support[1]}' if support is not None else 'N/A'
 
         cm = summary.get('confusion_matrix', [[None, None], [None, None]])
+        auc = summary.get('ROC AUC', summary.get('roc_auc', None))
         return {'model': str(model_path), 'cache': test_cache.stem,
                 'train ds': train_tag or train_ds,
                 'test ds': test_tag or test_ds,
                 'unit': unit, 'samples': samples, 'support': support_str,
-                'window': window, 'stride': stride,
+                'window': window, 'stride': stride, 'threshold': threshold,
                 'FF': cm[0][0],
                 'FT': cm[0][1],
                 'TF': cm[1][0],
@@ -596,7 +595,7 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
                 'Acc': summary.get('accuracy', None),
                 'Rec': summary.get('recall', None),
                 'FPR': summary.get('FPR', None),
-                'AUC': summary.get('ROC AUC', None),
+                'AUC': auc,
                 }
 
     def _print_rows(rows: list[dict]):
@@ -605,7 +604,7 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
             text = str(text)
             return text if len(text) <= limit else text[:limit - 1] + '…'
 
-        cols = ['model', 'BE', 'train ds', 'test ds', 'window', 'stride', 'unit',
+        cols = ['model', 'BE', 'train ds', 'test ds', 'window', 'stride', 'threshold', 'unit',
                 'samples', 'support', 'FF', 'FT', 'TF', 'TT', 'Acc', 'Rec', 'FPR', 'AUC']
         header_labels = {c: c if c.isupper() else c.title() for c in cols}
         header_labels.update({'train ds': 'Train ds', 'test ds': 'Test ds'})
@@ -618,6 +617,10 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
             for key in ('Acc', 'Rec', 'FPR', 'AUC'):
                 if isinstance(disp[key], float):
                     disp[key] = f'{disp[key]:.4f}'
+            if isinstance(disp['threshold'], float):
+                disp['threshold'] = f"{disp['threshold']:.2f}"
+            elif disp['threshold'] in (None, ''):
+                disp['threshold'] = 'N/A'
             display_rows.append(disp)
 
         widths = {c: len(header_labels[c]) for c in cols}
@@ -631,7 +634,7 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
             line = []
             for col in cols:
                 val = str(row.get(col, ''))
-                if col in {'window', 'stride', 'BE'}:
+                if col in {'window', 'stride', 'threshold', 'BE'}:
                     line.append(f'{val:^{widths[col]}}')
                 elif col == 'samples':
                     line.append(f'{val:>{widths[col]}}')
@@ -643,7 +646,7 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
     if not work_dir.is_dir():
         raise NotADirectoryError(work_dir)
 
-    summary_paths = sorted(work_dir.glob('*/*-summary.json'))
+    summary_paths = sorted(work_dir.rglob('*-summary.json'))
     if not summary_paths:
         raise FileNotFoundError(f"No *-summary.json files found in {work_dir}")
 
@@ -663,6 +666,16 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
 
     return table
 
+def gen_tst():
+    cache_dir = "data/cache/w30-15_um"
+    output_dir= "work_dirs/json_models/w30-15-um"
+    stream_testing = ["cam-6-11-5_ft25_w30-15.npz",
+                      "cam-6-11-8_FRes_Ana_ft25_w30-15.npz",
+                      "cam-6-11-8_FRes_Erz_ft25_w30-15.npz"]
+    ds_testsing = ['J-All_ft25_w30-15_test.npz']
+    train_models(cache_dir, output_dir, ds_tests=ds_testsing, stm_tests=stream_testing)
+    sum_all_results(output_dir)
+
 
 if __name__ == "__main__":
     pass
@@ -675,14 +688,13 @@ if __name__ == "__main__":
     # train_test_stdy(STUDY_CACHE_DIR)
     # sum_all_results(MAIN_WORK_DIR/study_dir, sort=['win-str','vid-clp', 'trn-tst-R'],save_json=True)
 
-    #*
-    cache_dir = "data/cache/w30-15"
-    output_dir= "work_dirs/json_models/w30-15"
+    cache_dir = "data/cache/w30-15_um"
+    output_dir= "work_dirs/json_models/w30-15-um"
     stream_testing = ["cam-6-11-5_ft25_w30-15.npz",
-                    "cam-6-11-8_FRes_Ana_ft25_w30-15.npz",
-                    "cam-6-11-8_FRes_Erz_ft25_w30-15.npz"]
+                      "cam-6-11-8_FRes_Ana_ft25_w30-15.npz",
+                      "cam-6-11-8_FRes_Erz_ft25_w30-15.npz"]
     ds_testsing = ['J-All_ft25_w30-15_test.npz']
-    # train_models(cache_dir, output_dir, ds_tests=stream_testing, stm_tests= stream_testing)
+    train_models(cache_dir, output_dir, ds_tests=ds_testsing, stm_tests=stream_testing)
     sum_all_results(output_dir)
 
 # 321(,6,2)->300(,6,2)   (23,6)
