@@ -76,7 +76,7 @@ def _run_train(args):
 def _run_test(args):
     """ Run testing command."""
     def _warn(text):
-        print_color(f"[WARN] {text}", 'o')
+        print_color(f"[WARN] {text}", 'r')
 
     new_eval_target = None
     if args.eval_stream:

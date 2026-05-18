@@ -42,6 +42,7 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
+from motion_feature_schema import build_clip_feature_vector, build_feature_schema
 from tms_runtime import (
     TemporalWindowSpec,
     collect_probe_window,
@@ -785,6 +786,7 @@ def main() -> None:
     config = load_yaml(config_path)
     sampling = resolve_sampling(config)
     payload_history_sec, payload_min_frames = resolve_payload_buffer_policy(config)
+    runtime_feature_schema = build_feature_schema()
     temporal_probes = resolve_temporal_probes(config, first_present=first_present)
     states = enabled_streams(config,
                              config_path.parent,
@@ -843,6 +845,12 @@ def main() -> None:
     print("[INFO] temporal_probes="
           + ", ".join(f"{spec.tag}(span={spec.window_span:.2f}s every={spec.t_infer:.2f}s "
             f"min_frames={spec.min_frames} tol={spec.tolerance:.3f}s)"  for spec in temporal_probes),
+          flush=True)
+    print("[INFO] feature_schema="
+          f"{runtime_feature_schema['extractor']}@{runtime_feature_schema['extractor_version']} "
+          f"dim={runtime_feature_schema['feature_dim']} pool={runtime_feature_schema['pool_mode']} "
+          f"smooth={runtime_feature_schema['temp_smooth']} kernel={runtime_feature_schema['temp_kernel']} "
+          f"pure_motion={runtime_feature_schema['pure_motion']} legacy={runtime_feature_schema['legacy']}",
           flush=True)
     print(f"[INFO] capture_backend={str(capture_cfg.get('backend', 'ffmpeg'))} "
           f"loop_files={loop_files} play_in_realtime={play_in_realtime}",
@@ -932,9 +940,32 @@ def main() -> None:
                                                  )
                     # TMS online probe hook: evaluate time-window readiness from
                     # the shared payload history without running the model yet.
+                    ready_probe_windows: list[tuple[TemporalWindowSpec, list[dict[str, Any]]]] = []
                     with item.state.lock:
                         for spec in temporal_probes:
-                            collect_probe_window(item.state, spec, latest_t=float(payload["t"]))
+                            frames = collect_probe_window(item.state, spec, latest_t=float(payload["t"]))
+                            if frames is not None:
+                                ready_probe_windows.append((spec, frames))
+                    for spec, frames in ready_probe_windows:
+                        try:
+                            clip_vec = build_clip_feature_vector(
+                                frames,
+                                pure_motion=bool(runtime_feature_schema["pure_motion"]),
+                                legacy=bool(runtime_feature_schema["legacy"]),
+                                temp_smooth=bool(runtime_feature_schema["temp_smooth"]),
+                                temp_kernel=int(runtime_feature_schema["temp_kernel"]),
+                                pool_mode=str(runtime_feature_schema["pool_mode"]),
+                                j_version=float(runtime_feature_schema["extractor_version"]),
+                            )
+                        except Exception as exc:
+                            with item.state.lock:
+                                item.state.temporal_probe_status.setdefault(spec.tag, {})
+                                item.state.temporal_probe_status[spec.tag]["feature_error"] = str(exc)
+                        else:
+                            with item.state.lock:
+                                item.state.temporal_probe_status.setdefault(spec.tag, {})
+                                item.state.temporal_probe_status[spec.tag]["feature_dim"] = int(clip_vec.shape[0])
+                                item.state.temporal_probe_status[spec.tag]["feature_error"] = ""
                     # `sample_window` is the rolling pose-payload history. A TMS
                     # RGB model should not use this deque directly unless it was
                     # trained on pose payloads; add a separate raw-frame deque

@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from motion_feature_schema import assert_feature_schema_match
+
 
 @dataclass
 class TemporalWindowSpec:
@@ -143,16 +145,48 @@ def temporal_probe_status_line(state: Any, spec: TemporalWindowSpec) -> str:
     frame_count = int(status.get("frame_count", 0))
     span_sec = float(status.get("span_sec", 0.0))
     reason = str(status.get("reason", "pending"))
+    feature_dim = status.get("feature_dim")
+    feature_suffix = f" ->{int(feature_dim)}d" if feature_dim is not None else ""
+    if status.get("feature_error"):
+        return f"{spec.tag}: feat_err {status['feature_error']}"
     if bool(status.get("ready", False)):
-        return f"{spec.tag}: READY {frame_count}f {span_sec:.2f}/{spec.window_span:.2f}s"
+        return f"{spec.tag}: READY {frame_count}f {span_sec:.2f}/{spec.window_span:.2f}s{feature_suffix}"
     if reason == "cooldown":
         since_last = status.get("since_last_trigger_sec")
         if since_last is None:
-            return f"{spec.tag}: cooldown"
-        return f"{spec.tag}: cool {float(since_last):.2f}/{spec.t_infer:.2f}s"
+            return f"{spec.tag}: cooldown{feature_suffix}"
+        return f"{spec.tag}: cool {float(since_last):.2f}/{spec.t_infer:.2f}s{feature_suffix}"
     if reason == "span":
-        return f"{spec.tag}: span {frame_count}f {span_sec:.2f}/{spec.window_span:.2f}s"
+        return f"{spec.tag}: span {frame_count}f {span_sec:.2f}/{spec.window_span:.2f}s{feature_suffix}"
     if reason == "min_frames":
-        return f"{spec.tag}: cnt {frame_count}/{spec.min_frames} {span_sec:.2f}s"
+        return f"{spec.tag}: cnt {frame_count}/{spec.min_frames} {span_sec:.2f}s{feature_suffix}"
     return f"{spec.tag}: pending"
+
+
+def probe_matches_temporal_profile(spec: TemporalWindowSpec, temporal_profile: dict[str, Any]) -> bool:
+    """Return whether one online probe is compatible with the model's canonical temporal profile."""
+    target_window = float(temporal_profile.get("target_window"))
+    target_stride = float(temporal_profile.get("target_stride"))
+    window_tolerance = float(temporal_profile.get("window_tolerance", 0.0))
+    stride_tolerance = float(temporal_profile.get("stride_tolerance", 0.0))
+    return (
+        abs(float(spec.window_span) - target_window) <= window_tolerance
+        and abs(float(spec.t_infer) - target_stride) <= stride_tolerance
+    )
+
+
+def validate_probe_temporal_profile(spec: TemporalWindowSpec, temporal_profile: dict[str, Any]) -> None:
+    """Fail early if one online probe does not fit the model's temporal target family."""
+    if not probe_matches_temporal_profile(spec, temporal_profile):
+        raise ValueError(
+            f"Probe '{spec.tag}' is incompatible with model temporal profile: "
+            f"probe window={spec.window_span} every={spec.t_infer}, "
+            f"model target_window={temporal_profile.get('target_window')} "
+            f"target_stride={temporal_profile.get('target_stride')}"
+        )
+
+
+def validate_runtime_feature_schema(runtime_feature_schema: dict[str, Any], model_feature_schema: dict[str, Any]) -> None:
+    """Fail early if the live feature builder does not match the model contract."""
+    assert_feature_schema_match(model_feature_schema, runtime_feature_schema, context="runtime feature builder")
 #145
