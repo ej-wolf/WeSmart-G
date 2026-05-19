@@ -23,7 +23,7 @@ from common.my_local_utils import print_color
 import evaluation_tools as evl
 from motion_feature_schema import (
     assert_feature_schema_match,
-    load_cache_contract_compat,
+    load_cache_contract_compact,
     schema_has_na,
     temporal_schema_compatible,
 )
@@ -175,7 +175,7 @@ def _binary_auc(y_true, y_score):
 
 def _training_contract_from_cache(train_cache: str | Path, **kwargs) -> tuple[list[dict[str, object]], dict[str, object], dict[str, float]]:
     """Load and validate the canonical feature/temporal contract for one train cache."""
-    contract, used_legacy_fallback = load_cache_contract_compat(train_cache)
+    contract, used_legacy_fallback = load_cache_contract_compact(train_cache)
     train_caches = [dict(item) for item in contract["source_caches"]]
     if not train_caches:
         raise ValueError(f"{train_cache} did not provide any source cache provenance")

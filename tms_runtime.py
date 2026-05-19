@@ -7,10 +7,16 @@
     the last trigger time per window in `state.temporal_probe_last_trigger_t`.
 """
 from __future__ import annotations
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from motion_feature_schema import assert_feature_schema_match
+import numpy as np
+import torch
+
+from motion_feature_schema import assert_feature_schema_match, schema_has_na
+from torch_clip_model import ClipMLP, LOCAL_CONFIG, _infer_hidden_dim_from_state
 
 
 @dataclass
@@ -21,6 +27,29 @@ class TemporalWindowSpec:
     t_infer: float         #* target time between two online trigger attempts
     min_frames: int        #* minimal number of payloads required for analysis
     tolerance: float       #* tolerance for near-boundary payload inclusion
+
+
+@dataclass
+class TmsModelRuntime:
+    """One loaded live TMS model bound to one online probe tag."""
+    tag: str
+    model_path: Path
+    threshold: float
+    hidden_dim: int
+    input_dim: int
+    device: torch.device
+    model: torch.nn.Module
+    feature_schema: dict[str, Any] | None = None
+    temporal_profile: dict[str, Any] | None = None
+
+
+@dataclass
+class TmsCandidate:
+    """One ready live TMS feature vector waiting for batched inference."""
+    tag: str
+    state: Any
+    feature_vec: np.ndarray
+    latest_t: float
 
 
 def default_temporal_probes() -> list[TemporalWindowSpec]:
@@ -149,6 +178,8 @@ def temporal_probe_status_line(state: Any, spec: TemporalWindowSpec) -> str:
     feature_suffix = f" ->{int(feature_dim)}d" if feature_dim is not None else ""
     if status.get("feature_error"):
         return f"{spec.tag}: feat_err {status['feature_error']}"
+    if "tms_prob" in status:
+        return f"{spec.tag}: p={float(status['tms_prob']):.2f} y={int(status.get('tms_pred', 0))}{feature_suffix}"
     if bool(status.get("ready", False)):
         return f"{spec.tag}: READY {frame_count}f {span_sec:.2f}/{spec.window_span:.2f}s{feature_suffix}"
     if reason == "cooldown":
@@ -166,27 +197,170 @@ def temporal_probe_status_line(state: Any, spec: TemporalWindowSpec) -> str:
 def probe_matches_temporal_profile(spec: TemporalWindowSpec, temporal_profile: dict[str, Any]) -> bool:
     """Return whether one online probe is compatible with the model's canonical temporal profile."""
     target_window = float(temporal_profile.get("target_window"))
-    target_stride = float(temporal_profile.get("target_stride"))
     window_tolerance = float(temporal_profile.get("window_tolerance", 0.0))
-    stride_tolerance = float(temporal_profile.get("stride_tolerance", 0.0))
-    return (
-        abs(float(spec.window_span) - target_window) <= window_tolerance
-        and abs(float(spec.t_infer) - target_stride) <= stride_tolerance
-    )
+    return abs(float(spec.window_span) - target_window) <= window_tolerance
 
 
 def validate_probe_temporal_profile(spec: TemporalWindowSpec, temporal_profile: dict[str, Any]) -> None:
-    """Fail early if one online probe does not fit the model's temporal target family."""
+    """Fail early if one online probe does not fit the model's temporal window family."""
     if not probe_matches_temporal_profile(spec, temporal_profile):
         raise ValueError(
             f"Probe '{spec.tag}' is incompatible with model temporal profile: "
-            f"probe window={spec.window_span} every={spec.t_infer}, "
+            f"probe window={spec.window_span}, "
             f"model target_window={temporal_profile.get('target_window')} "
-            f"target_stride={temporal_profile.get('target_stride')}"
+            f"(window_tolerance={temporal_profile.get('window_tolerance', 0.0)})"
         )
 
 
 def validate_runtime_feature_schema(runtime_feature_schema: dict[str, Any], model_feature_schema: dict[str, Any]) -> None:
     """Fail early if the live feature builder does not match the model contract."""
     assert_feature_schema_match(model_feature_schema, runtime_feature_schema, context="runtime feature builder")
-#145
+
+
+def _resolve_model_checkpoint(model_ref: str | Path, config_dir: Path) -> Path:
+    """Resolve one TMS model ref to a checkpoint path."""
+    path = Path(model_ref)
+    if not path.is_absolute():
+        repo_dir = Path(__file__).resolve().parent
+        path = (repo_dir / path).resolve()
+    if path.is_file():
+        return path
+    if not path.is_dir():
+        raise FileNotFoundError(path)
+
+    best_models = sorted(path.glob("best_model.*.pt"))
+    if best_models:
+        return best_models[-1]
+    model_pt = path / "model.pt"
+    if model_pt.is_file():
+        return model_pt
+    checkpoints = sorted(path.glob("checkpoint_ep-*.pt"))
+    if checkpoints:
+        return checkpoints[-1]
+    raise FileNotFoundError(f"No model checkpoint found in {path}")
+
+
+def _load_model_contract(model_path: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int | None]:
+    """Load saved runtime contract from one training config when available."""
+    cfg_path = model_path.parent / LOCAL_CONFIG
+    if not cfg_path.is_file():
+        return None, None, None
+
+    with cfg_path.open("r", encoding="utf-8") as handle:
+        cfg = json.load(handle)
+    return cfg.get("feature_schema", None), cfg.get("temporal_profile", None), cfg.get("hidden_dim", None)
+
+
+def load_tms_runtimes(
+    config: dict[str, Any],
+    config_dir: Path,
+    runtime_feature_schema: dict[str, Any],
+    temporal_probes: list[TemporalWindowSpec],
+    device: torch.device,
+) -> dict[str, TmsModelRuntime]:
+    """Load the configured live TMS models and validate them against the runtime contract."""
+    tms_cfg = dict(config.get("tms", {}) or {})
+    model_cfgs = tms_cfg.get("models", None)
+    if model_cfgs is None:
+        return {}
+    if not isinstance(model_cfgs, list):
+        raise ValueError("tms.models must be a list")
+
+    probe_map = {spec.tag: spec for spec in temporal_probes}
+    runtimes: dict[str, TmsModelRuntime] = {}
+    for index, item in enumerate(model_cfgs):
+        if not isinstance(item, dict):
+            raise ValueError(f"tms.models[{index}] must be a mapping")
+        if item.get("enabled", True) is False:
+            continue
+        tag = str(item.get("tag", "")).strip()
+        if not tag:
+            raise ValueError(f"tms.models[{index}] is missing tag")
+        if tag in runtimes:
+            raise ValueError(f"Duplicate tms model tag: {tag}")
+        if tag not in probe_map:
+            raise ValueError(f"tms.models[{index}] tag '{tag}' has no matching temporal probe")
+
+        model_ref = item.get("model")
+        if not model_ref:
+            raise ValueError(f"tms.models[{index}] is missing model")
+        model_path = _resolve_model_checkpoint(model_ref, config_dir)
+        state = torch.load(model_path, map_location=device)
+        if not isinstance(state, dict):
+            raise ValueError(f"Unsupported model state in {model_path}")
+
+        input_dim = int(state["net.0.weight"].shape[1])
+        feature_schema, temporal_profile, hidden_dim = _load_model_contract(model_path)
+        if hidden_dim is None:
+            hidden_dim = _infer_hidden_dim_from_state(state)
+        hidden_dim = int(hidden_dim)
+
+        if feature_schema and not schema_has_na(feature_schema):
+            validate_runtime_feature_schema(runtime_feature_schema, feature_schema)
+        elif input_dim != int(runtime_feature_schema["feature_dim"]):
+            raise ValueError(
+                f"Runtime feature_dim mismatch for {model_path}: runtime={runtime_feature_schema['feature_dim']} model={input_dim}"
+            )
+        if temporal_profile and not schema_has_na(temporal_profile):
+            validate_probe_temporal_profile(probe_map[tag], temporal_profile)
+
+        model = ClipMLP(input_dim, hidden_dim=hidden_dim).to(device)
+        model.load_state_dict(state, strict=True)
+        model.eval()
+
+        runtimes[tag] = TmsModelRuntime(
+            tag=tag,
+            model_path=model_path,
+            threshold=float(item.get("threshold", 0.5)),
+            hidden_dim=hidden_dim,
+            input_dim=input_dim,
+            device=device,
+            model=model,
+            feature_schema=feature_schema,
+            temporal_profile=temporal_profile,
+        )
+    return runtimes
+
+
+@torch.inference_mode()
+def predict_tms_probs_batch(runtime: TmsModelRuntime, feature_vecs: list[np.ndarray]) -> np.ndarray:
+    """Run one loaded TMS model on a batch of pooled feature vectors."""
+    batch = np.stack([np.asarray(vec, dtype=np.float32) for vec in feature_vecs], axis=0)
+    x = torch.from_numpy(batch).to(runtime.device)
+    logits = runtime.model(x)
+    probs = torch.sigmoid(logits).detach().cpu().numpy()
+    return np.asarray(probs, dtype=np.float32)
+
+
+def run_tms_candidates(candidates: list[TmsCandidate], runtimes: dict[str, TmsModelRuntime]) -> None:
+    """ Batch ready feature vectors by tag/model and write probabilities back into stream state."""
+    if not candidates or not runtimes:
+        return
+
+    by_tag: dict[str, list[TmsCandidate]] = {}
+    for item in candidates:
+        if item.tag not in runtimes:
+            continue
+        by_tag.setdefault(item.tag, []).append(item)
+
+    for tag, tag_candidates in by_tag.items():
+        runtime = runtimes[tag]
+        probs = predict_tms_probs_batch(runtime, [item.feature_vec for item in tag_candidates])
+        for item, prob in zip(tag_candidates, probs):
+            y_pred = int(float(prob) >= float(runtime.threshold))
+            with item.state.lock:
+                item.state.temporal_probe_status.setdefault(tag, {})
+                item.state.temporal_probe_status[tag]["tms_prob"] = float(prob)
+                item.state.temporal_probe_status[tag]["tms_pred"] = y_pred
+                item.state.temporal_probe_status[tag]["tms_threshold"] = float(runtime.threshold)
+                item.state.temporal_probe_status[tag]["tms_model"] = runtime.model_path.name
+                item.state.temporal_probe_status[tag]["tms_latest_t"] = float(item.latest_t)
+                item.state.tms_results[tag] = {
+                    "prob": float(prob),
+                    "pred": y_pred,
+                    "threshold": float(runtime.threshold),
+                    "model": runtime.model_path.name,
+                    "latest_t": float(item.latest_t),
+                }
+
+#370 (1,,)

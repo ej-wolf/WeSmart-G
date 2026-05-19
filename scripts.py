@@ -176,7 +176,7 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
 
 
 def test_models(models, general_tests=None, stream_tests=None, **kwargs):
-    """Run own-test, shared dataset tests, and shared stream tests for trained models."""
+    """ Run own-test, shared dataset tests, and shared stream tests for trained models."""
 
     def _dataset_tag(stem: str, split_suffix: str) -> str:
         """Strip one split suffix from a cache stem."""
@@ -668,7 +668,7 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
 
 def gen_tst():
     cache_dir = "data/cache/w30-15_um"
-    output_dir= "work_dirs/json_models/w30-15-um"
+    output_dir= "work_dirs/json_models/w30-15-um-3"
     stream_testing = ["cam-6-11-5_ft25_w30-15.npz",
                       "cam-6-11-8_FRes_Ana_ft25_w30-15.npz",
                       "cam-6-11-8_FRes_Erz_ft25_w30-15.npz"]
@@ -688,13 +688,13 @@ if __name__ == "__main__":
     # train_test_stdy(STUDY_CACHE_DIR)
     # sum_all_results(MAIN_WORK_DIR/study_dir, sort=['win-str','vid-clp', 'trn-tst-R'],save_json=True)
 
-    cache_dir = "data/cache/w30-15_um"
-    output_dir= "work_dirs/json_models/w30-15-um"
-    stream_testing = ["cam-6-11-5_ft25_w30-15.npz",
-                      "cam-6-11-8_FRes_Ana_ft25_w30-15.npz",
-                      "cam-6-11-8_FRes_Erz_ft25_w30-15.npz"]
-    ds_testsing = ['J-All_ft25_w30-15_test.npz']
-    train_models(cache_dir, output_dir, ds_tests=ds_testsing, stm_tests=stream_testing)
-    sum_all_results(output_dir)
-
+    # cache_dir = "data/cache/w30-15_um"
+    # output_dir= "work_dirs/json_models/w30-15-um"
+    # stream_testing = ["cam-6-11-5_ft25_w30-15.npz",
+    #                   "cam-6-11-8_FRes_Ana_ft25_w30-15.npz",
+    #                   "cam-6-11-8_FRes_Erz_ft25_w30-15.npz"]
+    # ds_testsing = ['J-All_ft25_w30-15_test.npz']
+    # train_models(cache_dir, output_dir, ds_tests=ds_testsing, stm_tests=stream_testing)
+    # sum_all_results(output_dir)
+    gen_tst()
 # 321(,6,2)->300(,6,2)   (23,6)

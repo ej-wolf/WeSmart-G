@@ -8,11 +8,11 @@ streams:
     url: "/mnt/local-data/Projects/Wesmart/Video-datasets/wesmart/fight_out_predict_SLOWFAST.mp4"
   - id: test_02
     display_name: FightClub
-    enabled: false
+    enabled: true
     url: "/mnt/local-data/Projects/Wesmart/Video-datasets/wesmart/fight_out_predict_SLOWFAST.mp4"
   - id: office_3
     display_name: Office 3
-    enabled: true
+    enabled: false
     # url: ""
     url: "/mnt/local-data/Projects/Wesmart/Video-datasets/misc/Fight.Club.10th.Anniversary.Edition.1999.1080p.BrRip.x264.YIFY.mp4"
   - id: office_4
@@ -53,6 +53,12 @@ sampling:
 
 tcn:
   enabled: false
+
+tms:
+  models:
+    - tag: slow
+      model: "work_dirs/json_models/w30-15-um-2/J-All_ft25_w30-15/best_model.130.pt"
+      threshold: 0.5
 
 display:
   enabled: true
