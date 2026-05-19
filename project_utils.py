@@ -84,8 +84,10 @@ def _resolve_test_tag(value) -> str:
     return _strip_split_suffix(tag)
 
 
-def get_test_long_tag(model_ref, test_ref, *, include_best_epoch=True) -> str:
-    """Resolve one compact shared base tag for test/eval artifacts."""
+def get_test_long_tag(model_ref, test_ref, *, include_epoch=True) -> str:
+    """ Resolve one compact shared base tag for test/eval artifacts.
+    ToDo: generalize for any epoch, with special tag for best one"""
+
     model_name, best_epoch = _resolve_model_parts(model_ref)
     test_name = _resolve_test_tag(test_ref)
     same_tag = (test_name == model_name)
@@ -104,7 +106,7 @@ def get_test_long_tag(model_ref, test_ref, *, include_best_epoch=True) -> str:
         test_name = ''
 
     parts = [model_name]
-    if include_best_epoch and best_epoch is not None:
+    if include_epoch and best_epoch is not None:
         parts.append(f"BM{best_epoch}")
     if test_name:
         parts.append(test_name)
@@ -112,7 +114,7 @@ def get_test_long_tag(model_ref, test_ref, *, include_best_epoch=True) -> str:
 
 
 def get_test_short_tag(test_ref) -> str:
-    """Resolve one compact short tag for ROC naming and titles."""
+    """ Resolve one compact short tag for ROC naming and titles."""
     tag = _resolve_test_tag(test_ref)
     tag = re.sub(r'(?:^|_)(?:ft\d+|\d+ft)(?=_|$)', '_', tag)
     tag = re.sub(r'(?:^|_)(?:w\d+(?:o\d+)?-\d+(?:o\d+)?)(?=_|$)', '_', tag)
@@ -126,27 +128,22 @@ def get_test_title_lines(model_ref, test_ref) -> tuple[str, str]:
     return model_tag or 'model', get_test_short_tag(test_ref)
 
 
-def build_test_artifact_name(model_ref, test_ref, kind, *, unit=None, short=False, include_best_epoch=True) -> str:
-    """Build one canonical artifact stem from model/test refs and artifact kind."""
-    long_tag = get_test_long_tag(model_ref, test_ref, include_best_epoch=include_best_epoch)
-    short_tag = get_test_short_tag(test_ref)
+# def build_test_artifact_name(model_ref, test_ref, kind, *, unit=None, short=False, include_best_epoch=True)-> str:
+def get_exporting_name(model_ref, test_ref, kind, *, unit='NA', short=False, **kwargs)-> str:
+    """Build one canonical export stem from model/test refs and export kind."""
+    base_tag = (get_test_short_tag(test_ref) if short else
+                get_test_long_tag(model_ref, test_ref, include_epoch=kwargs.get('include_epoch', True)))
 
     if kind == 'roc':
-        if not unit:
-            raise ValueError("ROC artifact name requires unit")
-        return f"ROC_{short_tag}_{unit}"
+        return f'ROC_{base_tag}_{unit}'
     if kind == 'summary':
         if not unit:
-            raise ValueError("summary artifact name requires unit")
-        return f"{long_tag}_{unit}-summary"
+            raise ValueError('summary export name requires unit')
+        return f'{base_tag}_{unit}-summary'
     if kind == 'events':
-        return f"{long_tag}_stream-events"
+        return f'{base_tag}_stream-events'
     if kind == 'timeline':
-        return f"{long_tag}_stream-tst"
+        return f'{base_tag}_stream-tst'
     if kind == 'raw':
-        if not unit:
-            raise ValueError("raw artifact name requires unit")
-        return f"{long_tag}_{unit}-tst"
-    if short:
-        return short_tag
+        return f'{base_tag}_{unit}-tst'
     raise ValueError(f"Unsupported artifact kind: {kind}")

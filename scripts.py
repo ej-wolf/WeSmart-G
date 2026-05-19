@@ -8,7 +8,7 @@ from precompute_clips import (build_cache_from_json, merge_cache_npz, WINDOW_SEC
 from tms_trainer import run_training, run_testing
 from evaluation_tools import analyze_clip_test, analyze_video_test, analyze_stream_test, _support_pair
 from common.my_local_utils import as_collection, get_unique_name
-from project_utils import build_test_artifact_name
+from project_utils import get_exporting_name
 
 #* general configuration
 RWF_DIR  = Path("data/json_files/RWF-2000/ds")
@@ -104,15 +104,15 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
         return bm, int(bm.stem.split(".")[-1])
 
     def _run_dataset_test(model_path: Path, test_npz: Path, out_dir: Path):
-        raw_tag = build_test_artifact_name(model_path, test_npz, 'raw', unit='clip')
-        summary_name = build_test_artifact_name(model_path, test_npz, 'summary', unit='clip')
+        raw_tag = get_exporting_name(model_path, test_npz, 'raw', unit='clip')
+        summary_name = get_exporting_name(model_path, test_npz, 'summary', unit='clip')
         res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag)
         analyze_clip_test(res['path'], out_path=out_dir, output_name=summary_name, show_roc=False)
 
     def _run_stream_test(model_path: Path, test_npz: Path, out_dir: Path):
-        raw_tag = build_test_artifact_name(model_path, test_npz, 'raw', unit='stream')
-        summary_name = build_test_artifact_name(model_path, test_npz, 'summary', unit='stream')
-        events_name = f"{build_test_artifact_name(model_path, test_npz, 'events')}.json"
+        raw_tag = get_exporting_name(model_path, test_npz, 'raw', unit='stream')
+        summary_name = get_exporting_name(model_path, test_npz, 'summary', unit='stream')
+        events_name = f"{get_exporting_name(model_path, test_npz, 'events')}.json"
         res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
         analyze_stream_test(res['path'], out_path=out_dir, output_name=summary_name,
                             details_name=events_name, show_roc=False, plotting= 'save')
@@ -237,11 +237,11 @@ def test_models(models, general_tests=None, stream_tests=None, **kwargs):
 
     def _run_dataset_test(model_path: Path, test_npz: Path, out_dir: Path, run_video=False):
         """Run one dataset test with clip-only or clip+video post-analysis."""
-        raw_tag = build_test_artifact_name(model_path, test_npz, 'raw', unit='clip')
+        raw_tag = get_exporting_name(model_path, test_npz, 'raw', unit='clip')
         thr_dir = _threshold_dir(out_dir)
         res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
         if run_video:
-            video_summary = build_test_artifact_name(model_path, test_npz, 'summary', unit='video')
+            video_summary = get_exporting_name(model_path, test_npz, 'summary', unit='video')
             analyze_video_test(res['path'], out_path=out_dir, output_name=video_summary,
                                threshold=kwargs.get('threshold', 0.5),
                                threshold_dir=thr_dir, overwrite=True,
@@ -250,7 +250,7 @@ def test_models(models, general_tests=None, stream_tests=None, **kwargs):
                                print=bool(kwargs.get('print_report', False)),
                                )
         else:
-            clip_summary = build_test_artifact_name(model_path, test_npz, 'summary', unit='clip')
+            clip_summary = get_exporting_name(model_path, test_npz, 'summary', unit='clip')
             analyze_clip_test(res['path'], out_path=out_dir, output_name=clip_summary,
                               threshold=kwargs.get('threshold', 0.5),
                               threshold_dir=thr_dir, overwrite=True,
@@ -260,9 +260,9 @@ def test_models(models, general_tests=None, stream_tests=None, **kwargs):
                              )
     def _run_stream_test(model_path: Path, test_npz: Path, out_dir: Path):
         """Run one stream-level test and summary."""
-        raw_tag = build_test_artifact_name(model_path, test_npz, 'raw', unit='stream')
-        summary_name = build_test_artifact_name(model_path, test_npz, 'summary', unit='stream')
-        events_name = f"{build_test_artifact_name(model_path, test_npz, 'events')}.json"
+        raw_tag = get_exporting_name(model_path, test_npz, 'raw', unit='stream')
+        summary_name = get_exporting_name(model_path, test_npz, 'summary', unit='stream')
+        events_name = f"{get_exporting_name(model_path, test_npz, 'events')}.json"
         thr_dir = _threshold_dir(out_dir)
         res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
         analyze_stream_test(res['path'], out_path=out_dir, output_name=summary_name, details_name=events_name,
@@ -377,8 +377,8 @@ def train_test_study(cache_dir: str | Path, **kwargs): #92 -> 63
 
     def _run_one_test(test_npz:Path, test_mode: str):
         """Run one test job and the matching analysis."""
-        output_tag = f"{build_test_artifact_name(best_model, test_npz, 'raw', unit=test_mode)}.npz"
-        output_name = f"{build_test_artifact_name(best_model, test_npz, 'summary', unit=test_mode)}.json"
+        output_tag = f"{get_exporting_name(best_model, test_npz, 'raw', unit=test_mode)}.npz"
+        output_name = f"{get_exporting_name(best_model, test_npz, 'summary', unit=test_mode)}.json"
 
         if test_mode == 'clip':
             res = run_testing(best_model, test_npz, out_dir=run_dir, output_tag=output_tag)

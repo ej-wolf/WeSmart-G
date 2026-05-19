@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 #* project imports
 from common.my_local_utils import get_unique_name, print_color, serialize_json_data, resolve_output_path
-from project_utils import build_test_artifact_name, get_test_title_lines
+from project_utils import get_exporting_name, get_test_title_lines
 from visual_util import plot_roc_curve
 
 DEFAULT_ROC_RES = 100
@@ -536,7 +536,7 @@ def analyze_clip_scores(test_results: Path | str | dict, **kwargs):
     out_name = kwargs.get('output_name', f"{tst_name}_clip-scores")
     out_base = resolve_output_path(results_path, out_name, kwargs.get('out_path', None))
     roc_mode_code = kwargs.get('roc_mode_code', 'clp')
-    roc_base = (out_base.parent/build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
+    roc_base = (out_base.parent / get_exporting_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
                'roc', unit=roc_mode_code, short=True) if out_base is not None else None)
     summary['output_dir'] = str(out_base.parent) if out_base is not None else None
 
@@ -549,7 +549,7 @@ def analyze_clip_scores(test_results: Path | str | dict, **kwargs):
     return summary
 
 
-def analyze_clip_predictions(test_results: Path | str | dict, **kwargs):
+def analyze_clip_predictions(test_results:Path|str|dict, **kwargs):
     """Analyze thresholded clip/window predictions only and save clip summary output."""
     raw_res, results_path = _resolve_input(test_results)
     threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
@@ -564,13 +564,13 @@ def analyze_clip_predictions(test_results: Path | str | dict, **kwargs):
                     'support_clips': _support_counts(y_true),
                     'analysis_config': {'threshold': threshold},
                     })
-    out_name = kwargs.get('output_name', build_test_artifact_name(raw_res.get('model_path', None),
-                                                                  raw_res.get('test_cache', None),
+    out_name = kwargs.get('output_name', get_exporting_name(raw_res.get('model_path', None),
+                                                            raw_res.get('test_cache', None),
                                                                   'summary', unit='clip'))
     out_base = resolve_output_path(results_path, out_name, kwargs.get('out_path', None))
     roc_mode_code = kwargs.get('roc_mode_code', 'clp')
-    roc_base = (out_base.parent/build_test_artifact_name(raw_res.get('model_path', None),
-                                                         raw_res.get('test_cache', None),
+    roc_base = (out_base.parent / get_exporting_name(raw_res.get('model_path', None),
+                                                     raw_res.get('test_cache', None),
                                                          'roc', unit=roc_mode_code, short=True)
                 if out_base is not None else None
                 )
@@ -602,8 +602,8 @@ def analyze_clip_test(test_results: Path | str | dict, **kwargs):
     threshold_dir = kwargs.get('threshold_dir', None)
     if threshold_dir is None and results_path is not None:
         out_name = kwargs.get('output_name',
-                              build_test_artifact_name(raw_res.get('model_path', None),
-                                                       raw_res.get('test_cache', None),
+                              get_exporting_name(raw_res.get('model_path', None),
+                                                 raw_res.get('test_cache', None),
                                                        'summary', unit='clip'))
         out_base = resolve_output_path(results_path, out_name, kwargs.get('out_path', None))
         if out_base is not None:
@@ -652,8 +652,8 @@ def analyze_video_scores(test_res: Path | str | dict, **kwargs):
     tst_name = res_path.stem if res_path is not None else 'video_test'
     out_name = kwargs.get('output_name', f"{tst_name}_video-scores")
     out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
-    roc_base = (out_base.parent/build_test_artifact_name(raw_res.get('model_path', None),
-                                                         raw_res.get('test_cache', None), 'roc', unit='vid', short=True)
+    roc_base = (out_base.parent / get_exporting_name(raw_res.get('model_path', None),
+                                                     raw_res.get('test_cache', None), 'roc', unit='vid', short=True)
                                                          if out_base is not None else None)
     summary['output_dir'] = str(out_base.parent) if out_base is not None else None
     save_roc_csv = kwargs.get('roc_csv', True)
@@ -695,11 +695,11 @@ def analyze_video_predictions(test_res: Path | str | dict, **kwargs):
         print_color(f"[WARN] Inconsistent GT in video {vid}; excluded from video test", 'o')
 
     out_name = kwargs.get('output_name',
-                          build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
+                          get_exporting_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
                                                    'summary', unit='video'))
     out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
-    roc_base = (out_base.parent/build_test_artifact_name(raw_res.get('model_path', None),
-                                                         raw_res.get('test_cache', None), 'roc', unit='vid', short=True)
+    roc_base = (out_base.parent / get_exporting_name(raw_res.get('model_path', None),
+                                                     raw_res.get('test_cache', None), 'roc', unit='vid', short=True)
                                                         if out_base is not None else None)
     thr_dir = (resolve_threshold_dir(out_base.parent, threshold,
                                      overwrite=bool(kwargs.get('overwrite', False)),

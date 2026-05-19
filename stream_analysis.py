@@ -4,7 +4,7 @@ import json
 import numpy as np
 
 from common.my_local_utils import print_color, serialize_json_data, resolve_output_path
-from project_utils import build_test_artifact_name
+from project_utils import get_exporting_name
 from visual_util import plot_timeline
 from evaluation_core import (DEFAULT_ROC_RES, DEFAULT_EVAL_THRESHOLD, DEFAULT_THRESHOLD_RANGE,
                              _cm_dict, _companion_summary_name, _get_eval_arrays, _resolve_input, _roc_summary,
@@ -429,87 +429,92 @@ def optimize_stream_threshold(test_results: Path | str | dict, threshold_range=D
     }
 
 
+def run_stream_event_analysis(stream_ctx) -> tuple[list[dict], dict]:
+    """Run per-video stream analysis and build the aggregated summary."""
+    video_reports = []
+    for video_group in stream_ctx['video_groups']:
+        video_reports.append(analyze_single_stream(stream_ctx, video_group))
+    summary = _build_stream_event_summary(stream_ctx, video_reports)
+    return video_reports, summary
+
+
+def export_stream_timeline(report, summary_path, raw_res, *, overwrite: bool) -> Path:
+    """ Export stream timeline CSV and annotate the report with its filename."""
+
+    csv_fieldnames = ['win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob', 'y_pred']
+    video_name = report['video']
+    video_tag = str(video_name).replace('/', '_').replace('\\', '_').replace(' ', '_')
+    timeline_rows = report.pop('timeline_rows')
+    timeline_base = get_exporting_name(raw_res.get('model_path', None), raw_res.get('test_cache', None), 'timeline')
+    timeline_csv_path = summary_path.with_name(f"{timeline_base}_{video_tag}_timeline.csv").with_suffix('.csv')
+    timeline_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    timeline_csv_path = resolve_unique_output_file(timeline_csv_path, overwrite=overwrite)
+
+    with timeline_csv_path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=csv_fieldnames)
+        writer.writeheader()
+        writer.writerows(timeline_rows)
+    print_color(f"  Timeline CSV saved to  :{timeline_csv_path}", 'b')
+    report['timeline_csv'] = timeline_csv_path.name
+    return timeline_csv_path
+
+
 def analyze_stream_events(test_res: Path | str | dict, **kwargs):
     """ Analyze thresholded clip/window predictions as stream events and timelines only.
     ToDo: move the csv storing to separate func
      fix this functions , resolve_unique_output_file, overwrite etc..."""
 
-    csv_fieldnames = ['win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob', 'y_pred']
-    plotting_mode = kwargs.get('plotting', kwargs.get('ploting', None))
+    plotting_mode = kwargs.get('plotting', None)
+    overwrite = kwargs.get('overwrite', False)
+    threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
+
     if plotting_mode not in {None, 'save', 'disp'}:
         raise ValueError("plotting must be one of: None, 'save', 'disp'")
-
-    def _save_stream_timeline_csv(csv_path):
-        """Write one per-video timeline CSV with only window-local columns."""
-        csv_path = Path(csv_path).with_suffix('.csv')
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        csv_path = resolve_unique_output_file(csv_path, overwrite=bool(kwargs.get('overwrite', False)))
-        with csv_path.open('w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=csv_fieldnames)
-            writer.writeheader()
-            writer.writerows(timeline_rows)
-        print_color(f"  Timeline CSV saved to  :{csv_path}", 'b')
-        return csv_path
 
     def _plot_stream_timeline(csv_path, video_tag: str):
         """ Optionally render the saved timeline CSV."""
         if plotting_mode is None:
             return None
         if plotting_mode == 'save':
-            png_path = resolve_unique_output_file(Path(csv_path).with_name(f"timeline_{video_tag}.png"),
-                                                  overwrite=bool(kwargs.get('overwrite', False)))
+            png_path = resolve_unique_output_file(Path(csv_path).with_name(f"timeline_{video_tag}.png"), overwrite=overwrite)
             plot_timeline(csv_path, save_to=png_path, show=False, threshold=threshold)
             return png_path.name
         plot_timeline(csv_path, show=True, threshold=threshold)
         return None
 
-    threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
     stream_ctx = process_stream_inputs(test_res, threshold=threshold, **kwargs)
-    raw_res = stream_ctx['raw_res']
     res_path = stream_ctx['res_path']
+    raw_res  = stream_ctx['raw_res']
+    model_path = raw_res.get('model_path', None)
+    test_cache = raw_res.get('test_cache', None)
 
-    video_reports = []
-    for video_group in stream_ctx['video_groups']:
-        video_reports.append(analyze_single_stream(stream_ctx, video_group))
-    summary = _build_stream_event_summary(stream_ctx, video_reports)
+    video_reports, summary = run_stream_event_analysis(stream_ctx)
 
     tst_name = res_path.stem if res_path is not None else 'stream_test'
-    out_name = kwargs.get('output_name',
-                          build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
-                                                   'summary', unit='stream'))
+    out_name = kwargs.get('output_name', get_exporting_name(model_path, test_cache, 'summary', unit='stream'))
     out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
     roc_mode_code = kwargs.get('roc_mode_code', 'stm')
-    roc_base = (out_base.parent/build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
-                                                           'roc', unit=roc_mode_code, short=True)
+    roc_base = (out_base.parent/get_exporting_name(model_path, test_cache, 'roc', unit=roc_mode_code, short=True)
                 if out_base is not None else None)
-    thr_dir = (resolve_threshold_dir(out_base.parent, threshold,
-                                     overwrite=bool(kwargs.get('overwrite', False)),
-                                     threshold_dir=kwargs.get('threshold_dir', None))
+    thr_dir = (resolve_threshold_dir(out_base.parent, threshold, overwrite=overwrite, threshold_dir=kwargs.get('threshold_dir', None))
                if out_base is not None else None)
-    summary_path = (thr_dir/out_base.with_suffix('.json').name) if out_base is not None and thr_dir is not None else None
-    details_name = kwargs.get('details_name',
-                              f"{build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None), 'events')}.json")
+    summary_path = thr_dir/out_base.with_suffix('.json').name if out_base is not None and thr_dir is not None else None
+    details_name = kwargs.get('details_name', f"{get_exporting_name(model_path, test_cache, 'events')}.json")
     save_events_json = kwargs.get('events_json', True)
     save_roc_csv = kwargs.get('roc_csv', True)
 
-    timeline_csvs = []
-    timeline_plots = []
+    timeline_csvs, timeline_plots = [], []
     if summary_path is not None and save_events_json not in {False, None}:
-        details_path = resolve_unique_output_file(summary_path.with_name(details_name),
-                                                 overwrite=bool(kwargs.get('overwrite', False)))
+        details_path = resolve_unique_output_file(summary_path.with_name(details_name), overwrite=overwrite)
         details_path.parent.mkdir(parents=True, exist_ok=True)
         output_dir = str(out_base.parent)
         for report in video_reports:
             video_name = report['video']
             video_tag = str(video_name).replace('/', '_').replace('\\', '_').replace(' ', '_')
-            timeline_rows = report.pop('timeline_rows')
             report.pop('onset_delays', None)
-            report.pop('offset_errs', None)
-            timeline_base = build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None), 'timeline')
-            timeline_csv_path = summary_path.with_name(f"{timeline_base}_{video_tag}_timeline.csv")
-            timeline_csv_path = _save_stream_timeline_csv(timeline_csv_path)
+            report.pop('offset_errs' , None)
+            timeline_csv_path = export_stream_timeline(report, summary_path, raw_res, overwrite=overwrite)
             timeline_plot_name = _plot_stream_timeline(timeline_csv_path, video_tag)
-            report['timeline_csv'] = timeline_csv_path.name
             report['timeline_plot'] = timeline_plot_name
             timeline_csvs.append(timeline_csv_path.name)
             if timeline_plot_name is not None:
@@ -520,18 +525,17 @@ def analyze_stream_events(test_res: Path | str | dict, **kwargs):
         summary['events_info'] = details_path.name
         summary['timeline_csvs'] = timeline_csvs
         summary['timeline_plots'] = timeline_plots
-        details_payload = {
-            'raw_results_path': str(res_path),
-            'model_path': raw_res.get('model_path', None),
-            'output_dir': output_dir,
-            'threshold_dir': thr_dir.name,
-            'events_info': details_path.name,
-            'analysis_mode': 'stream',
-            'test_cache': raw_res.get('test_cache', None),
-            'analysis_config': summary['analysis_config'],
-            'match_config': summary['match_config'],
-            'videos': video_reports,
-        }
+        details_payload = {'raw_results_path': str(res_path),
+                           'model_path': model_path,
+                           'output_dir': output_dir,
+                           'threshold_dir': thr_dir.name,
+                           'events_info': details_path.name,
+                           'analysis_mode': 'stream',
+                           'test_cache': test_cache,
+                           'analysis_config': summary['analysis_config'],
+                           'match_config': summary['match_config'],
+                           'videos': video_reports,
+                           }
         with details_path.open('w') as f:
             json.dump(serialize_json_data(details_payload), f, indent=2)
         print_color(f"  Stream events saved to :{details_path}", 'b')
@@ -542,12 +546,13 @@ def analyze_stream_events(test_res: Path | str | dict, **kwargs):
         summary['timeline_csvs'] = []
         summary['timeline_plots'] = []
 
-    summary['roc_csv'] = (
-        roc_base.with_suffix('.csv').name if save_roc_csv and roc_base is not None else
-        ('N/A' if save_roc_csv in {False, None} else None)
-    )
+    if save_roc_csv and roc_base is not None:
+        summary['roc_csv'] = roc_base.with_suffix('.csv').name
+    else:
+        summary['roc_csv'] = ('N/A' if save_roc_csv in {False, None} else None)
+
     if summary_path is not None:
-        _save_analyze_summary(summary, summary_path, overwrite=bool(kwargs.get('overwrite', False)))
+        _save_analyze_summary(summary, summary_path, overwrite=overwrite)
     else:
         print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
 
@@ -562,7 +567,7 @@ def analyze_stream_test(test_res: Path | str | dict, **kwargs):
     """ Run clip/window score analysis, clip predictions, and stream event analysis."""
     raw_res, _ = _resolve_input(test_res)
     out_name = kwargs.get('output_name',
-                          build_test_artifact_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
+                          get_exporting_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
                                                    'summary', unit='stream'))
     threshold_dir = kwargs.get('threshold_dir', None)
     if threshold_dir is None:

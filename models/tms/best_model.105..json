@@ -1,0 +1,81 @@
+{
+  "train_cache": "data/cache/w30-15_um/J-All_ft25_w30-15_train.npz",
+  "valid_cache": "Runtime split: ratio0.85, seed42",
+  "train_caches": [
+    {
+      "feature_schema": {
+        "extractor": "extract_motion_features",
+        "extractor_version": 2.0,
+        "feature_dim": 25,
+        "legacy": false,
+        "pool_mode": "max",
+        "pure_motion": false,
+        "temp_kernel": 3,
+        "temp_smooth": true
+      },
+      "path": "data/cache/w30-15_um/RWF_ft25_w03-15_train.npz",
+      "temporal_schema": {
+        "stride": 1.5,
+        "window": 3.0
+      }
+    },
+    {
+      "feature_schema": {
+        "extractor": "extract_motion_features",
+        "extractor_version": 2.0,
+        "feature_dim": 25,
+        "legacy": false,
+        "pool_mode": "max",
+        "pure_motion": false,
+        "temp_kernel": 3,
+        "temp_smooth": true
+      },
+      "path": "data/cache/w30-15_um/RLVS_ft25_w03-15_train.npz",
+      "temporal_schema": {
+        "stride": 1.5,
+        "window": 3.0
+      }
+    },
+    {
+      "feature_schema": {
+        "extractor": "extract_motion_features",
+        "extractor_version": 2.0,
+        "feature_dim": 25,
+        "legacy": false,
+        "pool_mode": "max",
+        "pure_motion": false,
+        "temp_kernel": 3,
+        "temp_smooth": true
+      },
+      "path": "data/cache/w30-15_um/HMC-J-caman_w30-15_train.npz",
+      "temporal_schema": {
+        "stride": 1.5,
+        "window": 3.0
+      }
+    }
+  ],
+  "feature_schema": {
+    "extractor": "extract_motion_features",
+    "extractor_version": 2.0,
+    "feature_dim": 25,
+    "legacy": false,
+    "pool_mode": "max",
+    "pure_motion": false,
+    "temp_kernel": 3,
+    "temp_smooth": true
+  },
+  "temporal_profile": {
+    "target_window": 3.0,
+    "target_stride": 1.5,
+    "window_tolerance": 0.25,
+    "stride_tolerance": 0.25
+  },
+  "min_epochs": 30,
+  "max_epochs": 150,
+  "save_every": 10,
+  "patience": 30,
+  "min_delta": 0.002,
+  "batch_size": 256,
+  "lr": 0.001,
+  "hidden_dim": 64
+}

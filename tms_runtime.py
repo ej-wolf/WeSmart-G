@@ -99,8 +99,7 @@ def resolve_temporal_probes(config: dict[str, Any], first_present) -> list[Tempo
                                         window_span=window_span,
                                         t_infer=t_infer,
                                         min_frames=min_frames,
-                                        tolerance=tolerance,
-                                        )
+                                        tolerance=tolerance,)
                      )
     return specs
 

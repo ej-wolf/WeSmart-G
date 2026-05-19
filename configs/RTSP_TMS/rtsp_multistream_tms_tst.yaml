@@ -39,7 +39,7 @@ capture:
   reconnect_delay_sec: 1.0
   read_sleep_sec: 0.0
   loop_files: true
-  play_in_realtime: false
+  play_in_realtime: true
 
 sampling:
   #* auto prefers sample_period_sec or tcn.training_config data fps/step.
