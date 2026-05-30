@@ -62,6 +62,32 @@ def _resolve_best_epoch(path: Path) -> int | None:
     return None
 
 
+def resolve_best_pt_model(model_ref) -> Path:
+    """ Resolve one model ref to the concrete checkpoint file to load."""
+    path = Path(model_ref)
+    if path.is_file():
+        if path.suffix != '.pt':
+            raise FileNotFoundError(f'Expected a .pt model file, got: {path}')
+        return path
+
+    if path.exists() and path.is_dir():
+        best_models = sorted(path.glob('best_model.*.pt'))
+        if best_models:
+            return best_models[-1]
+
+        model_pt = path/'model.pt'
+        if model_pt.is_file():
+            return model_pt
+
+        checkpoints = sorted(path.glob('checkpoint_ep-*.pt'))
+        if checkpoints:
+            return checkpoints[-1]
+
+        raise FileNotFoundError(f'No model checkpoint found in {path}')
+
+    raise FileNotFoundError(path)
+
+
 def _resolve_model_parts(value) -> tuple[str, int | None]:
     """Resolve one model tag and optional epoch from a path or plain tag."""
     path = Path(value)

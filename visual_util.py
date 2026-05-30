@@ -212,10 +212,15 @@ def plot_my_log(log_path, **kwargs):
 #****** ROC plotting *****
 def plot_roc_curve(roc: dict, **kwargs):
     """Render ROC plot and optional CSV/PNG outputs from `roc_from_scores` data."""
+    def _allow_save_print(policy) -> bool:
+        policy = 'all' if policy is None else str(policy).strip().lower()
+        return policy in {'all', 'save'}
+
     fig_size = kwargs.get('figsize', (6, 5))
     dpi = int(kwargs.get('dpi', 120))
     save_to = kwargs.get('save_to', None)
     save_csv = bool(kwargs.get('save_csv', True))
+    print_policy = kwargs.get('print_policy', 'all')
     if 'show' in kwargs:
         show = bool(kwargs['show'])
     else:
@@ -250,14 +255,14 @@ def plot_roc_curve(roc: dict, **kwargs):
         try:
             save_to.parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(save_to, dpi=dpi)
+            if _allow_save_print(print_policy):
+                print_color(f"  ROC plot saved to   :{save_to}", 'b')
             if save_csv:
                 csv_path = save_to.with_suffix('.csv')
                 roc_table = np.column_stack([fpr, tpr, thresholds])
                 np.savetxt(csv_path, roc_table, delimiter=';', header='fpr;tpr;thresholds', comments='')
-                print_color(f"  ROC plot saved to  :{save_to}\n"
-                            f"  ROC table saved to :{csv_path}", 'b')
-            else:
-                print_color(f"  ROC plot saved to  :{save_to}", 'b')
+                if _allow_save_print(print_policy):
+                    print_color(f"  ROC table saved to  :{csv_path}", 'b')
         except Exception as e:
             print_color(f"Failed to save ROC outputs to {save_to}: {e}", 'r')
 
@@ -270,6 +275,10 @@ def draw_confusion_matrix(cm, **kwargs):
     """Draw a 2x2 confusion matrix with optional rates and heat coloring.
     Expected layout is [[tn, fp], [fn, tp]].
     """
+    def _allow_save_print(policy) -> bool:
+        policy = 'all' if policy is None else str(policy).strip().lower()
+        return policy in {'all', 'save'}
+
     cm = np.asarray(cm, dtype=np.float64)
     if cm.shape != (2, 2):
         raise ValueError(f"confusion matrix must have shape (2, 2), got {cm.shape}")
@@ -341,7 +350,8 @@ def draw_confusion_matrix(cm, **kwargs):
         try:
             save_to.parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_to, dpi=dpi)
-            print_color(f"  Confusion matrix saved to :{save_to}", 'b')
+            if _allow_save_print(kwargs.get('print_policy', 'all')):
+                print_color(f"  Confusion matrix saved to :{save_to}", 'b')
         except Exception as e:
             print_color(f"Failed to save confusion matrix to {save_to}: {e}", 'r')
 
@@ -353,6 +363,9 @@ def draw_confusion_matrix(cm, **kwargs):
 
 def plot_timeline(csv_path, t_span=None, **kwargs):
     """Plot one stream timeline CSV produced by the stream analysis flow."""
+    def _allow_save_print(policy) -> bool:
+        policy = 'all' if policy is None else str(policy).strip().lower()
+        return policy in {'all', 'save'}
 
     BASE_TICK = 60.0 #s
     def _time_to_seconds(value):
@@ -476,6 +489,7 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
     title = kwargs.get('title', _default_title())
     x_format = kwargs.get('x_format', 'time_stamp')
     save_to = kwargs.get('save_to', None)
+    print_policy = kwargs.get('print_policy', 'all')
     show = bool(kwargs.get('show', save_to is None))
     threshold = float(kwargs.get('threshold', 0.5))
     smooth = max(1, int(kwargs.get('smooth', 1)))
@@ -588,7 +602,8 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
         try:
             save_to.parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_to, dpi=dpi)
-            print_color(f"  Timeline plot saved to :{save_to}", 'b')
+            if _allow_save_print(print_policy):
+                print_color(f"  Timeline plot saved to :{save_to}", 'b')
         except Exception as e:
             print_color(f"Failed to save timeline plot to {save_to}: {e}", 'r')
 
@@ -607,7 +622,6 @@ def tst_plot_timeline():
     plot_timeline(tst_f, ('14:45', '20:15'), plot_gt=True, gt_offset=0.5)
     plot_timeline(tst_f, ('19:45', '25:15'), plot_gt=True, gt_offset=0.5)
     plot_timeline(tst_f, ('24:45', '30:15'), plot_gt=True, gt_offset=0.5)
-
     pass
 
 

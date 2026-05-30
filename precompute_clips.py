@@ -73,20 +73,10 @@ from pathlib import Path
 from json_utils import load_json_data, list_json_sources
 from common.my_local_utils import print_color, as_collection
 from temporal_slicing_json import slice_json_stream, WINDOW_SEC, STRIDE_SEC
-from motion_feature_schema import (
-    DEFAULT_POOL_MODE,
-    DEFAULT_TEMP_KERNEL,
-    DEFAULT_TEMP_SMOOTHING,
-    FEATURE_SCHEMA_KEY,
-    SOURCE_CACHES_KEY,
-    TEMPORAL_SCHEMA_KEY,
-    assert_feature_schema_match,
-    build_cache_record,
-    get_clip_features_vec,
-    build_feature_schema,
-    load_cache_contract_compact,
-    build_temporal_schema,
-    pack_json_value,)
+from motion_feature_schema import (DEFAULT_POOL_MODE,  DEFAULT_TEMP_KERNEL, DEFAULT_TEMP_SMOOTHING,
+                                   FEATURE_SCHEMA_KEY, SOURCE_CACHES_KEY, TEMPORAL_SCHEMA_KEY,
+                                   assert_feature_schema_match, build_cache_record, get_clip_features_vec, pack_json_value,
+                                   build_feature_schema, load_cache_contract_compact, build_temporal_schema )
 
 
 #* Defaults (ToDo config later if needed)

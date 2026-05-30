@@ -1,3 +1,12 @@
+""" Project batch helpers for cache building, model train/test runs,
+    and result aggregation.
+    Usage:
+    - build caches from JSON directories with `build_cache_batch(...)`
+    - run end-to-end train/test flows with `train_models(...)` or `train_test_study(...)`
+    - rerun tests for existing models with `test_models(...)`
+    - collect summary tables with `sum_all_results(...)`
+"""
+
 import json, pickle, glob
 import re
 from pathlib import Path
@@ -25,21 +34,17 @@ DEFAULT_REG_MODEL = Path("work_dirs/json_models/win-study/260414-1721_J-RWL_25ft
 
 
 def build_cache_batch(json_dirs, output_path, **kwargs):
-    """Build train/test caches for multiple JSON dirs using one shared config."""
+    """ Build train/test caches for one or more dataset dirs.
+    Usage:
+        - pass one dir or a list of dirs in json_dirs
+        - use `kwargs` to override the shared cache-build config for the whole batch
+    """
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
-    base_args = {'cache_name': None,
-                 'split_dir': None,
-                 'new_split': False,
-                 'test_ratio': TEST_RATIO,
-                 'random_seed': RANDOM_SEED,
-                 'window': WINDOW_SEC,
-                 'stride': STRIDE_SEC,
-                 'allow_empty': False,
-                 'pure_motion': False,
-                 'legacy': False,
-                 'no_temp_smooth': False,
-                 'json_type': DEFAULT_TYPE,}
+    base_args = {'cache_name': None, 'split_dir': None, 'new_split': False, 'test_ratio': TEST_RATIO,
+                 'random_seed': RANDOM_SEED, 'window': WINDOW_SEC, 'stride': STRIDE_SEC,
+                 'allow_empty': False, 'pure_motion': False, 'legacy': False,
+                 'no_temp_smooth': False, 'json_type': DEFAULT_TYPE,}
     base_args.update(kwargs)
 
     built = []
@@ -62,9 +67,13 @@ def build_cache_batch(json_dirs, output_path, **kwargs):
 
 
 def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs):
-    """Train models for all `*_train.npz` in `cache_dir` and run dataset/stream tests."""
+    """ Train every `*_train.npz` cache in a directory and run post-training tests.
+    :param cache_dir: should contain matching *_train.npz/*_test.npz files
+    optional:  `ds_tests` and `stm_tests` add shared dataset and stream evaluations
+    """
 
     def _resolve_npz_inputs(inputs, base_dir: Path) -> list[Path]:
+        """Resolve NPZ files, dirs, or glob masks into one unique ordered list."""
         resolved = []
         seen = set()
         for item in as_collection(inputs or []):
@@ -94,9 +103,11 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
         return resolved
 
     def _dataset_tag(stem: str, split_suffix: str) -> str:
+        """Strip one split suffix from a cache stem."""
         return stem[:-len(split_suffix)] if stem.endswith(split_suffix) else stem
 
     def _best_model_info(model_dir: Path) -> tuple[Path, int]:
+        """Return the newest saved best-model checkpoint and its epoch number."""
         best_models = sorted(model_dir.glob("best_model.*.pt"))
         if not best_models:
             raise FileNotFoundError(f"No best_model.*.pt found in {model_dir}")
@@ -104,12 +115,14 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
         return bm, int(bm.stem.split(".")[-1])
 
     def _run_dataset_test(model_path: Path, test_npz: Path, out_dir: Path):
+        """Run one clip-level dataset test and save its summary."""
         raw_tag = get_exporting_name(model_path, test_npz, 'raw', unit='clip')
         summary_name = get_exporting_name(model_path, test_npz, 'summary', unit='clip')
         res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag)
         analyze_clip_test(res['path'], out_path=out_dir, output_name=summary_name, show_roc=False)
 
     def _run_stream_test(model_path: Path, test_npz: Path, out_dir: Path):
+        """Run one stream-level test and save stream-analysis outputs."""
         raw_tag = get_exporting_name(model_path, test_npz, 'raw', unit='stream')
         summary_name = get_exporting_name(model_path, test_npz, 'summary', unit='stream')
         events_name = f"{get_exporting_name(model_path, test_npz, 'events')}.json"
@@ -144,6 +157,7 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
             print(f"[WARN] Training failed for {train_cache.name}: {type(exc).__name__}: {exc}")
             continue
 
+        # Always evaluate the model on its own paired `_test` cache before shared cross-tests.
         own_test = cache_dir/f"{train_tag}_test.npz"
         if own_test.is_file():
             try:
@@ -176,7 +190,12 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
 
 
 def test_models(models, general_tests=None, stream_tests=None, **kwargs):
-    """ Run own-test, shared dataset tests, and shared stream tests for trained models."""
+    """Run tests for existing trained models without retraining them.
+
+    Usage:
+    - pass one model dir, one checkpoint path, or a list of them in `models`
+    - optional `general_tests` / `stream_tests` add shared dataset and stream evaluations
+    """
 
     def _dataset_tag(stem: str, split_suffix: str) -> str:
         """Strip one split suffix from a cache stem."""
@@ -289,6 +308,7 @@ def test_models(models, general_tests=None, stream_tests=None, **kwargs):
 
         dataset_tests = []
         seen = set()
+        # Prefer the model's paired own-test cache, then add any extra requested dataset tests once.
         if own_test.is_file():
             dataset_tests.append((own_test, False))
             seen.add(str(own_test.resolve()))
@@ -323,7 +343,12 @@ def test_models(models, general_tests=None, stream_tests=None, **kwargs):
 
 
 def run_core_regression_suite(phase='refactor', **kwargs):
-    """Run clip/video regression outputs from cache NPZ files."""
+    """Run one fixed clip/video regression suite and collect the generated outputs.
+
+    Usage:
+    - use the default regression model, or override it with `model_path=...`
+    - results are written under `out_root/<phase>/evaluation_core`
+    """
     model_path = Path(kwargs.get('model_path', DEFAULT_REG_MODEL))
     out_root = Path(kwargs.get('out_root', "work_dirs/json_models/testing")) / phase / 'evaluation_core'
     show_roc = bool(kwargs.get('show_roc', False))
@@ -348,7 +373,12 @@ def run_core_regression_suite(phase='refactor', **kwargs):
 
 
 def train_test_study(cache_dir: str | Path, **kwargs): #92 -> 63
-    """ Train all `*_train.npz` caches in a directory and run clip/video tests."""
+    """Train every cache in a study directory and run clip/video evaluations.
+
+    Usage:
+    - point `cache_dir` at a directory of `*_train.npz` study caches
+    - by default, reusable existing runs are skipped when a usable model already exists
+    """
 
     def _dataset_tag(stem:str, split_suffix:str) -> str:
         """Strip the split suffix from a cache stem."""
@@ -420,6 +450,7 @@ def train_test_study(cache_dir: str | Path, **kwargs): #92 -> 63
         if train_tag.startswith(JOINT_DS):
             joint_test = own_test
 
+        # Each run is tested on its own cache and, when available, the matching joint cache.
         test_targets = []
         for p in (own_test, joint_test):
             if p not in test_targets:
@@ -441,7 +472,13 @@ def train_test_study(cache_dir: str | Path, **kwargs): #92 -> 63
 
 
 def build_window_study(): # 80 -> 65
-    """  Small batch script for the window/stride cache study.
+    """Build one window/stride cache study batch.
+
+    Usage:
+    - uses the hard-coded `WINDOW_SETTINGS`
+    - builds per-dataset train/test caches, then merges them into one joint cache per setting
+
+    Small batch script for the window/stride cache study.
     Builds train/test caches for  RWF-2000 and  RLVS datasets
     using the existing split files in each dataset directory, then merges the
     matching train/test caches into a joint dataset per window/stride option.
@@ -451,7 +488,6 @@ def build_window_study(): # 80 -> 65
                        (1.2, 0.6),
                        (3.6, 1.2),
                        (5.0, 2.5),]
-
 
     def _fmt_num(x: float) -> str:
         """ Format numeric values for filenames, replacing '.' with 'o'."""
@@ -486,8 +522,12 @@ def build_window_study(): # 80 -> 65
             merge_cache_npz(built, STUDY_CACHE_DIR / _cache_name(JOINT_DS))
 
 
-def sum_all_results(work_dir: str | Path, **kwargs): #107
-    """ Collect all `*-summary.json` files under a study work dir into one table."""
+def sum_all_results(work_dir:str|Path, **kwargs): #107
+    """ Collect all summary JSON files under one work dir into one flat results table.
+    Usage:
+    :param work_dir: at a model/run root containing `*-summary.json` files
+    optional sort, save_json, and print_cli control output formatting and export
+    """
 
     def _parse_ds_tag(tag: str) -> tuple[str, str, str]:
         """Extract dataset short name, window, and stride from a cache/model tag."""
@@ -562,6 +602,8 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
         with summary_path.open("r") as f:
             summary = json.load(f)
 
+        # Summary files come from clip/video/stream paths, so the table normalizes them
+        # onto one shared row schema before sorting and printing.
         testing_set = summary.get('testing_set', {})
         test_cache = Path(testing_set.get('test_cache', summary.get('test_cache', '')))
         model_path = Path(summary.get('model', summary.get('model_path', '')))
@@ -628,6 +670,7 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
             for col in cols:
                 widths[col] = max(widths[col], len(str(row.get(col, ''))))
 
+        print('\n=== Summary Results ===')
         print(' | '.join(f'{header_labels[col]:<{widths[col]}}' for col in cols))
         print('-+-'.join('-' * widths[col] for col in cols))
         for row in display_rows:
@@ -667,8 +710,9 @@ def sum_all_results(work_dir: str | Path, **kwargs): #107
     return table
 
 def gen_tst():
+    """Run the hard-coded local end-to-end test flow used during development."""
     cache_dir = "data/cache/w30-15_um"
-    output_dir= "work_dirs/json_models/w30-15-um-3"
+    output_dir= "work_dirs/json_models/w30-15-um"
     stream_testing = ["cam-6-11-5_ft25_w30-15.npz",
                       "cam-6-11-8_FRes_Ana_ft25_w30-15.npz",
                       "cam-6-11-8_FRes_Erz_ft25_w30-15.npz"]
@@ -676,7 +720,7 @@ def gen_tst():
     train_models(cache_dir, output_dir, ds_tests=ds_testsing, stm_tests=stream_testing)
     sum_all_results(output_dir)
 
-
+#733(,20,4)
 if __name__ == "__main__":
     pass
     study_dir = 'win-study-tst'

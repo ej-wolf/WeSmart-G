@@ -11,6 +11,14 @@ DEFAULT_MIN_CLIPS = 2
 DEFAULT_EVAL_THRESHOLD = 0.5
 DEFAULT_THRESHOLD_RANGE = (0.0, 1.0, 0.01)
 
+PRINT_POLICY = 'all'
+# Shared evaluation print policy.
+# all     -> print both low-level save messages and the grouped evaluation summary
+# summary -> print only the grouped evaluation summary
+# save    -> print only low-level save messages
+# none    -> suppress evaluation-related printing
+# Summary printing is handled here in `evaluation_core`; save-time printing is
+# honored by lower-level plotting/export helpers such as those in `visual_util`.
 
 #* region Raw input / validation   --------------------------------------
 # -----------------------------------------------------------------------
@@ -120,9 +128,51 @@ def resolve_unique_output_file(path: Path | str, overwrite=False) -> Path:
     return get_unique_name(path)
 
 
-def _save_analyze_summary(summary, out_path:Path|str, overwrite=False):
+def _save_analyze_summary(summary, out_path:Path|str, overwrite=False, **kwargs):
+    def _rel_to_output_dir(path_value):
+        """Return one display path relative to the main output dir when possible."""
+        if path_value in {None, 'N/A'}:
+            return path_value
+        path_obj = Path(path_value)
+        if output_dir_path is None:
+            return str(path_obj)
+        try:
+            return str(path_obj.relative_to(output_dir_path))
+        except ValueError:
+            return path_obj.name if path_obj.parent == output_dir_path else str(path_obj)
+
+    def _print_evaluation_results():
+        """Print one compact evaluation outputs section."""
+        model_dir = Path(summary.get('model_path', '')).parent
+        model_tag, test_tag = get_test_title_lines(summary.get('model_path', None),
+                                                   summary.get('test_cache', None))
+        analysis_type = summary.get('analysis_mode', None) or 'N/A'
+
+        print(f"\n==== Evaluation for {model_tag} ===")
+        print(f"== Test data: {test_tag}")
+        print(f"== Test type: {analysis_type}")
+        if print_policy == 'save':
+            print(f"== Output dir: {output_dir}")
+        roc_plot = summary.get('roc_plot', None)
+        roc_csv_rel = save_summary.get('roc_csv', None)
+        if roc_plot not in {None, 'N/A'}:
+            print_color(f"\tROC plot image : {_rel_to_output_dir(roc_plot)}", 'b')
+        if roc_csv_rel not in {None, 'N/A'}:
+            print_color(f"\tROC table      : {_rel_to_output_dir(roc_csv_rel)}", 'b')
+        # print("\tAnalysis complete")
+        # print_color(f"  Summary json   : {_rel_to_output_dir(out_path)}", 'b')
+        print_color(f"\tSummary json   : {out_path.name}", 'b')
+        timeline_csvs_local = summary.get('timeline_csvs', None) or []
+        for timeline_csv in timeline_csvs_local:
+            print_color(f"\tTimeline CSV   : {_rel_to_output_dir(timeline_csv)}", 'b')
+        timeline_plots_local = summary.get('timeline_plots', None) or []
+        for timeline_plot in timeline_plots_local:
+            print_color(f"\tTimeline plot  : {_rel_to_output_dir(timeline_plot)}", 'b')
+
     """ Write one normalized summary JSON to out_path."""
     # TODO: Consider generalizing this into a common JSON report writer.
+    print_policy = str(kwargs.get('print_policy', PRINT_POLICY)).strip().lower()
+
     out_path = Path(out_path)
     if not out_path.parent.is_dir():
         print(f"[WARN] Bad out_path; {out_path.name} was not saved")
@@ -143,6 +193,7 @@ def _save_analyze_summary(summary, out_path:Path|str, overwrite=False):
     output_dir = summary.get('output_dir', None)
     if output_dir is None:
         output_dir = str(Path(out_path).parent)
+    output_dir_path = Path(output_dir) if output_dir is not None else None
     events_info = summary.get('events_info', None)
     timeline_csvs = summary.get('timeline_csvs', None)
     roc_csv = summary.get('roc_csv', None)
@@ -178,8 +229,8 @@ def _save_analyze_summary(summary, out_path:Path|str, overwrite=False):
 
     with out_path.open('w') as f:
         json.dump(serialize_json_data(save_summary), f, indent=2)
-    print("Analysis complete")
-    print_color(f"  Summary saved to   :{out_path}", 'b')
+    if print_policy in {'all', 'summary'}:
+        _print_evaluation_results()
     return out_path
 
 
@@ -541,15 +592,17 @@ def analyze_clip_scores(test_results: Path | str | dict, **kwargs):
     summary['output_dir'] = str(out_base.parent) if out_base is not None else None
 
     save_roc_csv = kwargs.get('roc_csv', True)
+    summary['roc_plot'] = roc_base.with_suffix('.png').name if roc_base is not None else None
     summary['roc_csv'] = _roc_csv_name(roc, roc_base, save_roc_csv)
     if kwargs.get('save_roc', True) and roc is not None and (roc_base is not None or bool(kwargs.get('show_roc', False))):
         plot_roc_curve(roc, save_to=roc_base, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
+                       print_policy=kwargs.get('print_policy', PRINT_POLICY),
                        title=kwargs.get('roc_title', "\n".join(get_test_title_lines(raw_res.get('model_path', None),
-                                                                                    raw_res.get('test_cache', None)))),)
+                                                                                    raw_res.get('test_cache', None)))), )
     return summary
 
 
-def analyze_clip_predictions(test_results:Path|str|dict, **kwargs):
+def analyze_clip_predictions(test_results:Path|str|dict, **kwargs): #552
     """Analyze thresholded clip/window predictions only and save clip summary output."""
     raw_res, results_path = _resolve_input(test_results)
     threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
@@ -582,12 +635,14 @@ def analyze_clip_predictions(test_results:Path|str|dict, **kwargs):
     summary['output_dir'] = str(out_base.parent) if out_base is not None else None
     summary['threshold_dir'] = thr_dir.name if thr_dir is not None else None
     save_roc_csv = kwargs.get('roc_csv', True)
+    summary['roc_plot'] = roc_base.with_suffix('.png').name if roc_base is not None else None
     summary['roc_csv'] = _roc_csv_name(True, roc_base, save_roc_csv)
 
     if thr_dir is not None:
         _save_analyze_summary(summary,
-                              thr_dir/out_base.with_suffix('.json').name,
-                              overwrite=bool(kwargs.get('overwrite', False)))
+                              thr_dir / out_base.with_suffix('.json').name,
+                              overwrite=bool(kwargs.get('overwrite', False)),
+                              print_policy=kwargs.get('print_policy', PRINT_POLICY))
     else:
         print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
     if kwargs.get('print', True):
@@ -657,12 +712,14 @@ def analyze_video_scores(test_res: Path | str | dict, **kwargs):
                                                          if out_base is not None else None)
     summary['output_dir'] = str(out_base.parent) if out_base is not None else None
     save_roc_csv = kwargs.get('roc_csv', True)
+    summary['roc_plot'] = roc_base.with_suffix('.png').name if roc_base is not None else None
     summary['roc_csv'] = _roc_csv_name(roc, roc_base, save_roc_csv)
 
     if kwargs.get('save_roc', True) and roc is not None and (roc_base is not None or bool(kwargs.get('show_roc', False))):
         plot_roc_curve(roc, save_to=roc_base, save_csv=bool(save_roc_csv), show=bool(kwargs.get('show_roc', False)),
+                       print_policy=kwargs.get('print_policy', PRINT_POLICY),
                        title=kwargs.get('roc_title', "\n".join(get_test_title_lines(raw_res.get('model_path', None),
-                                                                                    raw_res.get('test_cache', None)))),)
+                                                                                    raw_res.get('test_cache', None)))), )
     return summary
 
 
@@ -708,12 +765,14 @@ def analyze_video_predictions(test_res: Path | str | dict, **kwargs):
     summary['output_dir'] = str(out_base.parent) if out_base is not None else None
     summary['threshold_dir'] = thr_dir.name if thr_dir is not None else None
     save_roc_csv = kwargs.get('roc_csv', True)
+    summary['roc_plot'] = roc_base.with_suffix('.png').name if roc_base is not None else None
     summary['roc_csv'] = _roc_csv_name(True, roc_base, save_roc_csv)
 
     if thr_dir is not None:
         _save_analyze_summary(summary,
-                              thr_dir/out_base.with_suffix('.json').name,
-                              overwrite=bool(kwargs.get('overwrite', False)))
+                              thr_dir / out_base.with_suffix('.json').name,
+                              overwrite=bool(kwargs.get('overwrite', False)),
+                              print_policy=kwargs.get('print_policy', PRINT_POLICY))
     else:
         print("[WARN] Summary file wasn't saved; invalid or missing out_path")
     if kwargs.get('print', True):
@@ -789,4 +848,5 @@ def optimize_video_threshold(test_results: Path | str | dict, threshold_range=DE
 # endregion
 
 #547(1,3,) -> threshold dependency resolution -> 936
-# 936-> 865(3,1,1)-># 835(2,1,1)-> 833 ->822 -> pm 748(2,,)
+# 936-> 865(3,1,1)-># 835(2,1, 1)-> 833-> 822-> pm 748(2,,)
+# meta info refactoring 789(2,,)   // 854 

@@ -466,9 +466,9 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_
     np.savez_compressed(out_path, **save_payload)
 
     print(f"\n=== Testing run complete ===\n"
-          f"  Tested model : {test_model}\n"
-          f"  Tested set   : {test_cache}\n"
-          f"  Predictions saved to: {out_path}\n")
+          f"\tTested model : {test_model}\n"
+          f"\tTested set   : {test_cache}\n"
+          f"\tPredictions npz: {out_path.name}\n")
     return {'path': str(out_path), **save_payload}
 
 # --------------------------------------------------
