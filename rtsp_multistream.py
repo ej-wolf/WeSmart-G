@@ -42,11 +42,14 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from motion_feature_schema import build_clip_feature_vector, build_feature_schema
+from motion_feature_schema import get_clip_features_vec, build_feature_schema
 from tms_runtime import (
     TemporalWindowSpec,
+    TmsCandidate,
     collect_probe_window,
+    load_tms_runtimes,
     resolve_temporal_probes,
+    run_tms_candidates,
     temporal_probe_status_line,
 )
 
@@ -130,6 +133,7 @@ class StreamState:
     critical_low_buffer: bool = True
     temporal_probe_status: dict[str, dict[str, Any]] = field(default_factory=dict)
     temporal_probe_last_trigger_t: dict[str, float] = field(default_factory=dict)
+    tms_results: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Rolling window of YOLO-pose payloads in the same JSON-like format used by
     # the training data. This is pose metadata, not image pixels.
     sample_window: deque[dict[str, Any]] = field(init=False)
@@ -564,6 +568,7 @@ def write_latest_payload(output_dir: Path, state: StreamState, payload: dict[str
         "critical_low_buffer": bool(state.critical_low_buffer),
         "window_len": len(state.sample_window),
         "temporal_probes": state.temporal_probe_status,
+        "tms_results": state.tms_results,
         "latest_detection_count": int(state.latest_det_count),
         "latest_frame": payload,
         "window": list(state.sample_window),
@@ -852,6 +857,19 @@ def main() -> None:
           f"smooth={runtime_feature_schema['temp_smooth']} kernel={runtime_feature_schema['temp_kernel']} "
           f"pure_motion={runtime_feature_schema['pure_motion']} legacy={runtime_feature_schema['legacy']}",
           flush=True)
+
+    tms_runtimes = load_tms_runtimes(config,
+                                     config_path.parent,
+                                     runtime_feature_schema,
+                                     temporal_probes,
+                                     device)
+    if tms_runtimes:
+        print("[INFO] tms_models="
+              + ", ".join(f"{tag}:{runtime.model_path.name}@thr{runtime.threshold:.2f}"
+                          for tag, runtime in tms_runtimes.items()),
+              flush=True)
+    else:
+        print("[INFO] tms_models=disabled", flush=True)
     print(f"[INFO] capture_backend={str(capture_cfg.get('backend', 'ffmpeg'))} "
           f"loop_files={loop_files} play_in_realtime={play_in_realtime}",
           flush=True)
@@ -915,6 +933,7 @@ def main() -> None:
                 results = yolo(frames, conf=conf, verbose=False, imgsz=imgsz, half=half)
                 if not isinstance(results, list):
                     results = [results]
+                ready_tms_candidates: list[TmsCandidate] = []
 
                 for item, result in zip(batch, results):
                     detections = result_to_detection_list(result, conf_thresh=conf, ignored_classes=ignored_classes)
@@ -948,7 +967,7 @@ def main() -> None:
                                 ready_probe_windows.append((spec, frames))
                     for spec, frames in ready_probe_windows:
                         try:
-                            clip_vec = build_clip_feature_vector(
+                            clip_vec = get_clip_features_vec(
                                 frames,
                                 pure_motion=bool(runtime_feature_schema["pure_motion"]),
                                 legacy=bool(runtime_feature_schema["legacy"]),
@@ -966,12 +985,22 @@ def main() -> None:
                                 item.state.temporal_probe_status.setdefault(spec.tag, {})
                                 item.state.temporal_probe_status[spec.tag]["feature_dim"] = int(clip_vec.shape[0])
                                 item.state.temporal_probe_status[spec.tag]["feature_error"] = ""
+                            if spec.tag in tms_runtimes:
+                                ready_tms_candidates.append(
+                                    TmsCandidate(
+                                        tag=spec.tag,
+                                        state=item.state,
+                                        feature_vec=clip_vec,
+                                        latest_t=float(payload["t"]),
+                                    )
+                                )
                     # `sample_window` is the rolling pose-payload history. A TMS
                     # RGB model should not use this deque directly unless it was
                     # trained on pose payloads; add a separate raw-frame deque
                     # if it needs clips.
                     # TODO: Add TMS-ready temporal batching here, using the
                     # rolling payload window stored in item.state.sample_window.
+                run_tms_candidates(ready_tms_candidates, tms_runtimes)
 
             now = time.monotonic()
             if display_enabled and now - last_display_time >= display_interval_sec:

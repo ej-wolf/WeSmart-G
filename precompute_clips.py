@@ -73,21 +73,10 @@ from pathlib import Path
 from json_utils import load_json_data, list_json_sources
 from common.my_local_utils import print_color, as_collection
 from temporal_slicing_json import slice_json_stream, WINDOW_SEC, STRIDE_SEC
-from motion_feature_schema import (
-    DEFAULT_POOL_MODE,
-    DEFAULT_TEMP_KERNEL,
-    DEFAULT_TEMP_SMOOTHING,
-    FEATURE_SCHEMA_KEY,
-    SOURCE_CACHES_KEY,
-    TEMPORAL_SCHEMA_KEY,
-    assert_feature_schema_match,
-    build_cache_record,
-    build_clip_feature_vector,
-    build_feature_schema,
-    load_cache_contract_compat,
-    build_temporal_schema,
-    pack_json_value,
-)
+from motion_feature_schema import (DEFAULT_POOL_MODE,  DEFAULT_TEMP_KERNEL, DEFAULT_TEMP_SMOOTHING,
+                                   FEATURE_SCHEMA_KEY, SOURCE_CACHES_KEY, TEMPORAL_SCHEMA_KEY,
+                                   assert_feature_schema_match, build_cache_record, get_clip_features_vec, pack_json_value,
+                                   build_feature_schema, load_cache_contract_compact, build_temporal_schema )
 
 
 #* Defaults (ToDo config later if needed)
@@ -196,7 +185,7 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158
             if clip['label'] is None:
                 continue
             #* extract all the features and compose them into features vector
-            clip_feat = build_clip_feature_vector(
+            clip_feat = get_clip_features_vec(
                 clip['frames'],
                 pure_motion=bool(feature_schema['pure_motion']),
                 legacy=bool(feature_schema['legacy']),
@@ -436,7 +425,7 @@ def cache_info(path:str|Path, **kwargs):
 
     path = Path(path)
     data = np.load(path, allow_pickle=True)
-    cache_contract, used_legacy_contract = load_cache_contract_compat(path)
+    cache_contract, used_legacy_contract = load_cache_contract_compact(path)
     feature_schema = dict(cache_contract['feature_schema'])
     temporal_schema = dict(cache_contract['temporal_schema'])
     source_caches = list(cache_contract['source_caches'])
