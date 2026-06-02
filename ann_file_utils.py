@@ -306,7 +306,7 @@ def main_cli() -> None:
         build_joint_split(root_video, split_name=split)
     print("Done.")
 
-
+#322(0,4,2); 309(2,4,2)
 if __name__ == "__main__":
 
 
@@ -326,4 +326,4 @@ if __name__ == "__main__":
     # proc_lib(RLVS_root, RLVS_dir_ls)
     main_local()
 
-#322(0,4,2)
+
