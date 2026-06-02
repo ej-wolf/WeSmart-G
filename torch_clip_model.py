@@ -19,8 +19,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 #* Project import
 from common.my_local_utils import print_color
-# from evaluation_tools import (analyze_clip_test, analyze_video_test, print_test_report plot_roc_curve)
-import evaluation_tools as evl
+# from evaluation_core import analyze_clip_test, analyze_video_test
+from evaluation_core import analyze_clip_test, analyze_video_test
+from evaluation_cli import print_test_report
+from stream_analysis import analyze_stream_test
 from motion_feature_schema import (
     assert_feature_schema_match,
     load_cache_contract_compact,
@@ -379,7 +381,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
 
 def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_mode=False, **kwargs):
     """Run model inference on a cache NPZ and save raw prediction arrays.
-        By default the saved NPZ uses one unified format that includes any available
+        By default, the saved NPZ uses one unified format that includes any available
         grouping/timing metadata needed for clip/video/stream analysis.
         `pure_clips=True` saves one minimal clip-only payload for batch throughput.
         parameters:
@@ -486,12 +488,12 @@ def test_test(test_cache:str|Path, test_model:str|Path, **kwargs):
         eval_mode = 'video' if kwargs.get('video_mode', False) else 'clip'
 
     if eval_mode == 'clip':
-        report = evl.analyze_clip_test(res['path'], show_roc=kwargs.get('show', False))
+        report = analyze_clip_test(res['path'], show_roc=kwargs.get('show', False))
     elif eval_mode == 'video':
-        report = evl.analyze_video_test(res['path'], show_roc=kwargs.get('show', False))
+        report = analyze_video_test(res['path'], show_roc=kwargs.get('show', False))
     else:
-        report = evl.analyze_stream_test(res['path'], show_roc=kwargs.get('show', False))
-    evl.print_test_report(report)
+        report = analyze_stream_test(res['path'], show_roc=kwargs.get('show', False))
+    print_test_report(report)
 
 #*
 def train_rwd_n_rlvs():
@@ -502,22 +504,22 @@ def train_rwd_n_rlvs():
     #* Test on RWF test-set
     res = run_testing(d/'RWF_test.npz', output_path/'model.pt')
     if res is not None:
-        report = evl.analyze_clip_test(res['path'], show_roc=True, print=True)
+        report = analyze_clip_test(res['path'], show_roc=True, print=True)
     #* Test on RLVS train-set
     res = run_testing(d/'RLVS_train.npz', output_path/'model.pt')
     if res is not None:
-        report = evl.analyze_clip_test(res['path'], show_roc=True)
+        report = analyze_clip_test(res['path'], show_roc=True)
 
     #* train on RLVS data
     output_path = run_training(d/"RLVS_train.npz", tag="TMS-18f_RLVS", split_ratio=0.85, split_seed=21)
     #* Test on RLVS test-set
     res = run_testing(d/'RLVS_test.npz', output_path/'model.pt')
     if res is not None:
-        report = evl.analyze_clip_test(res['path'], show_roc=True, print=True)
+        report = analyze_clip_test(res['path'], show_roc=True, print=True)
     # * Test on RLVS train-set
     res = run_testing(d/'RWF_train.npz', output_path/'model.pt')
     if res is not None:
-        report = evl.analyze_clip_test(res['path'], show_roc=True)
+        report = analyze_clip_test(res['path'], show_roc=True)
 
 
 def train_joint():
@@ -540,7 +542,7 @@ def train_joint():
     #* Test on RWF test-set
     res = run_testing(tst_j, output_path/'model.pt')
     if res is not None:
-        report = evl.analyze_clip_test(res['path'], show_roc=True, print=True)
+        report = analyze_clip_test(res['path'], show_roc=True, print=True)
 
 
 if __name__ == '__main__':

@@ -51,7 +51,8 @@ from pathlib import Path
 import argparse
 from common.my_local_utils import print_color
 from torch_clip_model import run_training, run_testing
-from evaluation_tools import analyze_clip_test, analyze_video_test, analyze_stream_test
+from evaluation_core import analyze_clip_test, analyze_video_test
+from stream_analysis import analyze_stream_test
 
 
 def _kwargs_from_args(args, names):

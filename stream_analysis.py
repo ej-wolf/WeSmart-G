@@ -7,10 +7,10 @@ from common.my_local_utils import print_color, serialize_json_data, resolve_outp
 from project_utils import get_exporting_name, get_test_title_lines
 from visual_util import plot_timeline
 from evaluation_core import (DEFAULT_ROC_RES, DEFAULT_EVAL_THRESHOLD, PRINT_POLICY, DEFAULT_THRESHOLD_RANGE,
-                             _cm_dict, _companion_summary_name, _get_eval_arrays, _resolve_input, _roc_summary,
-                             _save_analyze_summary, _support_counts,
+                             cm_dict, companion_summary_name, get_eval_arrays, resolve_input, roc_summary,
+                             save_analyze_summary, support_counts,
                              analyze_clip_predictions, analyze_clip_scores, binary_metrics, iter_thresholds,
-                             resolve_threshold_dir, resolve_unique_output_file, _require_prob_scores, )
+                             resolve_threshold_dir, resolve_unique_output_file, require_prob_scores, )
 
 STREAM_MATCH_MIN_OVERLAP = 1e-9
 STREAM_MATCH_MAX_LAG = None
@@ -18,7 +18,7 @@ STREAM_MAX_EVENT_GAP = 1
 DEFAULT_REG_MODEL = Path("work_dirs/json_models/win-study/260414-1721_J-RWL_25ft_3w-1o5-stream-tst/best_model.148.pt")
 
 
-def _build_stream_events(mask, t_frm, step, max_event_gap=STREAM_MAX_EVENT_GAP):
+def build_stream_events(mask, t_frm, step, max_event_gap=STREAM_MAX_EVENT_GAP):
     """ Merge consecutive positive timeline rows into event segments."""
     mask = np.asarray(mask, dtype=bool)
     t_frm = np.asarray(t_frm, dtype=np.float64)
@@ -62,7 +62,7 @@ def _build_stream_events(mask, t_frm, step, max_event_gap=STREAM_MAX_EVENT_GAP):
     return events #46
 
 
-def _event_overlap(gt_event, pred_event):
+def event_overlap(gt_event, pred_event):
     """Return overlap duration and overlap ratio normalized by GT duration."""
     start = max(float(gt_event['start']), float(pred_event['start']))
     end = min(float(gt_event['end']), float(pred_event['end']))
@@ -71,7 +71,7 @@ def _event_overlap(gt_event, pred_event):
     return overlap, overlap / gt_dur
 
 
-def _match_stream_events(gt_events, pred_events, min_overlap, max_lag):
+def match_stream_events(gt_events, pred_events, min_overlap, max_lag):
     """Greedy match of predicted stream events to GT events."""
     used_pred = set()
     detected_events, missed_events = [], []
@@ -81,7 +81,7 @@ def _match_stream_events(gt_events, pred_events, min_overlap, max_lag):
         for pred_idx, pred_event in enumerate(pred_events):
             if pred_idx in used_pred:
                 continue
-            overlap, overlap_ratio = _event_overlap(gt_event, pred_event)
+            overlap, overlap_ratio = event_overlap(gt_event, pred_event)
             if overlap <= 0 or overlap_ratio < min_overlap:
                 continue
 
@@ -117,8 +117,8 @@ def _match_stream_events(gt_events, pred_events, min_overlap, max_lag):
 
 def process_stream_inputs(test_res, threshold: float, **kwargs):
     """Load and normalize raw stream results into one grouped analysis context."""
-    raw_res, res_path = _resolve_input(test_res)
-    y_true, y_pred, scores, score_name = _get_eval_arrays(raw_res, threshold=threshold)
+    raw_res, res_path = resolve_input(test_res)
+    y_true, y_pred, scores, score_name = get_eval_arrays(raw_res, threshold=threshold)
 
     required_meta = ('meta_video', 'meta_t_start', 'meta_t_end')
     missing = [key for key in required_meta if key not in raw_res]
@@ -225,13 +225,13 @@ def analyze_single_stream(stream_ctx, video_group):
 
     timeline_step = _timeline_step()
     cm_metrics = binary_metrics(win_labels, win_pred)
-    cm_clips = _cm_dict(cm_metrics['confusion_matrix'])
+    cm_clips = cm_dict(cm_metrics['confusion_matrix'])
     fp_time = cm_clips['fp'] * timeline_step
     miss_time = cm_clips['fn'] * timeline_step
 
-    gt_events = _build_stream_events(win_labels == 1, t_frm, timeline_step, max_event_gap=stream_ctx['max_event_gap'])
-    pred_events = _build_stream_events(win_pred == 1, t_frm, timeline_step, max_event_gap=stream_ctx['max_event_gap'])
-    detected_events, missed_events, false_events = _match_stream_events(
+    gt_events = build_stream_events(win_labels == 1, t_frm, timeline_step, max_event_gap=stream_ctx['max_event_gap'])
+    pred_events = build_stream_events(win_pred == 1, t_frm, timeline_step, max_event_gap=stream_ctx['max_event_gap'])
+    detected_events, missed_events, false_events = match_stream_events(
                                                         gt_events, pred_events,
                                                         min_overlap=stream_ctx['match_min_overlap'],
                                                         max_lag=stream_ctx['match_max_lag'],
@@ -295,7 +295,7 @@ def _build_stream_event_summary(stream_ctx, video_results):
                     'model_path': stream_ctx['raw_res'].get('model_path', None),
                     'test_cache': stream_ctx['raw_res'].get('test_cache', None),
                     'num_clips' : len(stream_ctx['y_true']),
-                    'support_clips': _support_counts(stream_ctx['y_true']),
+                    'support_clips': support_counts(stream_ctx['y_true']),
                     'num_videos': len(video_results),
                     'cm_clips': agg_cm,
                     'false_positive_time': total_fp_time,
@@ -322,7 +322,7 @@ def _build_stream_event_summary(stream_ctx, video_results):
 def get_stream_summary(stream_ctx, video_results, **kwargs):
     """Aggregate per-video stream reports and attach clip/window ROC info."""
     summary = _build_stream_event_summary(stream_ctx, video_results)
-    roc, roc_info = _roc_summary(stream_ctx['y_true'], stream_ctx['scores'], stream_ctx['score_name'],
+    roc, roc_info = roc_summary(stream_ctx['y_true'], stream_ctx['scores'], stream_ctx['score_name'],
                                 max_resolution=kwargs.get('max_resolution', DEFAULT_ROC_RES), )
     summary.update(roc_info)
     return summary, roc
@@ -358,8 +358,8 @@ def _stream_objective(row: dict, mode='event_f1') -> tuple[float, tuple]:
 
 def optimize_stream_threshold(test_results: Path | str | dict, threshold_range=DEFAULT_THRESHOLD_RANGE, mode='event_f1', **kwargs):
     """ Sweep thresholds for stream event analysis and return the best operating point."""
-    raw_res, res_path = _resolve_input(test_results)
-    _require_prob_scores(raw_res)
+    raw_res, res_path = resolve_input(test_results)
+    require_prob_scores(raw_res)
     thresholds = iter_thresholds(threshold_range)
 
     rows = []
@@ -389,7 +389,7 @@ def optimize_stream_threshold(test_results: Path | str | dict, threshold_range=D
                'false_positive_time': float(summary.get('false_positive_time', 0.0)),
                'miss_time': float(summary.get('miss_time', 0.0)),
                'num_videos': int(summary.get('num_videos', 0)),
-               'support_clips': _support_counts(stream_ctx['y_true']),
+               'support_clips': support_counts(stream_ctx['y_true']),
                }
         objective, tie_key = _stream_objective(row, mode=mode)
         row['objective'] = float(objective)
@@ -537,7 +537,7 @@ def analyze_stream_events(test_res:Path|str|dict, **kwargs):
         summary['roc_csv'] = 'N/A'
 
     if summary_path is not None:
-        _save_analyze_summary(summary, summary_path, overwrite=overwrite,
+        save_analyze_summary(summary, summary_path, overwrite=overwrite,
                               print_policy=kwargs.get('print_policy', PRINT_POLICY))
     else:
         print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
@@ -551,13 +551,13 @@ def analyze_stream_events(test_res:Path|str|dict, **kwargs):
 
 def analyze_stream_test(test_res:Path|str|dict, **kwargs):
     """ Run clip/window score analysis, clip predictions, and stream event analysis."""
-    raw_res, _ = _resolve_input(test_res)
+    raw_res, _ = resolve_input(test_res)
     out_name = kwargs.get('output_name',
                           get_exporting_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
                                                    'summary', unit='stream'))
     threshold_dir = kwargs.get('threshold_dir', None)
     if threshold_dir is None:
-        _, res_path = _resolve_input(test_res)
+        _, res_path = resolve_input(test_res)
         if res_path is not None:
             out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
             if out_base is not None:
@@ -571,7 +571,7 @@ def analyze_stream_test(test_res:Path|str|dict, **kwargs):
 
     clip_kwargs = dict(kwargs)
     clip_kwargs['print'] = False
-    clip_kwargs['output_name'] = _companion_summary_name(out_name, 'clip')
+    clip_kwargs['output_name'] = companion_summary_name(out_name, 'clip')
     clip_kwargs['roc_mode_code'] = 'stm'
     if threshold_dir is not None:
         clip_kwargs['threshold_dir'] = threshold_dir

@@ -15,7 +15,8 @@ from types import SimpleNamespace
 from precompute_clips import (build_cache_from_json, merge_cache_npz, WINDOW_SEC, STRIDE_SEC,
                               TEST_RATIO, RANDOM_SEED, DEFAULT_TYPE, _run_build_cache_ds)
 from tms_trainer import run_training, run_testing
-from evaluation_tools import analyze_clip_test, analyze_video_test, analyze_stream_test, _support_pair
+from evaluation_core import analyze_clip_test, analyze_video_test, support_pair
+from stream_analysis import analyze_stream_test
 from common.my_local_utils import as_collection, get_unique_name
 from project_utils import get_exporting_name
 
@@ -617,10 +618,10 @@ def sum_all_results(work_dir:str|Path, **kwargs): #107
 
         if unit.startswith('video'):
             samples = testing_set.get('videos_num', None)
-            support = _support_pair(testing_set.get('videos_support', None))
+            support = support_pair(testing_set.get('videos_support', None))
         else:
             samples = testing_set.get('clips_num', summary.get('num_samples', None))
-            support = _support_pair(testing_set.get('clips_support', summary.get('support', None)))
+            support = support_pair(testing_set.get('clips_support', summary.get('support', None)))
         support_str = f'{support[0]}/{support[1]}' if support is not None else 'N/A'
 
         cm = summary.get('confusion_matrix', [[None, None], [None, None]])
