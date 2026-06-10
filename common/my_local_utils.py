@@ -213,7 +213,7 @@ def _make_unique_dir(root, base_name, **kwargs):
     return clip_dir, clip_name
 
 
-# ***** Compressing Utils  ***************************************************#
+#* region ***** Compressing Utils  ****************************************************#
 
 def zip_dir(target_dir:Path|str, method='file', protocol='zip', rm_policy='ask', mask=None):
     """ Compress a directory either child-by-child or as one archive.
@@ -359,6 +359,8 @@ def _extract_zip_file(zip_path: str | Path, out_dir: str | Path | None = None):
         zf.extractall(out_dir)
 
     return [out_dir / name for name in names]
+
+# endregion
 
 # ***** JSON  Utils  *********************************************************#
 def serialize_json_data(value):
