@@ -1,4 +1,4 @@
-""" CLI interface for video_to_json_bb_keypoints_folder
+""" CLI interface for video_to_stream_data
     Converts one or more videos into structured JSON dict.
     YOLO detector used for people detection and extracting
     bound-boxes and key-points at frame level.
@@ -23,7 +23,7 @@
 """
 import argparse
 from pathlib import Path
-from video_to_json_bb_keypoints_folder import process_video
+from video_to_stream_data import process_video
 from common.my_local_utils import print_color
 
 def main():

@@ -5,7 +5,7 @@
         - old HMC/Nana event annotations: metadata + event-name sections
         - UBI frame-label CSV annotations: one binary label per video frame
     Dataset annotation support is intentionally left as a TODO because it should
-    replace `ann_file_utils.py` later.
+    replace `class_annotations.py` later.
 """
 
 from __future__ import annotations
@@ -299,9 +299,15 @@ def _apply_header_meta(data: dict[str, Any], header: Iterable[str]) -> None:
         if key == 'video':
             data['video'] = value
         elif key == 'fps':
-            data['fps'] = float(value)
+            try:
+                data['fps'] = float(value)
+            except ValueError:
+                pass
         elif key == 'step':
-            data['step'] = int(float(value))
+            try:
+                data['step'] = int(float(value))
+            except ValueError:
+                pass
 
 
 # endregion
@@ -582,7 +588,7 @@ def _parse_fps_value(value: str) -> float:
 
 # region Dataset annotations
 
-# TODO: replace ann_file_utils.py with dataset annotation loaders/savers here.
+# TODO: replace class_annotations.py with dataset annotation loaders/savers here.
 # Dataset annotation format is currently: <relative/video/path> <int_label>.
 
 # endregion

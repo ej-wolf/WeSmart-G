@@ -148,13 +148,13 @@ def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
 # Step A: feature extraction
 # --------------------------------------------------
 
-def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158
+def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
     """ Precompute clip-level motion features from one or more JSON paths.
         (This is the core implementation for both dataset-based and stream build.
         TODO: later add optional time-based train/test slicing for one long stream.)
     Parameters
     json_paths : JSON path or an iterable of JSON file paths
-    out_path : output .npz file
+    out_path  : output .npz file
     allow_empty_lbl, window, stride: arguments passed forward to slice_json_stream
     """
     out_path = Path(out_path).with_suffix('.npz')
@@ -163,16 +163,13 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158
         raise ValueError("No JSON paths were provided")
 
     feature_schema = build_feature_schema(
-        pure_motion=kwargs.get('pure_motion', False),
-        legacy=kwargs.get('legacy', False),
-        temp_smooth=kwargs.get('temp_smooth', TEMPORAL_SMOOTHING),
-        temp_kernel=kwargs.get('temp_kernel', TEMP_KERNEL),
-        pool_mode=kwargs.get('pool_mode', POOL_MODE),
-    )
-    temporal_schema = build_temporal_schema(
-        kwargs.get('window', WINDOW_SEC),
-        kwargs.get('stride', STRIDE_SEC),
-    )
+                     pure_motion=kwargs.get('pure_motion', False),
+                     legacy=kwargs.get('legacy', False),
+                     temp_smooth=kwargs.get('temp_smooth', TEMPORAL_SMOOTHING),
+                     temp_kernel=kwargs.get('temp_kernel', TEMP_KERNEL),
+                     pool_mode=kwargs.get('pool_mode', POOL_MODE),
+                 )
+    temporal_schema = build_temporal_schema(kwargs.get('window', WINDOW_SEC), kwargs.get('stride', STRIDE_SEC),)
 
     feats, labels, meta = [], [], []
     for json_path in json_paths:
@@ -185,16 +182,14 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158
             if clip['label'] is None:
                 continue
             #* extract all the features and compose them into features vector
-            clip_feat = get_clip_features_vec(
-                clip['frames'],
-                pure_motion=bool(feature_schema['pure_motion']),
-                legacy=bool(feature_schema['legacy']),
-                temp_smooth=bool(feature_schema['temp_smooth']),
-                temp_kernel=int(feature_schema['temp_kernel']),
-                pool_mode=str(feature_schema['pool_mode']),
-                j_version=float(feature_schema['extractor_version']),
-            )
-
+            clip_feat = get_clip_features_vec( clip['frames'],
+                                 pure_motion=bool(feature_schema['pure_motion']),
+                                 legacy=bool(feature_schema['legacy']),
+                                 temp_smooth=bool(feature_schema['temp_smooth']),
+                                 temp_kernel=int(feature_schema['temp_kernel']),
+                                 pool_mode=str(feature_schema['pool_mode']),
+                                 j_version=float(feature_schema['extractor_version']),
+                                 )
             labels.append(int(clip['label']))
             feats.append(clip_feat)
             meta.append({'video': json_path.name,
@@ -206,15 +201,11 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158
     labels = np.asarray(labels, dtype=np.int64)
     #print_color(feats.shape)
     source_caches = [build_cache_record(out_path, feature_schema, temporal_schema)]
-    np.savez_compressed(out_path,
-                        X=feats,
-                        y=labels,
-                        meta=np.asarray(meta, dtype=object),
-                        **{
-                            FEATURE_SCHEMA_KEY: pack_json_value(feature_schema),
+    np.savez_compressed(out_path, X=feats, y=labels, meta=np.asarray(meta, dtype=object),
+                        **{ FEATURE_SCHEMA_KEY: pack_json_value(feature_schema),
                             TEMPORAL_SCHEMA_KEY: pack_json_value(temporal_schema),
-                            SOURCE_CACHES_KEY: pack_json_value(source_caches),
-                        },)
+                            SOURCE_CACHES_KEY: pack_json_value(source_caches),},
+                        )
 
     print_color(f'Saved {len(labels)} clips to {out_path}', 'b')
     return out_path

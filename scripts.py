@@ -1,14 +1,16 @@
 """ Project batch helpers for cache building, model train/test runs,
-    and result aggregation.
+    result aggregation, and small local utility flows.
     Usage:
     - build caches from JSON directories with `build_cache_batch(...)`
     - run end-to-end train/test flows with `train_models(...)` or `train_test_study(...)`
     - rerun tests for existing models with `test_models(...)`
     - collect summary tables with `sum_all_results(...)`
+    - run paired stream-JSON conversions with `run_stream_json_dual(...)`
 """
 
 import json, pickle, glob
 import re
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 #* Imports from local project
@@ -107,28 +109,28 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
         """Strip one split suffix from a cache stem."""
         return stem[:-len(split_suffix)] if stem.endswith(split_suffix) else stem
 
-    def _best_model_info(model_dir: Path) -> tuple[Path, int]:
+    def _best_model_info() -> tuple[Path, int]:
         """Return the newest saved best-model checkpoint and its epoch number."""
-        best_models = sorted(model_dir.glob("best_model.*.pt"))
+        best_models = sorted(run_dir.glob("best_model.*.pt"))
         if not best_models:
-            raise FileNotFoundError(f"No best_model.*.pt found in {model_dir}")
+            raise FileNotFoundError(f"No best_model.*.pt found in {run_dir}")
         bm = best_models[-1]
         return bm, int(bm.stem.split(".")[-1])
 
-    def _run_dataset_test(model_path: Path, test_npz: Path, out_dir: Path):
-        """Run one clip-level dataset test and save its summary."""
-        raw_tag = get_exporting_name(model_path, test_npz, 'raw', unit='clip')
-        summary_name = get_exporting_name(model_path, test_npz, 'summary', unit='clip')
-        res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag)
-        analyze_clip_test(res['path'], out_path=out_dir, output_name=summary_name, show_roc=False)
+    def _run_dataset_test():
+        """ Run one clip-level dataset test and save its summary."""
+        raw_tag = get_exporting_name(best_model, test_npz, 'raw', unit='clip')
+        summary_name = get_exporting_name(best_model, test_npz, 'summary', unit='clip')
+        res = run_testing(best_model, test_npz, out_dir=run_dir, output_tag=raw_tag)
+        analyze_clip_test(res['path'], out_path=run_dir, output_name=summary_name, show_roc=False)
 
-    def _run_stream_test(model_path: Path, test_npz: Path, out_dir: Path):
+    def _run_stream_test():
         """Run one stream-level test and save stream-analysis outputs."""
-        raw_tag = get_exporting_name(model_path, test_npz, 'raw', unit='stream')
-        summary_name = get_exporting_name(model_path, test_npz, 'summary', unit='stream')
-        events_name = f"{get_exporting_name(model_path, test_npz, 'events')}.json"
-        res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
-        analyze_stream_test(res['path'], out_path=out_dir, output_name=summary_name,
+        raw_tag = get_exporting_name(best_model, test_npz, 'raw', unit='stream')
+        summary_name = get_exporting_name(best_model, test_npz, 'summary', unit='stream')
+        events_name = f"{get_exporting_name(best_model, test_npz, 'events')}.json"
+        res = run_testing(best_model, test_npz, out_dir=run_dir, output_tag=raw_tag, video_mode=True)
+        analyze_stream_test(res['path'], out_path=run_dir, output_name=summary_name,
                             details_name=events_name, show_roc=False, plotting= 'save')
 
     cache_dir = Path(cache_dir)
@@ -153,7 +155,7 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
             if run_dir != model_dir:
                 run_dir.rename(model_dir)
                 run_dir = model_dir
-            best_model, _ = _best_model_info(run_dir)
+            best_model, _ = _best_model_info()
         except Exception as exc:
             print(f"[WARN] Training failed for {train_cache.name}: {type(exc).__name__}: {exc}")
             continue
@@ -162,7 +164,8 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
         own_test = cache_dir/f"{train_tag}_test.npz"
         if own_test.is_file():
             try:
-                _run_dataset_test(best_model, own_test, run_dir)
+                test_npz = own_test
+                _run_dataset_test()
             except Exception as exc:
                 print(f"[WARN] Own dataset test failed for {train_tag}: {type(exc).__name__}: {exc}")
         else:
@@ -170,13 +173,13 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
 
         for test_npz in ds_targets:
             try:
-                _run_dataset_test(best_model, test_npz, run_dir)
+                _run_dataset_test()
             except Exception as exc:
                 print(f"[WARN] Dataset test failed for {train_tag} on {test_npz.name}: {type(exc).__name__}: {exc}")
 
         for test_npz in stm_targets:
             try:
-                _run_stream_test(best_model, test_npz, run_dir)
+                _run_stream_test()
             except Exception as exc:
                 print(f"[WARN] Stream test failed for {train_tag} on {test_npz.name}: {type(exc).__name__}: {exc}")
 
@@ -202,23 +205,23 @@ def test_models(models, general_tests=None, stream_tests=None, **kwargs):
         """Strip one split suffix from a cache stem."""
         return stem[:-len(split_suffix)] if stem.endswith(split_suffix) else stem
 
-    def _resolve_model_ref(model_ref) -> tuple[Path, Path]:
+    def _resolve_model_ref(mdl_ref) -> tuple[Path, Path]:
         """Resolve a model ref to `(best_model_path, run_dir)`."""
-        path = Path(model_ref)
-        if path.is_file():
-            return path, path.parent
-        if path.is_dir():
-            best_models = sorted(path.glob("best_model.*.pt"))
+        mdl_ref = Path(mdl_ref)
+        if mdl_ref.is_file():
+            return mdl_ref, mdl_ref.parent
+        if mdl_ref.is_dir():
+            best_models = sorted(mdl_ref.glob("best_model.*.pt"))
             if best_models:
-                return best_models[-1], path
-            model_pt = path/'model.pt'
+                return best_models[-1], mdl_ref
+            model_pt = mdl_ref/'model.pt'
             if model_pt.is_file():
-                return model_pt, path
-            checkpoints = sorted(path.glob("checkpoint_ep-*.pt"))
+                return model_pt, mdl_ref
+            checkpoints = sorted(mdl_ref.glob("checkpoint_ep-*.pt"))
             if checkpoints:
-                return checkpoints[-1], path
-            raise FileNotFoundError(f"No model checkpoint found in {path}")
-        raise FileNotFoundError(path)
+                return checkpoints[-1], mdl_ref
+            raise FileNotFoundError(f"No model checkpoint found in {mdl_ref}")
+        raise FileNotFoundError(mdl_ref)
 
     def _threshold_dir(run_dir: Path) -> Path:
         """Resolve one shared threshold dir for the active batch threshold."""
@@ -295,11 +298,11 @@ def test_models(models, general_tests=None, stream_tests=None, **kwargs):
                             )
 
     tested = []
-    for model_ref in as_collection(models):
+    for mdl in as_collection(models):
         try:
-            best_model, run_dir = _resolve_model_ref(model_ref)
+            best_model, run_dir = _resolve_model_ref(Path(mdl))
         except Exception as exc:
-            print(f"[WARN] Bad model ref {model_ref}: {type(exc).__name__}: {exc}")
+            print(f"[WARN] Bad model ref {mdl}: {type(exc).__name__}: {exc}")
             continue
 
         cache_group = run_dir.parent.name
@@ -373,9 +376,8 @@ def run_core_regression_suite(phase='refactor', **kwargs):
     return outputs
 
 
-def train_test_study(cache_dir: str | Path, **kwargs): #92 -> 63
-    """Train every cache in a study directory and run clip/video evaluations.
-
+def train_test_study(cache_dir:str|Path, **kwargs): #92 -> 63
+    """ Train every cache in a study directory and run clip/video evaluations.
     Usage:
     - point `cache_dir` at a directory of `*_train.npz` study caches
     - by default, reusable existing runs are skipped when a usable model already exists
@@ -407,7 +409,7 @@ def train_test_study(cache_dir: str | Path, **kwargs): #92 -> 63
         return None
 
     def _run_one_test(test_npz:Path, test_mode: str):
-        """Run one test job and the matching analysis."""
+        """ Run one test job and the matching analysis."""
         output_tag = f"{get_exporting_name(best_model, test_npz, 'raw', unit=test_mode)}.npz"
         output_name = f"{get_exporting_name(best_model, test_npz, 'summary', unit=test_mode)}.json"
 
@@ -582,12 +584,12 @@ def sum_all_results(work_dir:str|Path, **kwargs): #107
         if  flag == 'model':
             return (_model_disp(row['model'])[0],)
         elif flag == 'win-str':
-            return (_num_or_inf(row['window']), _num_or_inf(row['stride']))
+            return _num_or_inf(row['window']), _num_or_inf(row['stride'])
         elif flag == 'trn-tst':
-            return (row['train ds'], row['test ds'])
+            return row['train ds'], row['test ds']
         elif flag == 'auc':
             auc = row['AUC']
-            return (1 if auc is None else 0, -(auc if auc is not None else 0.0))
+            return 1 if auc is None else 0, -(auc if auc is not None else 0.0)
         elif flag in {'clp-vid', 'clip-vid', 'vid-clp'}:
             return ({'clip': 0, 'video': 1}.get(row['unit'], 99),)
         else:
@@ -600,8 +602,8 @@ def sum_all_results(work_dir:str|Path, **kwargs): #107
 
     def _row_from_summary(summary_path: Path) -> dict:
         """Convert one summary json file into one flat table row."""
-        with summary_path.open("r") as f:
-            summary = json.load(f)
+        with summary_path.open("r") as fh:
+            summary = json.load(fh)
 
         # Summary files come from clip/video/stream paths, so the table normalizes them
         # onto one shared row schema before sorting and printing.
@@ -710,6 +712,29 @@ def sum_all_results(work_dir:str|Path, **kwargs): #107
 
     return table
 
+
+def run_stream_json_dual(data_dir, output_dir,tag=None, **kwargs):
+    """Run two stream-JSON conversions for one video dir: plain and `group 0`."""
+    # from video_to_json_bb_keypoints_folder import process_video
+    from video_to_stream_data import process_video
+    data_dir, output_dir = Path(data_dir),  Path(output_dir)
+
+    if not data_dir.is_dir():
+        raise NotADirectoryError(data_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # t_str = datetime.now().strftime("%y%m%d")
+    t_str =  tag if tag is not  None else datetime.now().strftime("%y%m%d") #    "260312"
+    dir_none = output_dir/(t_str + '_g-na')
+    dir_zero = output_dir/(t_str + '_g-0')
+    common_kwargs = {'sample_rate': kwargs.get('sample_rate', 5),
+                     'conf_thresh': kwargs.get('conf_thresh', 0.5),
+                     'model_path': kwargs.get('model_path', None),
+                     'zip_output': False}
+    process_video(data_dir, output_path=dir_none, **common_kwargs)
+    process_video(data_dir, output_path=dir_zero, default_group_tag=[0], **common_kwargs)
+
+
 def gen_tst():
     """Run the hard-coded local end-to-end test flow used during development."""
     cache_dir = "data/cache/w30-15_um"
@@ -721,7 +746,7 @@ def gen_tst():
     train_models(cache_dir, output_dir, ds_tests=ds_testsing, stm_tests=stream_testing)
     sum_all_results(output_dir)
 
-#733(,20,4)
+#733(,20,4)-> 755(,23,6)
 if __name__ == "__main__":
     pass
     study_dir = 'win-study-tst'
@@ -741,5 +766,13 @@ if __name__ == "__main__":
     # ds_testsing = ['J-All_ft25_w30-15_test.npz']
     # train_models(cache_dir, output_dir, ds_tests=ds_testsing, stm_tests=stream_testing)
     # sum_all_results(output_dir)
-    gen_tst()
+    # gen_tst()
+
+    d_d = "/mnt/local-data/Projects/Wesmart/Video-datasets/draft_set/tst_conv"
+    #op_d = "data/json_files/tst_conv/test_260611_batch"
+    op_d = "data/sanity-testing/json/"
+    run_stream_json_dual(d_d, op_d, '260611-no_imgsz'  )
+    run_stream_json_dual(d_d, op_d, '260312' )
+
+
 # 321(,6,2)->300(,6,2)   (23,6)

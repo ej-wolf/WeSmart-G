@@ -45,6 +45,7 @@ _EXPORTED_FILE_PATTERNS = ('*-summary.json',  '*_stream-events.json', '*.npz',
 _JSON_PATH_KEYS = {'cache_dir', 'events_info', 'model_path', 'new_run_dir', 'output_dir', 'raw_results',
                    'raw_results_path', 'ref_dir', 'ref_run_dir', 'report_path', 'roc_csv', 'test_cache', 'threshold_dir',
                    'timeline_csv', 'timeline_csvs', 'timeline_plot', 'timeline_plots',}
+_STREAM_VIDEO_SUFFIXES = {'.mp4', '.avi', '.mkv', '.mov', '.m4v'}
 
 #* this section used only for local printing, and has no effect on sanity testing
 SCI_FORMAT = {'low':1e-3, 'high':1e4}
@@ -147,7 +148,100 @@ def _resolve_tolerances(mode: str, override: dict[str, float] | None = None) -> 
     tolerances['profile'] = profile
     return tolerances
 
-# endregion
+
+def _iter_stream_json_files(dir_path: Path) -> dict[str, Path]:
+    """Map plain JSON filenames to paths for one directory."""
+    return {path.name: path for path in sorted(dir_path.iterdir())
+            if path.is_file() and path.suffix.lower() == '.json'}
+
+
+def _iter_stream_input_json_names(data_path: Path) -> list[str]:
+    """Resolve expected output JSON names from one video file or folder."""
+    if data_path.is_file():
+        if data_path.suffix.lower() not in _STREAM_VIDEO_SUFFIXES:
+            raise ValueError(f'Unsupported video input: {data_path}')
+        return [f'{data_path.stem}.json']
+    if not data_path.is_dir():
+        raise FileNotFoundError(data_path)
+    return [f'{path.stem}.json' for path in sorted(data_path.iterdir())
+            if path.is_file() and path.suffix.lower() in _STREAM_VIDEO_SUFFIXES]
+
+
+def _stream_json_cmp_score(row: dict[str, Any]) -> float:
+    """Rank failures by structural and annotation drift before numeric noise."""
+    return (
+        int(row['metadata']) * 1_000_000_000
+        + int(row['ann_intervals']) * 100_000_000
+        + int(row['ann_frames']) * 1_000_000
+        + int(row['frame_count']) * 500_000
+        + int(row['missing_extra']) * 50_000
+        + int(row['timestamps']) * 5_000
+        + int(row['det_counts']) * 500
+        + float(row['avg_abs']) * 10.0
+        + float(row['max_abs'])
+    )
+
+
+def _build_stream_json_cmp_row(file_name: str, ok: bool, cmp_report: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one nested compare report into one compact row."""
+    metadata = cmp_report.get('metadata', {})
+    frame_structure = cmp_report.get('frame_structure', {})
+    numeric = cmp_report.get('numeric', {})
+    annotations = cmp_report.get('annotations', {})
+
+    row = {'file': file_name,
+           'status': 'pass' if ok else 'fail',
+           'ok': bool(ok),
+           'metadata': len(metadata.get('unequal', {})),
+           'frame_count': int(frame_structure.get('frame_count') is not None),
+           'missing_extra': len(frame_structure.get('missing_frame_indices', [])) + len(frame_structure.get('extra_frame_indices', [])),
+           'timestamps': len(frame_structure.get('timestamp_mismatches', [])),
+           'det_counts': len(frame_structure.get('detection_count_mismatches', [])),
+           'ann_intervals': 0 if annotations.get('event_intervals_equal', True) else 1,
+           'ann_frames': len(annotations.get('frame_annotation_mismatches', [])),
+           'avg_abs': float(numeric.get('avg_abs', 0.0)),
+           'max_abs': float(numeric.get('max_abs', 0.0)),
+           'report': cmp_report,
+           }
+    row['score'] = _stream_json_cmp_score(row)
+    return row
+
+
+def _print_stream_json_verbose(file_report: dict[str, Any]) -> None:
+    """Print one concise expanded comparison block for a single file."""
+    report = file_report.get('report', {})
+    metadata = report.get('metadata', {})
+    frame_structure = report.get('frame_structure', {})
+    annotations = report.get('annotations', {})
+    numeric = report.get('numeric', {})
+    color = 'g' if file_report.get('ok', False) else 'r'
+
+    print_color(f"\n{file_report['file']} [{file_report['status']}]", color)
+    if metadata.get('unequal'):
+        print(f"  metadata keys: {', '.join(sorted(metadata['unequal']))}")
+    if frame_structure.get('frame_count'):
+        delta = frame_structure['frame_count']
+        print(f"  frame count: j1={delta.get('j1')} j2={delta.get('j2')}")
+    if frame_structure.get('missing_frame_indices'):
+        print(f"  missing frames: {len(frame_structure['missing_frame_indices'])} "
+              f"(first: {frame_structure['missing_frame_indices'][:5]})")
+    if frame_structure.get('extra_frame_indices'):
+        print(f"  extra frames: {len(frame_structure['extra_frame_indices'])} "
+              f"(first: {frame_structure['extra_frame_indices'][:5]})")
+    if frame_structure.get('timestamp_mismatches'):
+        print(f"  timestamp mismatches: {len(frame_structure['timestamp_mismatches'])} "
+              f"(first: {frame_structure['timestamp_mismatches'][:3]})")
+    if frame_structure.get('detection_count_mismatches'):
+        print(f"  detection-count mismatches: {len(frame_structure['detection_count_mismatches'])} "
+              f"(first: {frame_structure['detection_count_mismatches'][:3]})")
+    if not annotations.get('event_intervals_equal', True):
+        print("  event intervals: mismatch")
+    if annotations.get('frame_annotation_mismatches'):
+        print(f"  frame annotation mismatches: {len(annotations['frame_annotation_mismatches'])} "
+              f"(first: {annotations['frame_annotation_mismatches'][:3]})")
+    print(f"  numeric: avg_abs={_fmt_num(float(numeric.get('avg_abs', 0.0)))} "
+          f"max_abs={_fmt_num(float(numeric.get('max_abs', 0.0)))} "
+          f"path={numeric.get('max_path')}")
 
 #* region Run Execution Helpers
 def train_sanity_models(cache_dir, out_dir, *, ds_testing=None, stm_testing=None, **kwargs):
@@ -1011,6 +1105,150 @@ def _print_issues(issues: dict[str, Any], mode: str) -> None:  #149
 # endregion
 
 #* region Public Sanity API
+def cmp_stream_jsons(tst, ref, op_dir=None, **kwargs):
+    """Compare generated stream JSON dirs and optionally save one JSON report."""
+    from json_utils import compare_stream_json
+
+    tst = Path(tst)
+    ref = Path(ref)
+    op_dir = tst if op_dir is None else Path(op_dir)
+    if not tst.is_dir():
+        raise NotADirectoryError(tst)
+    if not ref.is_dir():
+        raise NotADirectoryError(ref)
+    op_dir.mkdir(parents=True, exist_ok=True)
+
+    selected_names = kwargs.pop('file_names', None)
+    tolerances = kwargs.pop('tolerances', None)
+    ignore_path_fields = bool(kwargs.pop('ignore_path_fields', True))
+    print_cli = bool(kwargs.pop('print_cli', False))
+    verbose = bool(kwargs.pop('verbose', False))
+    save_json = bool(kwargs.pop('save_json', True))
+    report_name = kwargs.pop('report_name', 'stream_json_sanity_report')
+
+    tst_files = _iter_stream_json_files(tst)
+    ref_files = _iter_stream_json_files(ref)
+    names = sorted(set(tst_files) & set(ref_files))
+    if selected_names is not None:
+        selected_names = set(as_collection(selected_names))
+        names = [name for name in names if name in selected_names]
+    files = []
+    for file_name in names:
+        ok, cmp_report = compare_stream_json(tst_files[file_name], ref_files[file_name],
+                                             tolerances=tolerances,
+                                             ignore_path_fields=ignore_path_fields)
+        files.append(_build_stream_json_cmp_row(file_name, ok, cmp_report))
+
+    tst_names = set(tst_files) if selected_names is None else set(name for name in selected_names if name in tst_files)
+    ref_names = set(ref_files) if selected_names is None else set(name for name in selected_names if name in ref_files)
+    report = {'status': 'pass' if (not (tst_names - ref_names) and not (ref_names - tst_names) and
+                                   all(item['ok'] for item in files)) else 'fail',
+              'data_path': str(tst),
+              'ref_dir': str(ref),
+              'output_dir': str(op_dir),
+              'missing_refs': sorted(tst_names - ref_names),
+              'extra_refs': sorted(ref_names - tst_names),
+              'files': files,
+              }
+    if save_json:
+        report_path = op_dir / f'{report_name}.json'
+        with report_path.open('w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2)
+        report['report_path'] = str(report_path)
+    if print_cli:
+        print_strm_json_cmp(report, verbose=verbose)
+    return report
+
+
+def stream_json_sanity(data_path, ref_dir, output_dir, **kwargs):
+    """Generate plain stream JSONs, compare them to references, and return one structured report."""
+    from video_to_stream_data import process_video
+
+    data_path = Path(data_path)
+    ref_dir = Path(ref_dir)
+    output_dir = Path(output_dir)
+    if not ref_dir.is_dir():
+        raise NotADirectoryError(ref_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    default_group_tag = kwargs.get('default_group_tag', kwargs.get('group_ann', [0]))
+
+    expected_jsons = _iter_stream_input_json_names(data_path)
+    occupied = [name for name in expected_jsons if (output_dir / name).exists()]
+    if occupied:
+        raise FileExistsError(f'output_dir already contains target JSON files: {", ".join(occupied)}')
+
+    process_kwargs = dict(kwargs)
+    for key in ('default_group_tag', 'group_ann', 'zip_output', 'zip', 'output_path', 'file_names'):
+        process_kwargs.pop(key, None)
+    process_video(data_path,
+                  output_path=output_dir,
+                  default_group_tag=default_group_tag,
+                  zip_output=False,
+                  **process_kwargs)
+
+    report = cmp_stream_jsons(output_dir, ref_dir, output_dir, file_names=expected_jsons, **kwargs)
+    report['data_path'] = str(data_path)
+    return report
+
+
+def print_strm_json_cmp(r, **kwargs):
+    """Print one compact stream JSON comparison table from `stream_json_sanity(...)`."""
+    rows = list(r.get('files', []))
+    verbose = bool(kwargs.get('verbose', False))
+    file_count = len(rows)
+
+    if r.get('status') == 'pass':
+        print_color(f"stream_json_sanity: pass ({file_count} files)", 'g')
+        if verbose:
+            for row in rows:
+                _print_stream_json_verbose(row)
+        return
+
+    print_color(f"stream_json_sanity: fail ({file_count} compared files)", 'r')
+    if r.get('missing_refs'):
+        print_color(f"missing refs: {', '.join(r['missing_refs'])}", 'r')
+    if r.get('extra_refs'):
+        print_color(f"extra refs: {', '.join(r['extra_refs'])}", 'r')
+
+    columns = [('file', 'file'), ('status', 'status'),  ('metadata', 'meta'),
+               ('ann_intervals', 'ann-int'), ('ann_frames', 'ann-frame'),
+               ('det_counts', 'det-cnt'), ('avg_abs', 'avg-abs'), ('max_abs', 'max-abs')]
+    widths = {key: len(label) for key, label in columns}
+    for row in rows:
+        widths['file'] = max(widths['file'], len(str(row['file'])))
+        widths['status'] = max(widths['status'], len(str(row['status'])))
+        widths['metadata'] = max(widths['metadata'], len(str(row['metadata'])))
+        widths['ann_intervals'] = max(widths['ann_intervals'], len(str(row['ann_intervals'])))
+        widths['ann_frames'] = max(widths['ann_frames'], len(str(row['ann_frames'])))
+        widths['det_counts'] = max(widths['det_counts'], len(str(row['det_counts'])))
+        widths['avg_abs'] = max(widths['avg_abs'], len(_fmt_num(float(row['avg_abs']))))
+        widths['max_abs'] = max(widths['max_abs'], len(_fmt_num(float(row['max_abs']))))
+
+    header = ' | '.join(f"{label:<{widths[key]}}" for key, label in columns)
+    rule = '-+-'.join('-' * widths[key] for key, _ in columns)
+    print(header)
+    print(rule)
+    for row in rows:
+        line = ' | '.join(( f"{row['file']:<{widths['file']}}",
+                            f"{row['status']:<{widths['status']}}",
+                            f"{row['metadata']:<{widths['metadata']}}",
+                            f"{row['ann_intervals']:<{widths['ann_intervals']}}",
+                            f"{row['ann_frames']:<{widths['ann_frames']}}",
+                            f"{row['det_counts']:<{widths['det_counts']}}",
+                            f"{_fmt_num(float(row['avg_abs'])):<{widths['avg_abs']}}",
+                            f"{_fmt_num(float(row['max_abs'])):<{widths['max_abs']}}", ))
+
+        if row.get('ok', False):
+            print(line)
+        else:
+            print_color(line, 'r')
+
+    if verbose:
+        for row in rows:
+            _print_stream_json_verbose(row)
+
+
 def run_sanity_flow(cache_dir, out_dir, ref_dir=None, ds_testing=None, stm_testing=None, **kwargs):
     """ Run one sanity flow and optionally compare it against a reference output tree.
     :param cache_dir:
@@ -1133,8 +1371,6 @@ def assert_outputs(test_dir, ref_dir, mode='no_train') -> tuple[bool, dict[str, 
 
 # endregion
 
-#*647->874/904(,1,1)915 -> 780(,9,3)-> 780(,9,1) -> 770(,14,1) self clr-> 734(,15,1) -> 672
-#* -> export-pt-res 693 -> commenting -> 749(,2,1)/777
 #* 1191 ->1161-> 1217-> 1199-> 1188(1,22,2) -> 1166(,22,2)->1155
 
 if __name__ == '__main__':
@@ -1144,7 +1380,7 @@ if __name__ == '__main__':
                       'cam-6-11-8_FRes_Erz_ft25_w30-15.npz']
     ds_testsing    = ['J-All_ft25_w30-15_test.npz']
 
-    # 1st testing
+    #* 1st testing
     # d_tr = "work_dirs/json_models/sanity-testing/test_all-01"
     # d_nt = "work_dirs/json_models/sanity-testing/no_train"
     # d_rf = "work_dirs/json_models/w30-15-um"
@@ -1152,14 +1388,21 @@ if __name__ == '__main__':
     # b_2, _ = assert_outputs(d_nt, d_rf, 'train')
     # print(f"train: {b_1}\n test:{b_2}")
 
+    #* 2nd testing
     cache_path = 'data/cache/w30-15_um'
     rf_dir  = 'work_dirs/json_models/w30-15-um'
     res_dir = 'work_dirs/json_models/sanity-testing/test-only_01'
     md = 'all'# 'no_train'
     if Path(res_dir).is_dir():
         shutil.rmtree(res_dir)
-    run_sanity_flow(cache_path, res_dir, rf_dir,
-                    ds_testing=ds_testsing, stm_testing=stream_testing, mode=md)
+    # run_sanity_flow(cache_path, res_dir, rf_dir,
+    #                 ds_testing=ds_testsing, stm_testing=stream_testing, mode=md)
     # res_, info = assert_outputs(tst_dir, rf_dir, 'no_train')
-    # print(f"Assert outputs:{res_}\n")
-    # print(f"inof:{info}")
+    # print(f"Assert outputs:{res_}\ninfo:{info}")
+    
+    #* 3rd testing
+    d_ts = "/mnt/local-data/Python/Projects/weSmart/data/json_files/tst_conv/try_05"
+    d_rf = "/mnt/local-data/Python/Projects/weSmart/data/sanity-testing/json/260611-no_imgsz_g-0"
+    d_op = "/mnt/local-data/Python/Projects/weSmart/data/sanity-testing/json"
+    cmp_stream_jsons(d_ts,d_rf, d_op, print_cli=True)
+    #1412(2,5,4)
