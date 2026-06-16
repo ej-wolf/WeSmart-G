@@ -732,7 +732,7 @@ def run_stream_json_dual(data_dir, output_dir,tag=None, **kwargs):
                      'model_path': kwargs.get('model_path', None),
                      'zip_output': False}
     process_video(data_dir, output_path=dir_none, **common_kwargs)
-    process_video(data_dir, output_path=dir_zero, default_group_tag=[0], **common_kwargs)
+    process_video(data_dir, output_path=dir_zero, default_grp_tag=[0], **common_kwargs)
 
 
 def gen_tst():

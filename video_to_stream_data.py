@@ -34,12 +34,12 @@ from pathlib import Path
 import ultralytics
 from ultralytics import YOLO
 from ultralytics.utils.checks import check_imgsz
-from annotations import load_event_ann, parse_time_str, resolve_event_time
+from annotations import load_event_ann, resolve_event_time
 #* import from my utils
 from common.my_local_utils import get_unique_name, print_color, _zip_one_path
 
 #* Defaults and constants  -------------------------------------------------------------------
-DETECTION_THRESHOLD = 0.5
+YOLO_THRESHOLD = 0.5
 DEFAULT_SAMPLING = 5
 
 #* Events flags
@@ -54,36 +54,6 @@ DEFAULT_YOLO = MODELS_DIR + "yolo26x-pose.pt"
 ZIP_JSONS = True
 VIDEO_SUFFIXES = {'.mp4', '.avi', '.mkv', '.mov', '.m4v'}
 #* "yolo26x-pose.pt" / "yolo11x-pose.pt" / "yolov8s.pt"
-
-
-def parse_interval(s):
-    """ Parses 'start-end' where start or end can be empty.
-    Examples:
-        '00:01:00-00:02:00'
-        '00:03:00-'
-        '-00:00:30'
-        '00:01:00'   -> (start, None)
-    Returns (start_sec, end_sec) where any can be None.
-    """
-    if s is None:
-        return None, None
-
-    s = s.strip()
-    if s == "":
-        # Completely empty → ignore this interval later
-        return None, None
-
-    # No '-' → interpret as single time = from that time until end
-    if "-" not in s:
-        start = parse_time_str(s)
-        end = None
-        return start, end
-
-    start_str, end_str = s.split("-", 1)
-
-    start = parse_time_str(start_str) if start_str.strip() != '' else None
-    end   = parse_time_str(end_str)   if end_str.strip()   != '' else None
-    return start, end
 
 
 def parse_annotation_file(ann_file):
@@ -102,9 +72,8 @@ def parse_annotation_file(ann_file):
 def process_video(input_path: Path|str,
                   output_path:Path|str=None,
                   sample_rate=DEFAULT_SAMPLING,
-                  conf_thresh=DETECTION_THRESHOLD,
-                  ann_file=None, default_group_tag=None,
-                  tension_intervals=None, fight_intervals=None, fall_intervals=None,
+                  yolo_threshold=YOLO_THRESHOLD,
+                  ann_file=None, default_grp_tag=None,
                   **kwargs):
     """ Converts one or more videos into structured JSON annotations.
     A YOLO detector is used to perform per-frame person detection and
@@ -126,15 +95,16 @@ def process_video(input_path: Path|str,
             - file path       → enumerate using its stem (e.g. train_001.json)
     Conversion related parameters:
     :param sample_rate:        → Sampling rate for JSON conversion (in Hz)
-    :param conf_thresh:        → YOLO detection confidence threshold
-    :param default_group_tag:  → Assign default events to all frames by default
+    :param yolo_threshold:     → YOLO detection confidence threshold
+    :param default_grp_tag:    → Assign default events to all frames by default
     :param ann_file:           → Optional annotation text file with rows:
                                start_time,\t  end_time,\t    event_flag
                                Supported event flags: 2 (fall), 3 (tension), 4 (fight)
                                Precedence:
-                               defaults < ann_file intervals < explicit *_intervals arguments
+                               annotation file intervals override the default group tag
                                If ann_file is None, the code will look next to each video for:
                                <video_stem>.txt, <video_stem>.ann, or <video_stem>
+    :param use_old_meta:       → Optional kwargs flag. If True, write the old compact detector metadata.
     """
 
     #* local sub-function (helpers)
@@ -176,9 +146,7 @@ def process_video(input_path: Path|str,
     output_path = Path(output_path) if output_path else None
     model_path = kwargs.get('model_path', None) or DEFAULT_YOLO
     show = kwargs.get('show', False)
-    tension_intervals = tension_intervals or []
-    fight_intervals = fight_intervals or []
-    fall_intervals = fall_intervals or []
+    use_old_meta = kwargs.get('use_old_meta', False)
     zip_output = bool(kwargs.get('zip_output', kwargs.get('zip', ZIP_JSONS)))
 
     #* load model
@@ -218,17 +186,20 @@ def process_video(input_path: Path|str,
             checksum.update(chunk)
 
    #* detection info for header
-    detector_info = {'model':Path(model_path).stem, 'version':model.ckpt['version'], 'threshold':conf_thresh}
-    # detector_info = { 'model': model_file.stem,  'version': model.ckpt['version'],
-    #                   'runtime_ultralytics': ultralytics.__version__,
-    #                   'runtime_torch': torch.__version__,
-    #                   'runtime_python': platform.python_version(),
-    #                   'runtime_cuda': torch.version.cuda,
-    #                   'cuda_available': torch.cuda.is_available(),
-    #                   'device': ('cuda' if torch.cuda.is_available() else 'cpu'),
-    #                   'model_sha256': checksum.hexdigest(), }
-    print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {conf_thresh}", 'b')
-    print(f"Default group event: {default_group_tag}\n")
+    detector_info = {'model': Path(model_path).stem, 'version': model.ckpt['version']}
+    if use_old_meta:
+        detector_info['threshold'] =  yolo_threshold
+    else:
+        detector_info.update({'runtime_ultralytics': ultralytics.__version__,
+                               'runtime_torch': torch.__version__,
+                               'runtime_python': platform.python_version(),
+                               'runtime_cuda': torch.version.cuda,
+                               'cuda_available': torch.cuda.is_available(),
+                               'device': ('cuda' if torch.cuda.is_available() else 'cpu'),
+                               'model_sha256': checksum.hexdigest(),})
+
+    print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {yolo_threshold}", 'b')
+    print(f"Default group event: {default_grp_tag}\n")
 
     ann_intervals = parse_annotation_file(ann_file) if ann_file else None
     for vid_path in vid_list:
@@ -265,11 +236,6 @@ def process_video(input_path: Path|str,
         fight_intervals_sec = list(video_ann_intervals[TAG_FIGHT]) if video_ann_intervals is not None else []
         fall_intervals_sec = list(video_ann_intervals[TAG_FALL]) if video_ann_intervals is not None else []
 
-        tension_intervals_sec.extend(parse_interval(s) for s in tension_intervals if s and s.strip())
-        fight_intervals_sec.extend(parse_interval(s) for s in fight_intervals if s and s.strip())
-        fall_intervals_sec.extend(parse_interval(s) for s in fall_intervals if s and s.strip())
-
-
         target_sampling = sample_rate or  DEFAULT_SAMPLING
         if target_sampling <= 0 or target_sampling > fps :
         #* i.e    0 <= sampling_rate_Hz <= fps
@@ -300,8 +266,8 @@ def process_video(input_path: Path|str,
 
             #* run model on current frame
             try:
-                # results = model(frame, conf=conf_thresh, verbose=False, imgsz=infer_img_sz)[0]
-                results = model(frame, conf=conf_thresh, verbose=False)[0]
+                # results = model(frame, conf=yolo_threshold, verbose=False, imgsz=infer_img_sz)[0]
+                results = model(frame, conf=yolo_threshold, verbose=False)[0]
             except Exception as exc:
                 print(f"[ERROR] YOLO inference failed at frame_idx={frame_idx}: {exc}")
                 raise
@@ -339,7 +305,7 @@ def process_video(input_path: Path|str,
             if in_any_interval(time_sec, fight_intervals_sec):
                 group_events.append(TAG_FIGHT)
 
-            default_tags = as_event_list(default_group_tag)
+            default_tags = as_event_list(default_grp_tag)
             group_tags = group_events if group_events else default_tags
 
             frames.append({'f': frame_idx, 't': time_sec,
@@ -362,19 +328,16 @@ def process_video(input_path: Path|str,
             cv2.destroyAllWindows()
             continue
 
-        event_intervals = {'tension': {'raw': tension_intervals, 'sec': tension_intervals_sec},
-                           'fight': {'raw': fight_intervals,   'sec': fight_intervals_sec},
-                           'fall': {'raw': fall_intervals,    'sec': fall_intervals_sec},
-                           }
-        data = {'video': str(vid_path),
-                'fps': fps,
+        event_intervals = {'tension': {'sec': tension_intervals_sec},
+                           'fight': {'sec': fight_intervals_sec},
+                           'fall': {'sec': fall_intervals_sec}, }
+
+        data = {'video': str(vid_path),'fps': fps,
                 'sampling rate': {'target':target_sampling, 'effective':effective_sampling},
-                'step': step,
-                # 'detection_threshold': conf_thresh,
-                'detector': detector_info,
-                'event_intervals':event_intervals,
-                'frames': frames,
-                }
+                'step': step}
+        if not use_old_meta:
+            data['detection_threshold'] = yolo_threshold
+        data.update({'detector': detector_info, 'event_intervals':event_intervals, 'frames': frames,})
 
         #Todo: resolve case when video_path is dir while output_path is a file name
         json_path = get_unique_name(json_dir/f"{json_name if json_name else vid_path.stem}.json",4)
@@ -394,10 +357,11 @@ def process_video(input_path: Path|str,
 
     return True
 
-#397
+#397->360(1,4,4)
+
 if __name__ == "__main__":
 
     video_path = Path("/mnt/local-data/Projects/Wesmart/Video-datasets/draft_set/tst_conv")
     draft_path =  Path( "/mnt/local-data/Python/Projects/weSmart/data/json_files/tst_conv/draft_dir")
 
-    process_video(video_path, output_path = draft_path/'tst-03', default_group_tag = 0,)
+    process_video(video_path, output_path = draft_path/'tst-03', default_grp_tag= 0, )

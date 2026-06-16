@@ -313,7 +313,7 @@ def _apply_header_meta(data: dict[str, Any], header: Iterable[str]) -> None:
 # endregion
 
 
-# region Old HMC/Nana event annotations
+# region Old HMC/Ana event annotations
 
 def load_old_event_ann(path: str | Path) -> dict[str, Any]:
     """Load old HMC/Nana block annotations into the normalized event dict."""

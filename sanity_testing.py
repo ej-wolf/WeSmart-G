@@ -1183,7 +1183,7 @@ def stream_json_sanity(data_path, ref_dir, output_dir, **kwargs):
         process_kwargs.pop(key, None)
     process_video(data_path,
                   output_path=output_dir,
-                  default_group_tag=default_group_tag,
+                  default_grp_tag=default_group_tag,
                   zip_output=False,
                   **process_kwargs)
 
