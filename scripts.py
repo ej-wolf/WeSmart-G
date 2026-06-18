@@ -376,6 +376,48 @@ def run_core_regression_suite(phase='refactor', **kwargs):
     return outputs
 
 
+def convert_vid_2_json():
+    from video_to_stream_data import process_video
+    # main_dir = Path("data/video")
+    main_dir = Path("/mnt/local-data/Projects/Wesmart/Video-datasets")
+    json_dir = Path("data/json_files")
+    fps, grp_tag = 3, 0
+
+    #* RLVS
+    out_dir = json_dir/"RLVS/3fps"
+    vid_dir = main_dir/"RLVS/NonViolence"
+    # process_video(vid_dir, out_dir, default_grp_tag=0, sample_rate=fps, zip_output=False)
+    vid_dir = main_dir/"RLVS/Violence"
+    # process_video(vid_dir, out_dir, default_grp_tag=4, sample_rate=fps, zip_output=False)
+
+    #* RWF-2000
+    out_dir = json_dir/"RWF-2000/3fps/NonFight"
+    vid_dir = main_dir / "RWF-2000/train/Train_NonFight/"
+    # process_video(vid_dir, out_dir, default_grp_tag=0, sample_rate=fps, zip_output=False)
+    vid_dir = main_dir/"RWF-2000/val/Val_NonFight/"
+    # process_video(vid_dir, out_dir, default_grp_tag=0, sample_rate=fps, zip_output=False)
+    out_dir = json_dir/"RWF-2000/3fps/Fight"
+
+    vid_dir = main_dir/"RWF-2000/train/Train_Fight/"
+    process_video(vid_dir, out_dir, default_grp_tag=4, sample_rate=fps, zip_output=False)
+    vid_dir = main_dir/"RWF-2000/val/Val_Fight/"
+    process_video(vid_dir, out_dir, default_grp_tag=4, sample_rate=fps, zip_output=False)
+    return
+    #* UBI
+    vid_dir = main_dir/"UBI_FIGHTS/videos/fight"
+    ann_dir = main_dir/"UBI_FIGHTS/ann_ws_ready"
+    out_dir = json_dir/"UBI/fight2"
+    process_video(vid_dir, out_dir, ann_file=ann_dir, skip_without_ann=True,
+                  default_grp_tag=grp_tag, sample_rate=fps, zip_output=False)
+    out_dir = json_dir/"UBI/5fps/fight"
+    fps = 5
+    process_video(vid_dir, out_dir, ann_file=ann_dir, skip_without_ann=True,
+                  default_grp_tag=grp_tag, sample_rate=fps, zip_output=False)
+
+
+
+
+
 def train_test_study(cache_dir:str|Path, **kwargs): #92 -> 63
     """ Train every cache in a study directory and run clip/video evaluations.
     Usage:
@@ -771,8 +813,7 @@ if __name__ == "__main__":
     d_d = "/mnt/local-data/Projects/Wesmart/Video-datasets/draft_set/tst_conv"
     #op_d = "data/json_files/tst_conv/test_260611_batch"
     op_d = "data/sanity-testing/json/"
-    run_stream_json_dual(d_d, op_d, '260611-no_imgsz'  )
-    run_stream_json_dual(d_d, op_d, '260312' )
+    # run_stream_json_dual(d_d, op_d, '260611-no_imgsz'  )
+    # run_stream_json_dual(d_d, op_d, '260312' )
 
-
-# 321(,6,2)->300(,6,2)   (23,6)
+    convert_vid_2_json()

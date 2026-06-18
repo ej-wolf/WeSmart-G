@@ -13,6 +13,8 @@ from pathlib import Path
 import subprocess
 from typing import Any, Iterable
 
+from common.my_local_utils import print_color
+
 
 FMT_DS = 'ds'
 FMT_EVENT = 'event'
@@ -217,8 +219,8 @@ def _leading_comment_header(path: Path) -> list[str]:
 
 # region Default event annotations
 
-def load_event_ann(path: str | Path) -> dict[str, Any]:
-    """Load default event annotations into the normalized event dict."""
+def load_event_ann(path: str|Path) -> dict[str, Any]:
+    """ Load default event annotations into the normalized event dict."""
     ann_path = Path(path)
     header: list[str] = []
     events: list[dict[str, Any]] = []
@@ -235,13 +237,19 @@ def load_event_ann(path: str | Path) -> dict[str, Any]:
                 continue
             seen_data = True
 
-            parts = _split_event_row(line)
-            if len(parts) != 3:
-                raise ValueError(f'Invalid event annotation row at {ann_path}:{line_no}: {raw_line.rstrip()}')
+            try:
+                parts = _split_event_row(line)
+                if len(parts) != 3:
+                    raise ValueError('expected 3 columns')
 
-            start_txt, end_txt, flag_txt = parts
-            flag = _parse_event_flag(flag_txt)
-            events.append(_event_dict(parse_event_time_str(start_txt), parse_event_time_str(end_txt), flag, seq=len(events)))
+                start_txt, end_txt, flag_txt = parts
+                flag = _parse_event_flag(flag_txt)
+                events.append(_event_dict(parse_event_time_str(start_txt), parse_event_time_str(end_txt),
+                                          flag, seq=len(events)))
+            except Exception as exc:
+                print_color(f"[WARN] Skipping invalid annotation row at: {ann_path.stem}    "
+                            f"#{line_no} {raw_line.rstrip()}  -> ({exc})", 'r')
+                continue
 
     data = _ann_dict(FMT_EVENT, ann_path, _sort_events_by_time(events))
     data['header'] = header

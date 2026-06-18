@@ -28,7 +28,7 @@ from torch_clip_model import run_testing, run_training
 LOOSE_TOLERANCES = 0.05
 STRICT_TOLERANCES = 0.03
 DEFAULT_METRIC_TOLERANCES = {
-            'loose': dict.fromkeys(['max_abs_error', 'cm_delta', 'event_f1'], LOOSE_TOLERANCES),
+            'loose' : dict.fromkeys(['max_abs_error', 'cm_delta', 'event_f1'], LOOSE_TOLERANCES),
             'strict': dict.fromkeys(['max_abs_error', 'cm_delta', 'event_f1'], STRICT_TOLERANCES),
              }
 DEFAULT_CSV_TOLERANCES = {'loose': LOOSE_TOLERANCES, 'strict': STRICT_TOLERANCES}
@@ -1105,9 +1105,24 @@ def _print_issues(issues: dict[str, Any], mode: str) -> None:  #149
 # endregion
 
 #* region Public Sanity API
-def cmp_stream_jsons(tst, ref, op_dir=None, **kwargs):
+def test_stream_jsons(tst, ref, op_dir=None, **kwargs):
     """Compare generated stream JSON dirs and optionally save one JSON report."""
-    from json_utils import compare_stream_json
+    from json_stream_utils import compare_stream_json
+    def _resolve_tolerance(tol=None) -> dict[str, float]:
+        """ Resolve stream JSON numeric tolerances for this comparison."""
+        if isinstance(tol, str):
+            mode = tol.lower()
+            if mode == 'loose':
+                return  {'avg_abs': LOOSE_TOLERANCES, 'max_abs': LOOSE_TOLERANCES}
+            if mode == 'strict':
+                return {'avg_abs': STRICT_TOLERANCES, 'max_abs': STRICT_TOLERANCES}
+        elif isinstance(tol, dict):
+            return tol
+        elif isinstance(tol, (list, tuple)) and len(tol) == 2:
+            return {'avg_abs': tol[0], 'max_abs': tol[1]}
+        else:
+            return  {'avg_abs': LOOSE_TOLERANCES, 'max_abs': LOOSE_TOLERANCES}
+
 
     tst = Path(tst)
     ref = Path(ref)
@@ -1119,7 +1134,7 @@ def cmp_stream_jsons(tst, ref, op_dir=None, **kwargs):
     op_dir.mkdir(parents=True, exist_ok=True)
 
     selected_names = kwargs.pop('file_names', None)
-    tolerances = kwargs.pop('tolerances', None)
+    tolerances = _resolve_tolerance(kwargs.pop('tolerances', None))
     ignore_path_fields = bool(kwargs.pop('ignore_path_fields', True))
     print_cli = bool(kwargs.pop('print_cli', False))
     verbose = bool(kwargs.pop('verbose', False))
@@ -1135,8 +1150,7 @@ def cmp_stream_jsons(tst, ref, op_dir=None, **kwargs):
     files = []
     for file_name in names:
         ok, cmp_report = compare_stream_json(tst_files[file_name], ref_files[file_name],
-                                             tolerances=tolerances,
-                                             ignore_path_fields=ignore_path_fields)
+                                             tolerances=tolerances, ignore_path_fields=ignore_path_fields)
         files.append(_build_stream_json_cmp_row(file_name, ok, cmp_report))
 
     tst_names = set(tst_files) if selected_names is None else set(name for name in selected_names if name in tst_files)
@@ -1187,7 +1201,7 @@ def stream_json_sanity(data_path, ref_dir, output_dir, **kwargs):
                   zip_output=False,
                   **process_kwargs)
 
-    report = cmp_stream_jsons(output_dir, ref_dir, output_dir, file_names=expected_jsons, **kwargs)
+    report = test_stream_jsons(output_dir, ref_dir, output_dir, file_names=expected_jsons, **kwargs)
     report['data_path'] = str(data_path)
     return report
 
@@ -1404,5 +1418,5 @@ if __name__ == '__main__':
     d_ts = "/mnt/local-data/Python/Projects/weSmart/data/json_files/tst_conv/try_05"
     d_rf = "/mnt/local-data/Python/Projects/weSmart/data/sanity-testing/json/260611-no_imgsz_g-0"
     d_op = "/mnt/local-data/Python/Projects/weSmart/data/sanity-testing/json"
-    cmp_stream_jsons(d_ts,d_rf, d_op, print_cli=True)
+    test_stream_jsons(d_ts, d_rf, d_op, print_cli=True)
     #1412(2,5,4)
