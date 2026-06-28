@@ -76,7 +76,7 @@ from temporal_slicing_json import slice_json_stream, WINDOW_SEC, STRIDE_SEC
 from motion_feature_schema import (DEFAULT_POOL_MODE,  DEFAULT_TEMP_KERNEL, DEFAULT_TEMP_SMOOTHING,
                                    FEATURE_SCHEMA_KEY, SOURCE_CACHES_KEY, TEMPORAL_SCHEMA_KEY,
                                    assert_feature_schema_match, build_cache_record, get_clip_features_vec, pack_json_value,
-                                   build_feature_schema, load_cache_contract_compact, build_temporal_schema )
+                                   build_feature_schema, load_cache_contract, load_cache_contract_compact, build_temporal_schema )
 
 
 #* Defaults (ToDo config later if needed)

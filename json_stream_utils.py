@@ -12,16 +12,33 @@ from json_utils import list_json_sources, load_json_raw, resolve_json_source
 JSON_SUFFIX = '.json'
 CSV_SUFFIX = '.csv'
 NPZ_SUFFIX = '.npz'
-MINIMAL_DETECTOR = {'model': 'npz_import', 'version': None, 'source': 'out_alex_pair'}
-STREAM_INFO_REPORT = 'stream_json_info.json'
-STREAM_INFO_SUMMARY = 'stream_json_info.csv'
-FPS_TOLERANCES = 0.2
+
 SJ_EVENT_BUCKETS = {'empty': None, 'norm': 0, 'abnormal': 1, 'tension': 3, 'fight': 4}
-DEFAULT_STREAM_NUMERIC_TOLERANCES = {'avg_abs': 0.05, 'max_abs': 0.05}
-META_IGNORED = {'frames', 'event_intervals', 'detector', 'detection_threshold'}
+
+
+
+def _bbox_iou(box_1, box_2) -> float:
+    """Return IoU for two normalized XYXY boxes."""
+    if len(box_1) != 4 or len(box_2) != 4:
+        return 0.0
+    x1 = max(float(box_1[0]), float(box_2[0]))
+    y1 = max(float(box_1[1]), float(box_2[1]))
+    x2 = min(float(box_1[2]), float(box_2[2]))
+    y2 = min(float(box_1[3]), float(box_2[3]))
+    inter_w = max(0.0, x2 - x1)
+    inter_h = max(0.0, y2 - y1)
+    inter = inter_w * inter_h
+    area_1 = max(0.0, float(box_1[2]) - float(box_1[0])) * max(0.0, float(box_1[3]) - float(box_1[1]))
+    area_2 = max(0.0, float(box_2[2]) - float(box_2[0])) * max(0.0, float(box_2[3]) - float(box_2[1]))
+    union = area_1 + area_2 - inter
+    return 0.0 if union <= 0.0 else inter / union
 
 
 #* region Stream JSON info *****************************#
+FPS_TOLERANCES = 0.2
+SJ_INFO_REPORT  = 'stream_json_info.json'
+SJ_INFO_SUMMARY = 'stream_json_info.csv'
+
 def _frame_delta_stats(frames: list[dict[str, Any]]) -> tuple[list[float], float]:
     times = [float(frame.get('t', 0.0)) for frame in frames]
     deltas = [max(0.0, times[idx + 1] - times[idx]) for idx in range(len(times) - 1)]
@@ -84,7 +101,7 @@ def stream_json_info(sj_path, op_path=None, **kwargs) -> dict[str, Any]:
         if op_path is None:
             return None
         op_path = Path(op_path)
-        default_name = STREAM_INFO_SUMMARY if save_format == 'csv' else STREAM_INFO_REPORT
+        default_name = SJ_INFO_SUMMARY if save_format == 'csv' else SJ_INFO_REPORT
         default_suffix = CSV_SUFFIX if save_format == 'csv' else JSON_SUFFIX
         if op_path.is_dir():
             name = op_path / default_name
@@ -104,7 +121,7 @@ def stream_json_info(sj_path, op_path=None, **kwargs) -> dict[str, Any]:
                 ['Total frames', report['frames']['total'], '', ''],
                 ['Avg. frame count', f"{report['frames']['avg']:.2f}", '', ''],
                 ['Avg/min/max fps', f"{fps['avg']:.3f}", f"{fps['min']:.3f} / {fps['max']:.3f}", ''],
-                ['FPS within eps', fps['fps_within_epsilon'], fps['fps_epsilon'], ''],
+                # ['FPS within eps', fps['fps_within_epsilon'], fps['fps_epsilon'], ''],
                 [],
                 ['tag', 'total(s)', 'avg seg(s)', 'segments']]
         for tag in SJ_EVENT_BUCKETS:
@@ -218,21 +235,23 @@ def stream_json_info(sj_path, op_path=None, **kwargs) -> dict[str, Any]:
 
 
 #* region Stream JSON compare **************************#
+DEFAULT_SJ_NUMERIC_TOLERANCES = {'avg_abs': 0.05, 'max_abs': 0.05}
+META_IGNORED = {'frames', 'event_intervals', 'detector', 'detection_threshold'}
 def compare_stream_json(j1, j2, *, tolerances=None, ignore_path_fields=True) -> tuple[bool, dict[str, Any]]:
     """Compare two stream JSONs by metadata, frame layout, annotations, and numeric payload."""
     if tolerances is None:
-        tolerances = dict(DEFAULT_STREAM_NUMERIC_TOLERANCES)
+        tolerances = dict(DEFAULT_SJ_NUMERIC_TOLERANCES)
     elif isinstance(tolerances, dict):
-        tolerances = {**DEFAULT_STREAM_NUMERIC_TOLERANCES, **tolerances}
+        tolerances = {**DEFAULT_SJ_NUMERIC_TOLERANCES, **tolerances}
     else:
         raise TypeError("compare_stream_json tolerances must be None or a concrete dict")
     data_1 = j1 if isinstance(j1, dict) else load_json_raw(j1)
     data_2 = j2 if isinstance(j2, dict) else load_json_raw(j2)
 
-    metadata = _compare_stream_metadata(data_1, data_2, ignore_path_fields=ignore_path_fields)
-    frame_structure = _cmpr_frm_structure(data_1.get('frames', []), data_2.get('frames', []))
-    numeric = _cmp_numeric_content(data_1.get('frames', []), data_2.get('frames', []), tolerances)
-    annotations = _compare_annotations(data_1, data_2)
+    metadata = _cmp_meta(data_1, data_2, ignore_path_fields=ignore_path_fields)
+    frame_structure = _cmp_frm_structure(data_1.get('frames', []), data_2.get('frames', []))
+    numeric = _cmp_numeric(data_1.get('frames', []), data_2.get('frames', []), tolerances)
+    annotations = _cmp_ann(data_1, data_2)
 
     ok = (not metadata['unequal'] and
           not (frame_structure['frame_count'] or
@@ -252,27 +271,7 @@ def compare_stream_json(j1, j2, *, tolerances=None, ignore_path_fields=True) -> 
     return ok, report
 
 
-def _normalize_event_intervals(value):
-    """Normalize event intervals to meaningful non-empty sec-only values."""
-    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
-        value = value[0]
-    if not isinstance(value, dict):
-        return {}
-
-    intervals = {}
-    for key, payload in value.items():
-        if isinstance(payload, dict):
-            sec_intervals = payload.get('sec', [])
-        elif isinstance(payload, list):
-            sec_intervals = payload
-        else:
-            sec_intervals = []
-        if sec_intervals:
-            intervals[key] = sec_intervals
-    return intervals
-
-
-def _compare_stream_metadata(data_1: dict[str, Any], data_2: dict[str, Any], *, ignore_path_fields: bool) -> dict[str, Any]:
+def _cmp_meta(data_1: dict[str, Any], data_2: dict[str, Any], *, ignore_path_fields: bool) -> dict[str, Any]:
     ignored = set(META_IGNORED)
     if ignore_path_fields:
         ignored.add('video')
@@ -292,7 +291,7 @@ def _frame_map(frames: list[dict[str, Any]]) -> dict[Any, dict[str, Any]]:
     return {frame.get('f'): frame for frame in frames}
 
 
-def _cmpr_frm_structure(frames_1: list[dict[str, Any]], frames_2: list[dict[str, Any]]) -> dict[str, Any]:
+def _cmp_frm_structure(frames_1: list[dict[str, Any]], frames_2: list[dict[str, Any]]) -> dict[str, Any]:
     map_1, map_2 = _frame_map(frames_1), _frame_map(frames_2)
     frame_count = None
     if len(frames_1) != len(frames_2):
@@ -320,23 +319,6 @@ def _cmpr_frm_structure(frames_1: list[dict[str, Any]], frames_2: list[dict[str,
             'detection_count_mismatches': detection_count_mismatches}
 
 
-def _bbox_iou(box_1, box_2) -> float:
-    """Return IoU for two normalized XYXY boxes."""
-    if len(box_1) != 4 or len(box_2) != 4:
-        return 0.0
-    x1 = max(float(box_1[0]), float(box_2[0]))
-    y1 = max(float(box_1[1]), float(box_2[1]))
-    x2 = min(float(box_1[2]), float(box_2[2]))
-    y2 = min(float(box_1[3]), float(box_2[3]))
-    inter_w = max(0.0, x2 - x1)
-    inter_h = max(0.0, y2 - y1)
-    inter = inter_w * inter_h
-    area_1 = max(0.0, float(box_1[2]) - float(box_1[0])) * max(0.0, float(box_1[3]) - float(box_1[1]))
-    area_2 = max(0.0, float(box_2[2]) - float(box_2[0])) * max(0.0, float(box_2[3]) - float(box_2[1]))
-    union = area_1 + area_2 - inter
-    return 0.0 if union <= 0.0 else inter / union
-
-
 def _match_detections(dets_1: list[dict[str, Any]], dets_2: list[dict[str, Any]]) -> list[tuple[int, int]]:
     """Greedily align detections by class first, then by bbox IoU."""
     candidates = []
@@ -361,7 +343,7 @@ def _match_detections(dets_1: list[dict[str, Any]], dets_2: list[dict[str, Any]]
     return sorted(matches)
 
 
-def _cmp_numeric_content(frames_1: list[dict[str, Any]], frames_2: list[dict[str, Any]], tolerances: dict[str, float]) -> dict[str, Any]:
+def _cmp_numeric(frames_1: list[dict[str, Any]], frames_2: list[dict[str, Any]], tolerances: dict[str, float]) -> dict[str, Any]:
     """Compare comparable numeric fields after aligning detections by class-aware IoU."""
     map_1, map_2 = _frame_map(frames_1), _frame_map(frames_2)
     total_abs, count = 0.0, 0
@@ -375,6 +357,13 @@ def _cmp_numeric_content(frames_1: list[dict[str, Any]], frames_2: list[dict[str
         if delta > max_abs:
             max_abs, max_path = delta, path
 
+    def cmp_num_lists(values_1, values_2, path: str) -> None:
+        if len(values_1) != len(values_2):
+            return
+        for idx, (val_1, val_2) in enumerate(zip(values_1, values_2)):
+            if _is_number(val_1) and _is_number(val_2):
+                add_delta(f'{path}[{idx}]', val_1, val_2)
+
     for frame_idx in sorted(set(map_1) & set(map_2)):
         dets_1 = map_1[frame_idx].get('detection_list') or []
         dets_2 = map_2[frame_idx].get('detection_list') or []
@@ -385,10 +374,10 @@ def _cmp_numeric_content(frames_1: list[dict[str, Any]], frames_2: list[dict[str
             det_1, det_2 = dets_1[det_idx_1], dets_2[det_idx_2]
             if _is_number(det_1.get('conf')) and _is_number(det_2.get('conf')):
                 add_delta(f'frames[{frame_idx}].detection_list[{det_idx_1}].conf', det_1['conf'], det_2['conf'])
-            _compare_number_lists(det_1.get('bbox', []), det_2.get('bbox', []),
-                                  f'frames[{frame_idx}].detection_list[{det_idx_1}].bbox', add_delta)
-            _compare_number_lists(det_1.get('key_points', []), det_2.get('key_points', []),
-                                  f'frames[{frame_idx}].detection_list[{det_idx_1}].key_points', add_delta)
+            cmp_num_lists(det_1.get('bbox', []), det_2.get('bbox', []),
+                          f'frames[{frame_idx}].detection_list[{det_idx_1}].bbox')
+            cmp_num_lists(det_1.get('key_points', []), det_2.get('key_points', []),
+                          f'frames[{frame_idx}].detection_list[{det_idx_1}].key_points')
 
     avg_abs = total_abs / count if count else 0.0
     return {'count': count,
@@ -403,18 +392,28 @@ def _is_number(val) -> bool:
     return isinstance(val, (int, float)) and not isinstance(val, bool)
 
 
-def _compare_number_lists(values_1, values_2, path: str, add_delta) -> None:
-    if len(values_1) != len(values_2):
-        return
-    for idx, (val_1, val_2) in enumerate(zip(values_1, values_2)):
-        if _is_number(val_1) and _is_number(val_2):
-            add_delta(f'{path}[{idx}]', val_1, val_2)
-
-
-def _compare_annotations(data_1: dict[str, Any], data_2: dict[str, Any]) -> dict[str, Any]:
+def _cmp_ann(data_1: dict[str, Any], data_2: dict[str, Any]) -> dict[str, Any]:
     """Compare top-level event intervals and per-frame annotation payloads."""
-    intervals_1 = _normalize_event_intervals(data_1.get('event_intervals'))
-    intervals_2 = _normalize_event_intervals(data_2.get('event_intervals'))
+    def norm_intervals(value):
+        if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+            value = value[0]
+        if not isinstance(value, dict):
+            return {}
+
+        intervals = {}
+        for key, payload in value.items():
+            if isinstance(payload, dict):
+                sec_intervals = payload.get('sec', [])
+            elif isinstance(payload, list):
+                sec_intervals = payload
+            else:
+                sec_intervals = []
+            if sec_intervals:
+                intervals[key] = sec_intervals
+        return intervals
+
+    intervals_1 = norm_intervals(data_1.get('event_intervals'))
+    intervals_2 = norm_intervals(data_2.get('event_intervals'))
     map_1, map_2 = _frame_map(data_1.get('frames', [])), _frame_map(data_2.get('frames', []))
     mismatches = []
 
@@ -434,6 +433,8 @@ def _compare_annotations(data_1: dict[str, Any], data_2: dict[str, Any]) -> dict
 
 
 #* region Convert (npz, json) pair to stream JSON  ***************#
+MINIMAL_DETECTOR = {'model': 'npz_import', 'version':None, 'source':'out_alex_pair'}
+
 def _scalar(value: Any):
     """Convert numpy scalar-like values into plain Python values."""
     if isinstance(value, np.ndarray):
