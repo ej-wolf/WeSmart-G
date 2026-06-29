@@ -73,16 +73,20 @@ from pathlib import Path
 from json_utils import load_json_data, list_json_sources
 from common.my_local_utils import print_color, as_collection
 from temporal_slicing_json import slice_json_stream, WINDOW_SEC, STRIDE_SEC
-from motion_feature_schema import (DEFAULT_POOL_MODE,  DEFAULT_TEMP_KERNEL, DEFAULT_TEMP_SMOOTHING,
+from motion_feature_schema import (DEFAULT_POOL_MODE, DEFAULT_POOL_TOP_K_MIN, DEFAULT_POOL_TOP_K_RATIO,
+                                   DEFAULT_TEMP_KERNEL, DEFAULT_TEMP_SMOOTHING,
                                    FEATURE_SCHEMA_KEY, SOURCE_CACHES_KEY, TEMPORAL_SCHEMA_KEY,
                                    assert_feature_schema_match, build_cache_record, get_clip_features_vec, pack_json_value,
-                                   build_feature_schema, load_cache_contract, load_cache_contract_compact, build_temporal_schema )
+                                   build_feature_schema, load_cache_contract, load_cache_contract_compact, build_temporal_schema,
+                                   MOTION_FPS_MAX, MOTION_FPS_MIN, MOTION_FPS_REF )
 
 
 #* Defaults (ToDo config later if needed)
 TEST_RATIO = 0.2
 RANDOM_SEED = 42
 POOL_MODE = DEFAULT_POOL_MODE
+POOL_TOP_K_RATIO = DEFAULT_POOL_TOP_K_RATIO
+POOL_TOP_K_MIN = DEFAULT_POOL_TOP_K_MIN
 TEMPORAL_SMOOTHING = DEFAULT_TEMP_SMOOTHING
 TEMP_KERNEL = DEFAULT_TEMP_KERNEL
 MIN_ERROR = 1e-7
@@ -168,6 +172,11 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
                      temp_smooth=kwargs.get('temp_smooth', TEMPORAL_SMOOTHING),
                      temp_kernel=kwargs.get('temp_kernel', TEMP_KERNEL),
                      pool_mode=kwargs.get('pool_mode', POOL_MODE),
+                     pool_top_k_ratio=kwargs.get('pool_top_k_ratio', POOL_TOP_K_RATIO),
+                     pool_top_k_min=kwargs.get('pool_top_k_min', POOL_TOP_K_MIN),
+                     motion_fps_ref=kwargs['motion_fps_ref'] if 'motion_fps_ref' in kwargs else MOTION_FPS_REF,
+                     motion_fps_min=kwargs.get('motion_fps_min', MOTION_FPS_MIN),
+                     motion_fps_max=kwargs.get('motion_fps_max', MOTION_FPS_MAX),
                  )
     temporal_schema = build_temporal_schema(kwargs.get('window', WINDOW_SEC), kwargs.get('stride', STRIDE_SEC),)
 
@@ -188,7 +197,12 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
                                  temp_smooth=bool(feature_schema['temp_smooth']),
                                  temp_kernel=int(feature_schema['temp_kernel']),
                                  pool_mode=str(feature_schema['pool_mode']),
+                                 pool_top_k_ratio=float(feature_schema['pool_top_k_ratio']),
+                                 pool_top_k_min=int(feature_schema['pool_top_k_min']),
                                  j_version=float(feature_schema['extractor_version']),
+                                 motion_fps_ref=feature_schema['motion_fps_ref'],
+                                 motion_fps_min=feature_schema['motion_fps_min'],
+                                 motion_fps_max=feature_schema['motion_fps_max'],
                                  )
             labels.append(int(clip['label']))
             feats.append(clip_feat)
@@ -624,6 +638,9 @@ def _run_build_cache_ds(args):
                                         stride=args.stride,
                                         pure_motion=args.pure_motion,
                                         legacy=args.legacy,
+                                        pool_mode=args.pool_mode,
+                                        pool_top_k_ratio=args.pool_top_k_ratio,
+                                        pool_top_k_min=args.pool_top_k_min,
                                         )
     cache_info(train_cache, mode='dataset')
     test_cache = build_cache_from_json(_json_paths_from_list(jsons_dir, eval_list), cache_dir/f"{npz_name}_test",
@@ -634,6 +651,9 @@ def _run_build_cache_ds(args):
                                        stride=args.stride,
                                        pure_motion=args.pure_motion,
                                        legacy=args.legacy,
+                                       pool_mode=args.pool_mode,
+                                       pool_top_k_ratio=args.pool_top_k_ratio,
+                                       pool_top_k_min=args.pool_top_k_min,
                                        )
     cache_info(test_cache, mode='dataset')
 
@@ -670,6 +690,9 @@ def _run_stream_cache(args):
                                        stride=args.stride,
                                        pure_motion=args.pure_motion,
                                        legacy=args.legacy,
+                                       pool_mode=args.pool_mode,
+                                       pool_top_k_ratio=args.pool_top_k_ratio,
+                                       pool_top_k_min=args.pool_top_k_min,
                                        )
     cache_info(cache_path, mode='stream')
 
@@ -679,32 +702,35 @@ def _run_stream_cache(args):
 # --------------------------------------------------
 def main():
     """ CLI entry point."""
-    def _add_cache_build_args(parser):
+    def _add_cache_build_args(prs):
         """Add shared cache-building options to a subparser."""
-        parser.add_argument('-w',  '--window', type=float, default=WINDOW_SEC, help='clip window in seconds')
-        parser.add_argument('-s',  '--stride', type=float, default=STRIDE_SEC, help='clip stride in seconds')
-        parser.add_argument('-e',  '--allow-empty', action='store_true', help="allow empty (None) labels")
-        parser.add_argument('-p',  '--pure-motion', action='store_true', help='use only motion features, without the static overlap block')
-        parser.add_argument('-l',  '--legacy',  action='store_true', help='use only the original 18 motion features')
-        parser.add_argument('--no-temp-smooth', action='store_true', help='disable temporal smoothing')
-        parser.add_argument('--json-type', default=DEFAULT_TYPE, choices=['type_1', 'type_2', '1', '2'], help='input JSON format for loader')
+        prs.add_argument('-w', '--window', type=float, default=WINDOW_SEC, help='clip window in seconds')
+        prs.add_argument('-s', '--stride', type=float, default=STRIDE_SEC, help='clip stride in seconds')
+        prs.add_argument('-e', '--allow-empty', action='store_true', help="allow empty (None) labels")
+        prs.add_argument('-p', '--pure-motion', action='store_true', help='use only motion features, without the static overlap block')
+        prs.add_argument('-l', '--legacy', action='store_true', help='use only the original 18 motion features')
+        prs.add_argument('-pm', '--pool-mode', default=POOL_MODE,
+                         choices=['max', 'mean', 'lse', 'top_k', 'mean_max', 'mean_std_max', 'mm', 'msm'], help='clip pooling mode')
+        prs.add_argument('-kr', '--top-k-ratio', type=float, default=POOL_TOP_K_RATIO, help='ratio for top_k pooling')
+        prs.add_argument('-k', '--top-k-min', type=int, default=POOL_TOP_K_MIN, help='minimum pooled k for top_k')
+        prs.add_argument('--no-temp-smooth', action='store_true', help='disable temporal smoothing')
+        prs.add_argument('--json-type', default=DEFAULT_TYPE, choices=['type_1', 'type_2', '1', '2'], help='input JSON format for loader')
 
     parser = argparse.ArgumentParser('precompute_clips',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-                                     description='Build clip-feature caches from JSON files or JSON streams',
-                                     )
-    sub = parser.add_subparsers(dest='cmd')
+                                     description='Build clip-feature caches from JSON files or JSON streams',)
 
-    build_p = sub.add_parser('build', help='build train/test cache files from JSON directory')
-    build_p.add_argument('jsons_dir', type=Path, help="dataset path/ dir containing JSONs")
-    build_p.add_argument('cache_dir', type=Path, help="path for the cached NPZ feature files")
-    build_p.add_argument('-t', '--cache-tag', '-cn','--cache-name',  # cn - legacy name for tag
+    sub = parser.add_subparsers(dest='cmd')
+    ds_bld_p = sub.add_parser('build', help='build train/test cache files from JSON directory')
+    ds_bld_p.add_argument('jsons_dir', type=Path, help="dataset path/ dir containing JSONs")
+    ds_bld_p.add_argument('cache_dir', type=Path, help="path for the cached NPZ feature files")
+    ds_bld_p.add_argument('-t', '--cache-tag', '-cn','--cache-name',  # cn - legacy name for tag
                                       dest= 'cache_tag', type=Path, default=None, help="base tag for output npz files")
-    build_p.add_argument('-sd', '--split-dir', type=Path, default=None, help="path for train_videos.txt/test_videos.txt")
-    build_p.add_argument('-ns', '--new-split', action='store_true', help='force new train/test split')
-    build_p.add_argument('-r',   '--test-ratio', '--valid-ratio', dest='test_ratio', type=float, default=TEST_RATIO, help='test split ratio')
-    build_p.add_argument('-rs', '--random-seed', type=int, default=RANDOM_SEED)
-    _add_cache_build_args(build_p)
+    ds_bld_p.add_argument('-sd', '--split-dir', type=Path, default=None, help="path for train_videos.txt/test_videos.txt")
+    ds_bld_p.add_argument('-ns', '--new-split', action='store_true', help='force new train/test split')
+    ds_bld_p.add_argument('-r',   '--test-ratio', '--valid-ratio', dest='test_ratio', type=float, default=TEST_RATIO, help='test split ratio')
+    ds_bld_p.add_argument('-rs', '--random-seed', type=int, default=RANDOM_SEED)
+    _add_cache_build_args(ds_bld_p)
 
     stream_p = sub.add_parser('stream', help='build one cache npz from a single long JSON stream')
     stream_p.add_argument('json_path', type=Path, help='path to one long JSON stream file')
@@ -713,8 +739,7 @@ def main():
     _add_cache_build_args(stream_p)
 
     info_p = sub.add_parser('info', help='print cache statistics from NPZ sources')
-    info_p.add_argument('npz_paths', nargs='+', type=Path,
-                        help='input NPZ sources: each may be a file, directory, or glob mask')
+    info_p.add_argument('npz_paths', nargs='+', type=Path, help='NPZ sources: may be a file, directory, or glob mask')
     info_p.add_argument('-l',  '--list',    action='store_true', help='print video names')
     info_p.add_argument('-d',  '--details', action='store_true', help='print details table per video')
     info_p.add_argument('-m',  '--mode',  type=str, choices=['auto', 'dataset', 'stream'],  default='auto', help='inspection wording mode')
@@ -724,8 +749,7 @@ def main():
 
     merge_p = sub.add_parser('merge', help='merge multiple cache npz files into one')
     merge_p.add_argument('out_path', type=Path, help='output merged npz path')
-    merge_p.add_argument('npz_paths', nargs='+', type=Path,
-                         help='input NPZ sources: each may be a file, directory, or glob mask')
+    merge_p.add_argument('npz_paths', nargs='+', type=Path, help='NPZ sources: may be a file, directory, or glob mask')
 
     #* if subcommand is missing, route it to `build' for Backward compatibility
     known_cmds = {'build', 'stream', 'info', 'merge'}
@@ -745,6 +769,7 @@ def main():
         parser.print_help()
 
 #627(1,1,) / #636(1,1,1)
+#775(1,1,1)
 if __name__ == '__main__':
     pass
     main()

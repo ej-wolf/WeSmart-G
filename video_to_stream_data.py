@@ -67,12 +67,12 @@ def _is_video(f:str|Path):
     return  f.is_file() and f.suffix.lower() in VIDEO_SUFFIXES
 
 
-def parse_annotation_file(ann_file):
+def parse_annotation_file(ann_path):
     """ Load event annotations into converter intervals by numeric or special flag."""
     event_intervals = {}
     split_intervals = []
     exclude_intervals = []
-    for event in load_event_ann(ann_file).get('events', []):
+    for event in load_event_ann(ann_path).get('events', []):
         event_flag = event.get('flag')
         interval = (resolve_event_time(event.get('start')),
                     resolve_event_time(event.get('end')))
@@ -92,7 +92,7 @@ def process_video(input_videos: Path | str,
                   output_path:Path|str=None,
                   sample_rate=DEFAULT_SAMPLING,
                   yolo_threshold=YOLO_THRESHOLD,
-                  ann_file:str|Path=None, default_grp_tag=None,
+                  ann_path:str|Path=None, default_grp_tag=None,
                   **kwargs):
     """ Converts one or more videos into structured JSON annotations.
     A YOLO detector is used to perform per-frame person detection and
@@ -112,12 +112,12 @@ def process_video(input_videos: Path | str,
     :param sample_rate:        → Sampling rate for JSON conversion (in Hz)
     :param yolo_threshold:     → YOLO detection confidence threshold
     :param default_grp_tag:    → Assign default events to all frames by default
-    :param ann_file:           → Optional annotation text file with rows:
+    :param ann_path:           → Optional annotation file or annotation directory with rows:
                                start_time,\t  end_time,\t    event_flag
                                Supported event flags: numeric tags, S/s (split), X/x (exclude)
                                Precedence:
                                annotation file intervals override the default group tag
-                               If ann_file is None, the code will look next to each video for:
+                               If ann_path is None, the code will look next to each video for:
                                <video_stem>.txt, <video_stem>.ann, or <video_stem>
     :param skip_without_ann:   → If True, skip videos that have no usable annotation file.
     :param use_old_meta:       → Optional kwargs flag. If True, write the old compact detector metadata.
@@ -138,7 +138,7 @@ def process_video(input_videos: Path | str,
         return None
 
     def resolve_annotation_source(vid_path, ann_spec):
-        """Resolve one annotation source for one video."""
+        """ Resolve one annotation source for one video."""
         if ann_spec is None:
             return find_annotation_file(vid_path)
         ann_spec = Path(ann_spec)
@@ -171,6 +171,7 @@ def process_video(input_videos: Path | str,
         return False
 
     #* normalize arguments
+    ann_path = kwargs.pop('ann_file', ann_path)  # backward compatible alias
     input_videos = Path(input_videos)
     output_path = Path(output_path) if output_path else None
     model_path = kwargs.get('model_path', None) or DEFAULT_YOLO
@@ -238,7 +239,7 @@ def process_video(input_videos: Path | str,
     print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {yolo_threshold}", 'b')
     print(f"Default group event: {default_grp_tag}\n")
 
-    # ann_intervals = parse_annotation_file(ann_file) if ann_file else None
+    # ann_intervals = parse_annotation_file(ann_path) if ann_path else None
     for vid_path in vid_list:
         #* open video
         cap = cv2.VideoCapture(str(vid_path))
@@ -263,7 +264,7 @@ def process_video(input_videos: Path | str,
         video_duration_sec = frame_count/fps
         print(f"*** Converting {vid_path.name},{(w, h)}p {video_duration_sec} s")
 
-        auto_ann_file = resolve_annotation_source(vid_path, ann_file)
+        auto_ann_file = resolve_annotation_source(vid_path, ann_path)
         if auto_ann_file is not None:
             print_color(f"Using annotation file: {auto_ann_file}", 'g')
             video_ann = parse_annotation_file(auto_ann_file)
@@ -442,8 +443,12 @@ def process_video(input_videos: Path | str,
             if zip_output:
                 archive_path = _zip_one_path(json_path, protocol=kwargs.get('zip_protocol','zip'))
                 print_color(f"Archived to {archive_path}", 'b')
+                json_path.unlink()
+                save_path = archive_path
+            else:
+                save_path = json_path
 
-            print_color(f"Saved::{len(segment_frames)} frame to {json_path}\n----------------\n'",'b')
+            print_color(f"Saved::{len(segment_frames)} frame to {save_path}\n----------------\n'",'b')
 
         cap.release()
         if show:
@@ -461,10 +466,13 @@ if __name__ == "__main__":
     # process_video(video_path, output_path = draft_path/'tst-03', default_grp_tag= 0, )
 
     ubi_ann  = Path("data/video/UBI_FIGHTS/ann_ws_ready")
-    ubi_vid  = Path("data/video/UBI_FIGHTS/videos/fight")
-    ubi_vid  = Path("data/video/UBI_FIGHTS/videos/normal")
-
-    json_dir = Path("data/json_files/UBI/3fps/normal")
-    fps = 3; grp_tag = 0
-    process_video(ubi_vid, json_dir, ann_file=None, default_grp_tag=grp_tag,
-                  sample_rate=fps, zip_output=False)
+    ubi_fight = Path("data/video/UBI_FIGHTS/videos/fight-x")
+    ubi_norm  = Path("data/video/UBI_FIGHTS/videos/normal-x")
+    # json_dir = Path("data/json_files/UBI/3fps/normal")
+    fps = 6; grp_tag = 0
+    json_dir = Path(f"data/json_files/UBI/{fps}fps/fight-x")
+    process_video(ubi_fight, json_dir, ann_path=ubi_ann, default_grp_tag=grp_tag,
+                  sample_rate=fps, zip_output=True, skip_without_ann=True)
+    json_dir = Path(f"data/json_files/UBI/{fps}fps/normal-x")
+    process_video(ubi_norm, json_dir, ann_path=None, default_grp_tag=grp_tag,
+                  sample_rate=fps, zip_output=True, skip_without_ann=False)

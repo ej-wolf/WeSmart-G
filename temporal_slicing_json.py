@@ -77,7 +77,6 @@ def slice_json_stream(# json_path:str|Path,
                 label = 1
             else:
                 label = None if allow_empty_lbl else 0
-
             clips.append({'frames':clip_frames, 'label':label, 't_start':t_first, 't_end':t_last})
 
         t += stride_sec

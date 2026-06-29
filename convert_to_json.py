@@ -6,7 +6,7 @@
 
     Usage:
     >> convert_to_json.py [-h] VIDEO [-m MODEL] [-o OUT] [-s SAMPLE_RATE] [-c CONF]
-                              [-g GROUP_ANN [GROUP_ANN ...]] [-a ANN_FILE]
+                              [-g GROUP_ANN [GROUP_ANN ...]] [-a ANN_PATH]
     Options:
       -h, --help                  show this help message and exit
       VIDEO                       Path to input video or dir of videos (.mp4, .mkv, ...)
@@ -15,7 +15,7 @@
       -s/--sample-rate RATE       Sampling rate in Hz
       -c/--conf CONF              YOLO detection confidence threshold
       -g/--group-ann [GROUP_ANN ...]  Default annotation for group event
-      -a/--ann-file ANN_FILE      Optional annotation text file
+      -a/--ann-path ANN_PATH      Optional annotation file or annotation directory
 """
 import argparse
 from pathlib import Path
@@ -31,7 +31,8 @@ def main():
     parser.add_argument( '-s', '--sample-rate', type=float, help="Sampling rate in Hz")
     parser.add_argument( '-c', '--conf', type=float, help="YOLO detection confidence threshold")
     parser.add_argument( '-g', '--group-ann', type=int, nargs='+', help="Default annotation for group event")
-    parser.add_argument( '-a', '--ann-file', type=Path, help="Optional annotation text file")
+    parser.add_argument( '-a', '--ann-path', '--ann-file', dest='ann_path', type=Path,
+                         help="Optional annotation file or annotation directory")
     parser.add_argument( '-sw', '--show', action='store_true', help='Show video during processing')
     parser.add_argument( '-z', '--zip', action='store_true', help='save JSONs as zip file')
 
@@ -39,9 +40,9 @@ def main():
     if args.conf is not None:
         print_color(args.conf)
 
-    process_kwargs = dict(input_path=args.video,
+    process_kwargs = dict(input_videos=args.video,
                           output_path=args.out,
-                          ann_file=args.ann_file,
+                          ann_path=args.ann_path,
                           default_grp_tag=args.group_ann,
                           model_path=args.model,
                           zip_output=args.zip,)

@@ -407,11 +407,11 @@ def convert_vid_2_json():
     vid_dir = main_dir/"UBI_FIGHTS/videos/fight"
     ann_dir = main_dir/"UBI_FIGHTS/ann_ws_ready"
     out_dir = json_dir/"UBI/fight2"
-    process_video(vid_dir, out_dir, ann_file=ann_dir, skip_without_ann=True,
+    process_video(vid_dir, out_dir, ann_path=ann_dir, skip_without_ann=True,
                   default_grp_tag=grp_tag, sample_rate=fps, zip_output=False)
     out_dir = json_dir/"UBI/5fps/fight"
     fps = 5
-    process_video(vid_dir, out_dir, ann_file=ann_dir, skip_without_ann=True,
+    process_video(vid_dir, out_dir, ann_path=ann_dir, skip_without_ann=True,
                   default_grp_tag=grp_tag, sample_rate=fps, zip_output=False)
 
 
