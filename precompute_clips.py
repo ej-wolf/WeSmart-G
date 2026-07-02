@@ -73,20 +73,20 @@ from pathlib import Path
 from json_utils import load_json_data, list_json_sources
 from common.my_local_utils import print_color, as_collection
 from temporal_slicing_json import slice_json_stream, WINDOW_SEC, STRIDE_SEC
-from motion_feature_schema import (DEFAULT_POOL_MODE, DEFAULT_POOL_TOP_K_MIN, DEFAULT_POOL_TOP_K_RATIO,
+from motion_feature_schema import (DEFAULT_POOL_MODE, DEFAULT_TOP_K_MIN, DEFAULT_TOP_K_RATIO,
                                    DEFAULT_TEMP_KERNEL, DEFAULT_TEMP_SMOOTHING,
                                    FEATURE_SCHEMA_KEY, SOURCE_CACHES_KEY, TEMPORAL_SCHEMA_KEY,
                                    assert_feature_schema_match, build_cache_record, get_clip_features_vec, pack_json_value,
                                    build_feature_schema, load_cache_contract, load_cache_contract_compact, build_temporal_schema,
-                                   MOTION_FPS_MAX, MOTION_FPS_MIN, MOTION_FPS_REF )
+                                   MOTION_FPS_MAX, MOTION_FPS_MIN, MOTION_FPS_REF)
 
 
 #* Defaults (ToDo config later if needed)
 TEST_RATIO = 0.2
 RANDOM_SEED = 42
 POOL_MODE = DEFAULT_POOL_MODE
-POOL_TOP_K_RATIO = DEFAULT_POOL_TOP_K_RATIO
-POOL_TOP_K_MIN = DEFAULT_POOL_TOP_K_MIN
+POOL_TOP_K_RATIO = DEFAULT_TOP_K_RATIO
+POOL_TOP_K_MIN = DEFAULT_TOP_K_MIN
 TEMPORAL_SMOOTHING = DEFAULT_TEMP_SMOOTHING
 TEMP_KERNEL = DEFAULT_TEMP_KERNEL
 MIN_ERROR = 1e-7
@@ -172,8 +172,8 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
                      temp_smooth=kwargs.get('temp_smooth', TEMPORAL_SMOOTHING),
                      temp_kernel=kwargs.get('temp_kernel', TEMP_KERNEL),
                      pool_mode=kwargs.get('pool_mode', POOL_MODE),
-                     pool_top_k_ratio=kwargs.get('pool_top_k_ratio', POOL_TOP_K_RATIO),
-                     pool_top_k_min=kwargs.get('pool_top_k_min', POOL_TOP_K_MIN),
+                     top_k_ratio=kwargs.get('top_k_ratio', kwargs.get('pool_top_k_ratio', DEFAULT_TOP_K_RATIO)),
+                     top_k_min=kwargs.get('top_k_min', kwargs.get('pool_top_k_min', DEFAULT_TOP_K_MIN)),
                      motion_fps_ref=kwargs['motion_fps_ref'] if 'motion_fps_ref' in kwargs else MOTION_FPS_REF,
                      motion_fps_min=kwargs.get('motion_fps_min', MOTION_FPS_MIN),
                      motion_fps_max=kwargs.get('motion_fps_max', MOTION_FPS_MAX),
@@ -197,8 +197,8 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
                                  temp_smooth=bool(feature_schema['temp_smooth']),
                                  temp_kernel=int(feature_schema['temp_kernel']),
                                  pool_mode=str(feature_schema['pool_mode']),
-                                 pool_top_k_ratio=float(feature_schema['pool_top_k_ratio']),
-                                 pool_top_k_min=int(feature_schema['pool_top_k_min']),
+                                 top_k_ratio=float(feature_schema['top_k_ratio']),
+                                 top_k_min=int(feature_schema['top_k_min']),
                                  j_version=float(feature_schema['extractor_version']),
                                  motion_fps_ref=feature_schema['motion_fps_ref'],
                                  motion_fps_min=feature_schema['motion_fps_min'],
@@ -639,8 +639,8 @@ def _run_build_cache_ds(args):
                                         pure_motion=args.pure_motion,
                                         legacy=args.legacy,
                                         pool_mode=args.pool_mode,
-                                        pool_top_k_ratio=args.pool_top_k_ratio,
-                                        pool_top_k_min=args.pool_top_k_min,
+                                        top_k_ratio=args.top_k_ratio,
+                                        top_k_min=args.top_k_min,
                                         )
     cache_info(train_cache, mode='dataset')
     test_cache = build_cache_from_json(_json_paths_from_list(jsons_dir, eval_list), cache_dir/f"{npz_name}_test",
@@ -652,8 +652,8 @@ def _run_build_cache_ds(args):
                                        pure_motion=args.pure_motion,
                                        legacy=args.legacy,
                                        pool_mode=args.pool_mode,
-                                       pool_top_k_ratio=args.pool_top_k_ratio,
-                                       pool_top_k_min=args.pool_top_k_min,
+                                       top_k_ratio=args.top_k_ratio,
+                                       top_k_min=args.top_k_min,
                                        )
     cache_info(test_cache, mode='dataset')
 
@@ -691,8 +691,8 @@ def _run_stream_cache(args):
                                        pure_motion=args.pure_motion,
                                        legacy=args.legacy,
                                        pool_mode=args.pool_mode,
-                                       pool_top_k_ratio=args.pool_top_k_ratio,
-                                       pool_top_k_min=args.pool_top_k_min,
+                                       top_k_ratio=args.top_k_ratio,
+                                       top_k_min=args.top_k_min,
                                        )
     cache_info(cache_path, mode='stream')
 
@@ -711,8 +711,8 @@ def main():
         prs.add_argument('-l', '--legacy', action='store_true', help='use only the original 18 motion features')
         prs.add_argument('-pm', '--pool-mode', default=POOL_MODE,
                          choices=['max', 'mean', 'lse', 'top_k', 'mean_max', 'mean_std_max', 'mm', 'msm'], help='clip pooling mode')
-        prs.add_argument('-kr', '--top-k-ratio', type=float, default=POOL_TOP_K_RATIO, help='ratio for top_k pooling')
-        prs.add_argument('-k', '--top-k-min', type=int, default=POOL_TOP_K_MIN, help='minimum pooled k for top_k')
+        prs.add_argument('-kr', '--top-k-ratio', dest='top_k_ratio', type=float, default=POOL_TOP_K_RATIO, help='ratio for top_k pooling')
+        prs.add_argument('-k', '--top-k-min', dest='top_k_min', type=int, default=POOL_TOP_K_MIN, help='minimum pooled k for top_k')
         prs.add_argument('--no-temp-smooth', action='store_true', help='disable temporal smoothing')
         prs.add_argument('--json-type', default=DEFAULT_TYPE, choices=['type_1', 'type_2', '1', '2'], help='input JSON format for loader')
 

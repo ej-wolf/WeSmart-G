@@ -2,6 +2,9 @@
 from __future__ import annotations
 import argparse
 import json, csv
+import os
+import random
+import shutil
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -13,7 +16,15 @@ JSON_SUFFIX = '.json'
 CSV_SUFFIX = '.csv'
 NPZ_SUFFIX = '.npz'
 
-SJ_EVENT_BUCKETS = {'empty': None, 'norm': 0, 'abnormal': 1, 'tension': 3, 'fight': 4}
+TAG_NO_EVENT = 0
+TAG_ABNORMAL = 1
+TAG_FALL = 2
+TAG_TENSION = 3
+TAG_FIGHT = 4
+
+SJ_EVENT_BUCKETS = {'empty': None, 'norm': TAG_NO_EVENT, 'abnormal': TAG_ABNORMAL,
+                    'tension': TAG_TENSION, 'fight': TAG_FIGHT}
+SJ_DRAW_RANDOM_SEED = 66
 
 
 
@@ -229,7 +240,219 @@ def stream_json_info(sj_path, op_path=None, **kwargs) -> dict[str, Any]:
     if out_path is not None:
         _save_report()
     print_stream_json_info(report, **kwargs)
-    return report
+    # return report
+
+
+def draw_json_streams(json_path, criteria, cutoff: float, **kwargs) -> tuple[list[Path], dict[str, float]]:
+    """ Draw random SJs until the selected duration criteria reaches
+        cutoff within tolerance."""
+
+    def _load_sj_list(json_path) -> list[Path]:
+        if isinstance(json_path, (list, tuple, set)):
+            paths = [resolve_json_source(p) for p in json_path]
+            if not paths:
+                raise ValueError('No stream JSON files were provided')
+            return paths
+
+        json_path = Path(json_path)
+        if json_path.is_dir():
+            paths = list_json_sources(json_path)
+            if not paths:
+                raise FileNotFoundError(f'No stream JSON files found in {json_path}')
+            return paths
+        try:
+            return [resolve_json_source(json_path)]
+        except FileNotFoundError:
+            pass
+        raise FileNotFoundError(json_path)
+
+    def _normalize_criteria(criteria) -> tuple[list[str | int], list[Any]]:
+        crits = list(criteria) if isinstance(criteria, (list, tuple, set)) else [criteria]
+        crits = ['t_total' if crit == 'total' else crit for crit in crits]
+        valid = {'t_total', 'empty', TAG_NO_EVENT, TAG_ABNORMAL, TAG_FALL, TAG_TENSION, TAG_FIGHT}
+        return [crit for crit in crits if crit in valid], [crit for crit in crits if crit not in valid]
+
+    def _stream_duration(frames: list[dict[str, Any]]) -> float:
+        if len(frames) < 2:
+            return 0.0
+        return max(0.0, float(frames[-1].get('t', 0.0)) - float(frames[0].get('t', 0.0)))
+
+    def _file_times(path: Path) -> dict[str, Any]:
+        path = resolve_json_source(path)
+        data = load_json_raw(path)
+        frames = data.get('frames')
+        if not isinstance(frames, list):
+            raise ValueError('missing frames list')
+
+        parts = {'t_total': _stream_duration(frames),
+                 'empty': sum(_merged_bucket_durations(frames, None)),
+                 TAG_NO_EVENT: sum(_merged_bucket_durations(frames, TAG_NO_EVENT)),
+                 TAG_ABNORMAL: sum(_merged_bucket_durations(frames, TAG_ABNORMAL)),
+                 TAG_FALL: sum(_merged_bucket_durations(frames, TAG_FALL)),
+                 TAG_TENSION: sum(_merged_bucket_durations(frames, TAG_TENSION)),
+                 TAG_FIGHT: sum(_merged_bucket_durations(frames, TAG_FIGHT))}
+        return {'path': path,
+                'time': sum(parts[cr] for cr in criteria_ls),
+                'parts': parts}
+
+    def _save_file_list(files: list[Path]) -> None:
+        list_path = kwargs.get('list_path')
+        if list_path is None:
+            return
+
+        path_format = kwargs.get('path_format', 'name')
+        if path_format not in {'name', 'full', 'cwd'}:
+            raise ValueError(f"Unsupported draw_json_streams path_format: {path_format}")
+
+        out_path = Path(list_path)
+        if out_path.is_dir():
+            out_path = out_path/'stream_ls.txt'
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        def fmt_path(path: Path) -> str:
+            if path_format == 'name':
+                return path.name
+            if path_format == 'full':
+                return str(path.resolve())
+            return os.path.relpath(path.resolve(), Path.cwd().resolve())
+
+        lines = [fmt_path(path) for path in files]
+        if kwargs.get('sort_list', True):
+            lines = sorted(lines)
+
+        with out_path.open('w', encoding='utf-8') as f:
+            for line in lines:
+                f.write(f'{line}\n')
+
+    def _resolve_collect_source(path: Path, list_file: Path | None = None) -> Path:
+        candidates = [path]
+        if list_file is not None and not path.is_absolute():
+            candidates.append(list_file.parent / path)
+        json_root = Path(json_path) if not isinstance(json_path, (list, tuple, set)) else None
+        if json_root is not None and json_root.is_dir() and not path.is_absolute():
+            candidates.append(json_root / path)
+
+        for candidate in candidates:
+            try:
+                return resolve_json_source(candidate)
+            except FileNotFoundError:
+                pass
+        return resolve_json_source(path)
+
+    def _load_collect_paths() -> list[Path]:
+        collect = kwargs.get('json_collect')
+        if collect is None:
+            return []
+        if isinstance(collect, (str, Path)):
+            collect = Path(collect)
+            if collect.is_file():
+                paths = []
+                for line in collect.read_text(encoding='utf-8').splitlines():
+                    line = line.strip()
+                    if line:
+                        paths.append(_resolve_collect_source(Path(line), collect))
+                return paths
+            return [_resolve_collect_source(collect)]
+        return [_resolve_collect_source(Path(path)) for path in collect]
+
+    tolerance = kwargs.get('tolerance', 0.05)
+
+    if cutoff <= 0.0:
+        raise ValueError('draw_json_streams cut off must be positive')
+    if tolerance < 0.0:
+        raise ValueError('draw_json_streams tolerance must be non-negative')
+
+    criteria_ls, _ = _normalize_criteria(criteria)
+    allowed_max = cutoff + tolerance if tolerance > 1.0 else cutoff * (1.0 + tolerance)
+    rng = random.Random(kwargs.get('seed', SJ_DRAW_RANDOM_SEED))
+
+    collect_paths = _load_collect_paths()
+    collect_keys = {path.resolve() for path in collect_paths}
+    selected = []
+    for path in collect_paths:
+        try:
+            row = _file_times(path)
+            selected.append(row)
+        except Exception as exc:
+            print_color(f"[ERROR] draw_json_streams skipped {path}: {type(exc).__name__}: {exc}", 'r')
+
+    candidates = []
+    for path in _load_sj_list(json_path):
+        try:
+            if resolve_json_source(path).resolve() in collect_keys:
+                continue
+            row = _file_times(path)
+            if row['time'] > 0.0:
+                candidates.append(row)
+        except Exception as exc:
+            print_color(f"[ERROR] draw_json_streams skipped {path}: {type(exc).__name__}: {exc}", 'r')
+
+    rng.shuffle(candidates)
+    t_acc = sum(row['time'] for row in selected)
+
+    while candidates and not (cutoff <= t_acc <= allowed_max):
+        row = candidates.pop()
+        selected.append(row)
+        t_acc += row['time']
+
+        while selected and t_acc > allowed_max:
+            idx = max(range(len(selected)), key=lambda i: selected[i]['time'])
+            dropped = selected.pop(idx)
+            t_acc -= dropped['time']
+
+    totals = {'t_total': 0.0, 'empty': 0.0, TAG_NO_EVENT: 0.0, TAG_ABNORMAL: 0.0,
+              TAG_FALL: 0.0, TAG_TENSION: 0.0, TAG_FIGHT: 0.0}
+    for row in selected:
+        for key in totals:
+            totals[key] += row['parts'][key]
+
+    files_list = [row['path'] for row in selected]
+    _save_file_list(files_list)
+    return files_list, totals
+
+
+def collect_jsons(json_ls, src_dir, trg_dir) -> list[Path]:
+    """Copy selected SJ files into trg_dir from src_dir or absolute list entries."""
+
+    def _load_list(jls) -> list[Path]:
+        if isinstance(jls, (str, Path)):
+            jls = Path(jls)
+            if jls.is_file():
+                return [Path(l.strip()) for l in jls.read_text(encoding='utf-8').splitlines()
+                        if l.strip()]
+            print(f"collect_jsons expected a list file, got: {jls}")
+            return []
+        return [Path(path) for path in jls]
+
+    entries = _load_list(json_ls)
+    trg_dir = Path(trg_dir)
+    trg_dir.mkdir(parents=True, exist_ok=True)
+    copied = []
+
+    if entries and src_dir is None and not entries[0].is_absolute():
+        print_color("[WARN] collect_jsons cannot resolve relative paths without src_dir", 'y')
+        return copied
+    src_dir = Path(src_dir) if src_dir is not None else None
+
+    print('DBUG:', entries)
+    for entry in entries:
+        src_req = entry if entry.is_absolute() else src_dir/entry
+        if entry.is_absolute():
+            print(entry)
+        else:
+            print("not abolute")
+        print(src_req)
+
+        try:
+            src = resolve_json_source(src_req)
+        except FileNotFoundError:
+            print(f"collect_jsons missing file: {src_req}")
+            continue
+
+        dst = trg_dir/src.name
+        shutil.copy2(src, dst)
+        copied.append(dst)
+    return copied
 
 #* endregion *#
 

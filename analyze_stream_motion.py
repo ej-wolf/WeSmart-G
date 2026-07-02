@@ -42,8 +42,8 @@ DEFAULT_VERSION = 3.0
 MOTION_FPS_REF = 5.0
 MOTION_FPS_MIN = 1.0
 MOTION_FPS_MAX = 20.0
-DEFAULT_POOL_TOP_K_RATIO = 0.2
-DEFAULT_POOL_TOP_K_MIN = 2
+DEFAULT_TOP_K_RATIO = 0.2
+DEFAULT_TOP_K_MIN = 2
 POOL_MODE_ALIASES = {'mm': 'mean_max', 'msm': 'mean_std_max'}
 
 
@@ -111,8 +111,8 @@ def _clip_pooling(motion_seq, mode='max', **kwargs):
         alpha = kwargs.get('alpha', 5.0)
         return (1.0/alpha) * np.log(np.exp(alpha * motion_seq).sum(axis=0))
     if mode == 'top_k':
-        k_ratio = float(kwargs.get('pool_top_k_ratio', DEFAULT_POOL_TOP_K_RATIO))
-        k_min = int(kwargs.get('pool_top_k_min', DEFAULT_POOL_TOP_K_MIN))
+        k_ratio = float(kwargs.get('top_k_ratio', kwargs.get('pool_top_k_ratio', DEFAULT_TOP_K_RATIO)))
+        k_min = int(kwargs.get('top_k_min', kwargs.get('pool_top_k_min', DEFAULT_TOP_K_MIN)))
         k = min(len(motion_seq), max(k_min, int(np.ceil(len(motion_seq)*k_ratio))))
         return np.sort(motion_seq, axis=0)[-k:].mean(axis=0)
     if mode == 'mean_max':

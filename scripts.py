@@ -2,6 +2,7 @@
     result aggregation, and small local utility flows.
     Usage:
     - build caches from JSON directories with `build_cache_batch(...)`
+    - build multi-mode cache batches with `build_caches(...)`
     - run end-to-end train/test flows with `train_models(...)` or `train_test_study(...)`
     - rerun tests for existing models with `test_models(...)`
     - collect summary tables with `sum_all_results(...)`
@@ -10,16 +11,19 @@
 
 import json, pickle, glob
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 #* Imports from local project
 from precompute_clips import (build_cache_from_json, merge_cache_npz, WINDOW_SEC, STRIDE_SEC,
-                              TEST_RATIO, RANDOM_SEED, DEFAULT_TYPE, _run_build_cache_ds)
+                              TEST_RATIO, RANDOM_SEED, DEFAULT_TYPE, _run_build_cache_ds, split_json_ds,
+                              MOTION_FPS_REF)
 from tms_trainer import run_training, run_testing
 from evaluation_core import analyze_clip_test, analyze_video_test, support_pair
 from stream_analysis import analyze_stream_test
 from common.my_local_utils import as_collection, get_unique_name
+from json_utils import list_json_sources
 from project_utils import get_exporting_name
 
 #* general configuration
@@ -35,6 +39,7 @@ JOINT_DS =  'J-RWL'
 RESULT_NAME = 'all_results'
 DEFAULT_REG_MODEL = Path("work_dirs/json_models/win-study/260414-1721_J-RWL_25ft_3w-1o5-stream-tst/best_model.148.pt")
 
+#*** region cache building ***
 
 def build_cache_batch(json_dirs, output_path, **kwargs):
     """ Build train/test caches for one or more dataset dirs.
@@ -68,6 +73,195 @@ def build_cache_batch(json_dirs, output_path, **kwargs):
                       'test_cache': output_path/f"{run_args.cache_name}_test.npz",})
     return built
 
+
+def build_caches(dir_ls, pooling, t_slc, kwargs=None): #
+    """ Build cache batches for one or more JSON dirs, pool modes, and time slices.
+    - uses train/test list files when both exist
+    - otherwise falls back to an in-memory split only if a split_ratio is provided
+    - supports plain `.json`, `.json.zip`, and `.zip` sources through `list_json_sources(...)`
+    """
+    kwargs = dict(kwargs or {})
+
+    def _dir_tag(j_dir: Path) -> str:
+        parent = j_dir.parent.name
+        return f"{parent}-{j_dir.name}"
+
+    def _pool_tag(pool_name: str) -> str:
+        return {'mean_max': 'mm', 'mean_std_max': 'msm'}.get(pool_name, pool_name)
+
+    def _time_tag(win:float, stride:float) -> str:
+        return f"{str(win).replace('.', '')}-{str(stride).replace('.', '')}"
+
+    def _json_paths_from_list(json_dir: Path, list_file: Path) -> list[Path]:
+        with list_file.open('r', encoding='utf-8') as handle:
+            names = [ln.strip() for ln in handle if ln.strip()]
+        return [json_dir/name for name in names]
+
+    def _build_one_cache(json_paths: list[Path], out_path: Path, *, win:float, strd:float, pool_name: str):
+        control_keys = {'cache_dir', 'split_ratio', 'test_ratio', 'random_seed', 'log_path'}
+        build_kwargs = {key: val for key, val in kwargs.items() if key not in control_keys}
+        build_kwargs.update({'window': win, 'stride': strd, 'pool_mode': pool_name})
+        build_cache_from_json(json_paths, out_path, **build_kwargs)
+
+    def _stream_src(json_dir: Path) -> str:
+        return f"{json_dir.parent.name}_{json_dir.name}"
+
+    def _write_log(row: dict):
+        if log_path is None:
+            return
+        header = ['time-stamp', 'status', 'stream_src', 'n_jsons', 'set', 'split',
+                  'fps_ref', 'pool', 'window-stride', 't_wrk', 'cache_name']
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            need_header = not log_path.is_file() or log_path.stat().st_size == 0
+            with log_path.open('a', encoding='utf-8') as f:
+                if need_header:
+                    f.write('\t'.join(header) + '\n')
+                f.write('\t'.join(str(row[col]) for col in header) + '\n')
+        except Exception as exc:
+            print(f"[WARN] Failed to write cache build log {log_path}: {type(exc).__name__}: {exc}")
+
+    out_dir = Path(kwargs.get('cache_dir', MAIN_CACHE_DIR / 'new_format'))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = Path(kwargs.get('log_path', out_dir/'caching_log.txt'))
+    split_seed = kwargs.get('random_seed', RANDOM_SEED)
+    fps_ref = kwargs.get('motion_fps_ref', MOTION_FPS_REF)
+
+    results = []
+    for json_dir in as_collection(dir_ls):
+        json_dir = Path(json_dir)
+        if not json_dir.is_dir():
+            raise NotADirectoryError(json_dir)
+
+        train_txt = json_dir/'train_videos.txt'
+        test_txt = json_dir/'test_videos.txt'
+        has_split = train_txt.is_file() and test_txt.is_file() and 'split_ratio' not in kwargs
+        all_jsons = list_json_sources(json_dir)
+        if not all_jsons:
+            print(f" No JSON sources found in {json_dir}")
+            continue
+
+        if has_split:
+            train_jsons = _json_paths_from_list(json_dir, train_txt)
+            test_jsons = _json_paths_from_list(json_dir, test_txt)
+            split_jobs = [('train', train_jsons), ('test', test_jsons)]
+        else:
+            split_ratio = kwargs.get('split_ratio', kwargs.get('test_ratio', 0.0))
+            if split_ratio:
+                splits = split_json_ds(json_dir, test_ratio=split_ratio,
+                                       random_seed=kwargs.get('random_seed', RANDOM_SEED))
+                train_jsons, test_jsons = splits['train'], splits['test']
+            else:
+                train_jsons, test_jsons = all_jsons, []
+            split_jobs = [('train', train_jsons)]
+            if test_jsons:
+                split_jobs.append(('test', test_jsons))
+
+        split_total = len(train_jsons) + len(test_jsons)
+        for pool_name in as_collection(pooling):
+            pool_name = str(pool_name)
+            pool_tag = _pool_tag(pool_name)
+            for slc in as_collection(t_slc):
+                if isinstance(slc, dict):
+                    window = float(slc['window'])
+                    stride = float(slc['stride'])
+                elif isinstance(slc, (tuple, list)) and len(slc) >= 2:
+                    window = float(slc[0])
+                    stride = float(slc[1])
+                elif isinstance(slc, str):
+                    parts = [p.strip() for p in slc.split(':') if p.strip()]
+                    if len(parts) != 2:
+                        raise ValueError(f"Bad time-slice spec: {slc}")
+                    window, stride = float(parts[0]), float(parts[1])
+                else:
+                    raise TypeError(f"Unsupported time-slice spec: {slc}")
+
+                cache_tag = f"{_dir_tag(json_dir)}_P-{pool_tag}_W{_time_tag(window, stride)}"
+                for split_name, json_paths in split_jobs:
+                    if split_name == 'test' and not has_split and not test_jsons:
+                        continue
+                    out_path = out_dir/f"{cache_tag}_{split_name}.npz"
+                    t0 = time.time()
+                    try:
+                        print(f"building cache: {out_path.name}  ")
+                        _build_one_cache(json_paths, out_path, win=window, strd=stride, pool_name=pool_name)
+                        ok = out_path.is_file()
+                        t = time.time() - t0
+                    except Exception as exc:
+                        ok = False
+                        t = time.time() - t0
+                        print(f"[FAIL] {out_path}: {type(exc).__name__}: {exc}")
+                    else:
+                        print(f"OK | t = {t:.2f}  |  {out_path.name} " if ok else f"FAILED {out_path.name}")
+                    split_ratio = (len(json_paths) / split_total) if split_total else 0.0
+                    _write_log({'time-stamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'status': 'OK' if ok else 'FAIL',
+                                'stream_src': _stream_src(json_dir),
+                                'n_jsons': len(json_paths),
+                                'set': split_name, 'split': f"{split_ratio:.3f} / {split_seed}",
+                                'fps_ref': fps_ref,
+                                'pool': pool_name, 'window-stride': f"{window:g}-{stride:g}",
+                                't_wrk': f"{t:.2f}",
+                                'cache_name': out_path.name})
+
+                    results.append({'json_dir': json_dir, 'pool': pool_name, 'window': window,
+                                    'stride': stride, 'split': split_name, 'cache': out_path, 'ok': ok,
+                                    't_wrk': t})
+
+    return results
+
+
+def merge_caches(cache_path, output_path=None):
+    """Merge same-tag train/test caches in one directory into Joint_* outputs."""
+    cache_path = Path(cache_path)
+    if not cache_path.is_dir():
+        raise NotADirectoryError(cache_path)
+
+    out_dir = Path(output_path) if output_path is not None else cache_path
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _split_tag(stem: str) -> tuple[str, str] | None:
+        if stem.startswith("Joint_"):
+            return None
+        if stem.endswith("_train"):
+            split = "train"
+        elif stem.endswith("_test"):
+            split = "test"
+        else:
+            return None
+
+        base = stem[:-len(f"_{split}")]
+        if "_" not in base:
+            return None
+        return base.split("_", 1)[1], split
+
+    groups: dict[str, dict[str, list[Path]]] = {}
+    for path in sorted(cache_path.glob("*.npz")):
+        tag_info = _split_tag(path.stem)
+        if tag_info is None:
+            continue
+        tag, split = tag_info
+        groups.setdefault(tag, {}).setdefault(split, []).append(path)
+
+    merged = []
+    for tag, split_map in sorted(groups.items()):
+        for split in ("train", "test"):
+            members = split_map.get(split, [])
+            if not members:
+                print(f"[WARN] Missing {split} caches for tag {tag}")
+                continue
+
+            out_name = get_unique_name(out_dir / f"Joint_{tag}_{split}.npz")
+            try:
+                merge_cache_npz(members, out_name)
+                print(f"[OK]   {out_name}")
+                merged.append(out_name)
+            except Exception as exc:
+                print(f"[FAIL] {out_name}: {type(exc).__name__}: {exc}")
+
+    return merged
+
+#* endregion *#
 
 def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs):
     """ Train every `*_train.npz` cache in a directory and run post-training tests.
@@ -778,7 +972,7 @@ def run_stream_json_dual(data_dir, output_dir,tag=None, **kwargs):
 
 
 def gen_tst():
-    """Run the hard-coded local end-to-end test flow used during development."""
+    """ Run the hard-coded local end-to-end test flow used during development."""
     cache_dir = "data/cache/w30-15_um"
     output_dir= "work_dirs/json_models/w30-15-um"
     stream_testing = ["cam-6-11-5_ft25_w30-15.npz",
@@ -789,16 +983,44 @@ def gen_tst():
     sum_all_results(output_dir)
 
 #733(,20,4)-> 755(,23,6)
+#build_caches 966(1,26,7)/ log 985(1,33,4)
+
 if __name__ == "__main__":
     pass
+
+    #* region Cache Building ***
+    cache_dir = MAIN_CACHE_DIR / "new_format"
+    json_dirs = [Path("data/json_files/HMC/ann-streams"),
+                Path("data/json_files/HMC/cam-streams"),
+                Path("data/json_files/HMC/events"),
+                Path("data/json_files/RLVS/5fps"),
+                Path("data/json_files/RWF-2000/5fps"),]
+    pooling = ['max', 'lse', 'top_k', 'mm']
+    t_slc = [(3.6, 1.2),
+             (1.2, 0.6)]
+    build_caches( json_dirs, pooling, t_slc, { 'cache_dir': cache_dir,} )
+    ubi_json_dir = Path("data/json_files/UBI/6fps")
+    ubi_pooling = pooling
+    ubi_t_slc = t_slc
+    build_caches(ubi_json_dir, ubi_pooling, ubi_t_slc,
+                 {'cache_dir': cache_dir, 'split_ratio': 0.2, 'random_seed': 42})
+
+
+    #* endregion
+
+    #_______________________________________________________________________#
+
+    #* region Time windows study  ***
     study_dir = 'win-study-tst'
     # study_dir = 'ftr-study'
     STUDY_CACHE_DIR = MAIN_CACHE_DIR/study_dir
+    #* endregion
 
     #* train & test for win study
     # build_window_study()
     # train_test_stdy(STUDY_CACHE_DIR)
     # sum_all_results(MAIN_WORK_DIR/study_dir, sort=['win-str','vid-clp', 'trn-tst-R'],save_json=True)
+    # * endregion
 
     # cache_dir = "data/cache/w30-15_um"
     # output_dir= "work_dirs/json_models/w30-15-um"
@@ -816,4 +1038,4 @@ if __name__ == "__main__":
     # run_stream_json_dual(d_d, op_d, '260611-no_imgsz'  )
     # run_stream_json_dual(d_d, op_d, '260312' )
 
-    convert_vid_2_json()
+    # convert_vid_2_json()
