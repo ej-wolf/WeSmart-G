@@ -88,11 +88,12 @@ def parse_annotation_file(ann_path):
     return {'events': event_intervals, 'split': split_intervals, 'exclude': exclude_intervals}
 
 #*  --- Main function, to be used from other unit ---------------------------------------
-def process_video(input_videos: Path | str,
-                  output_path:Path|str=None,
-                  sample_rate=DEFAULT_SAMPLING,
-                  yolo_threshold=YOLO_THRESHOLD,
-                  ann_path:str|Path=None, default_grp_tag=None,
+def process_video(input_videos: Path|str,
+                  output_path:  Path|str = None,
+                  sample_rate = DEFAULT_SAMPLING,
+                  yolo_thresh = YOLO_THRESHOLD,
+                  ann_path: str|Path = None,
+                  default_grp_tag = None,
                   **kwargs):
     """ Converts one or more videos into structured JSON annotations.
     A YOLO detector is used to perform per-frame person detection and
@@ -110,7 +111,7 @@ def process_video(input_videos: Path | str,
             - file path       → save exactly to that file
     Conversion related parameters:
     :param sample_rate:        → Sampling rate for JSON conversion (in Hz)
-    :param yolo_threshold:     → YOLO detection confidence threshold
+    :param yolo_thresh:     → YOLO detection confidence threshold
     :param default_grp_tag:    → Assign default events to all frames by default
     :param ann_path:           → Optional annotation file or annotation directory with rows:
                                start_time,\t  end_time,\t    event_flag
@@ -226,7 +227,7 @@ def process_video(input_videos: Path | str,
    #* detection info for header
     detector_info = {'model': Path(model_path).stem, 'version': model.ckpt['version']}
     if use_legacy_meta:
-        detector_info['threshold'] =  yolo_threshold
+        detector_info['threshold'] =  yolo_thresh
     else:
         detector_info.update({'runtime_ultralytics': ultralytics.__version__,
                                'runtime_torch': torch.__version__,
@@ -236,7 +237,7 @@ def process_video(input_videos: Path | str,
                                'device': ('cuda' if torch.cuda.is_available() else 'cpu'),
                                'model_sha256': checksum.hexdigest(),})
 
-    print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {yolo_threshold}", 'b')
+    print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {yolo_thresh}", 'b')
     print(f"Default group event: {default_grp_tag}\n")
 
     # ann_intervals = parse_annotation_file(ann_path) if ann_path else None
@@ -335,8 +336,8 @@ def process_video(input_videos: Path | str,
 
             #* run model on current frame
             try:
-                # results = model(frame, conf=yolo_threshold, verbose=False, imgsz=infer_img_sz)[0]
-                results = model(frame, conf=yolo_threshold, verbose=False)[0]
+                # results = model(frame, conf=yolo_thresh, verbose=False, imgsz=infer_img_sz)[0]
+                results = model(frame, conf=yolo_thresh, verbose=False)[0]
             except Exception as exc:
                 print(f"[ERROR] YOLO inference failed at frame_idx={frame_idx}: {exc}")
                 raise
@@ -431,7 +432,7 @@ def process_video(input_videos: Path | str,
                     'sampling rate': {'target':target_sampling, 'effective':effective_sampling},
                     'step': step}
             if not use_legacy_meta:
-                data['detection_threshold'] = yolo_threshold
+                data['detection_threshold'] = yolo_thresh
             data.update({'detector': detector_info, 'event_intervals':event_intervals, 'frames': segment_frames,})
 
             #Todo: resolve case when video_path is dir while output_path is a file name

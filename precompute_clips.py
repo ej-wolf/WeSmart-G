@@ -99,6 +99,10 @@ VIDEO_LIST = "_videos.txt"
 # CACHE_LIST = "_feats.npz"
 DEFAULT_TYPE = 'type_2'
 
+TRAIN_TAG = '_train'
+TEST_TAG = '_test'
+
+
 def split_json_ds(dir_path:str|Path, **kwargs) -> dict[str, list[Path]]:
     """ Split a directory of JSON videos into train / test sets.
     Parameters
@@ -126,6 +130,27 @@ def split_json_ds(dir_path:str|Path, **kwargs) -> dict[str, list[Path]]:
     n_test = int(max(np.ceil(r), r*len(json_files)))
 
     return {'train': json_files[n_test:], 'test': json_files[:n_test],}
+
+
+def get_split_pair(cache: str|Path) -> str | Path:
+    """ Return the sibling split cache name/path for a train or test NPZ."""
+    cache_path = Path(cache)
+    cache_text = str(cache)
+
+    stem = cache_path.stem
+    if stem.endswith(TRAIN_TAG):
+        pair_stem = stem[:-len(TRAIN_TAG)] + TEST_TAG
+    elif stem.endswith(TEST_TAG):
+        pair_stem = stem[:-len(TEST_TAG) ] + TRAIN_TAG
+    else:
+        return 'Unknown'
+
+    pair_name = pair_stem + cache_path.suffix
+    if cache_text == cache_path.name:
+        return pair_name
+
+    pair_path = cache_path.with_name(pair_name)
+    return pair_path if pair_path.is_file() else pair_name
 
 
 def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):

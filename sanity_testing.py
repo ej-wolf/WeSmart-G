@@ -18,12 +18,10 @@ import numpy as np
 import torch
 #* Project imports 
 from common.my_local_utils import as_collection, print_color
-from evaluation_core import analyze_clip_test, analyze_video_test, DEFAULT_EVAL_THRESHOLD
-from stream_analysis import analyze_stream_test
 from precompute_clips import RANDOM_SEED
-from project_utils import get_exporting_name, resolve_best_pt_model
-from scripts import sum_all_results
-from torch_clip_model import run_testing, run_training
+from project_utils import get_exporting_name, strip_split_suffix, strip_timestamp_prefix
+from scripts import train_models, test_models, infer_eval_threshold, evaluate_raw_test
+from torch_clip_model import run_training
 
 LOOSE_TOLERANCES = 0.05
 STRICT_TOLERANCES = 0.03
@@ -63,11 +61,6 @@ def _fmt_num(val) -> str:
     return f'{val:.4f}'.rstrip('0').rstrip('.')
 
 #* region Config And Small Shared Helpers
-def _model_tag_from_run_dir(run_dir: Path) -> str:
-    """Return the logical model tag, stripping one timestamp prefix when present."""
-    return run_dir.name.split('_', 1)[1] if re.match(r'^\d{6}-\d{4}_.+', run_dir.name) else run_dir.name
-
-
 def _iter_run_dirs(base_dir: Path) -> list[Path]:
     """List usable run dirs that already contain models or saved test outputs."""
     run_dirs = []
@@ -79,34 +72,6 @@ def _iter_run_dirs(base_dir: Path) -> list[Path]:
         if has_model or has_outputs:
             run_dirs.append(path)
     return run_dirs
-
-
-def _resolve_npz_inputs(inputs, base_dir: Path) -> list[Path]:
-    """Resolve NPZ files, dirs, or masks into one ordered unique list."""
-    resolved = []
-    seen = set()
-    for item in as_collection(inputs or []):
-        item = Path(item)
-        if not item.is_absolute():
-            item = base_dir / item
-        item_str = str(item)
-        if any(ch in item_str for ch in '*?[]'):
-            import glob
-            matches = [Path(p) for p in glob.glob(item_str)]
-        elif item.is_dir():
-            matches = sorted(p for p in item.iterdir() if p.is_file() and p.suffix == '.npz')
-        elif item.is_file():
-            matches = [item]
-        else:
-            matches = []
-        for path in matches:
-            key = str(path.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            resolved.append(path)
-    return resolved
-
 
 def _set_deterministic(seed: int) -> None:
     """ Apply one best-effort deterministic seed setup for Python, NumPy, and torch."""
@@ -123,19 +88,6 @@ def _set_deterministic(seed: int) -> None:
     if hasattr(torch.backends, 'cudnn'):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-
-
-def _infer_eval_threshold(run_dir: Path) -> float:
-    """Reuse the saved threshold from prior summaries, else fall back to the default."""
-    for summary_path in sorted(run_dir.rglob('*-summary.json')):
-        try:
-            with summary_path.open('r', encoding='utf-8') as f:
-                summary = json.load(f)
-            return float(summary.get('analysis_config', {}).get('threshold', DEFAULT_EVAL_THRESHOLD))
-        except Exception:
-            continue
-    return DEFAULT_EVAL_THRESHOLD
-
 
 def _resolve_tolerances(mode: str, override: dict[str, float] | None = None) -> dict[str, float]:
     """Return one normalized tolerance dict for the requested mode."""
@@ -243,9 +195,12 @@ def _print_stream_json_verbose(file_report: dict[str, Any]) -> None:
           f"max_abs={_fmt_num(float(numeric.get('max_abs', 0.0)))} "
           f"path={numeric.get('max_path')}")
 
+# endregion
+
 #* region Run Execution Helpers
 def train_sanity_models(cache_dir, out_dir, *, ds_testing=None, stm_testing=None, **kwargs):
     """ Train every `*_train.npz` cache in one directory and return the created run dirs."""
+    kwargs = dict(kwargs)
     cache_dir, out_dir = Path(cache_dir),  Path(out_dir)
     if not cache_dir.is_dir():
         raise NotADirectoryError(cache_dir)
@@ -255,24 +210,22 @@ def train_sanity_models(cache_dir, out_dir, *, ds_testing=None, stm_testing=None
     if not train_caches:
         raise FileNotFoundError(f'No *_train.npz caches found in {cache_dir}')
 
-    deterministic = kwargs.get('deterministic', False)
-    base_seed = kwargs.get('random_seed', RANDOM_SEED)
-    train_kw = {k: kwargs[k] for k in ('lr', 'batch_size', 'hidden_dim', 'save_every',
-                                       'max_epochs', 'epochs', 'patience', 'min_delta',
-                                       'split_ratio', 'split_seed')
-                                        if k in kwargs and kwargs[k] is not None}
+    deterministic = kwargs.pop('deterministic', False)
+    if not deterministic:
+        return train_models(cache_dir, out_dir, run_tests=False, **kwargs)
+
+    base_seed = kwargs.pop('random_seed', RANDOM_SEED)
     run_dirs = []
     for index, train_cache in enumerate(train_caches):
-        if deterministic:
-            _set_deterministic(base_seed + index)
-        train_tag = train_cache.stem[:-len('_train')] if train_cache.stem.endswith('_train') else train_cache.stem
-        run_dir = Path(run_training(train_cache, tag=train_tag, work_dir=out_dir, **train_kw))
+        _set_deterministic(base_seed + index)
+        train_tag = strip_split_suffix(train_cache.stem)
+        run_dir = Path(run_training(train_cache, tag=train_tag, work_dir=out_dir, **kwargs))
         run_dirs.append(run_dir)
     return run_dirs
 
 
 def run_sanity_tests(models_or_ref_dir, *, cache_dir, out_dir, ds_testing=None, stm_testing=None, **kwargs):
-    """ Run tests for existing models or reference run dirs and save one eval plan."""
+    """ Run raw tests for existing models or reference run dirs."""
 
     cache_dir,out_dir = Path(cache_dir), Path(out_dir)
 
@@ -280,62 +233,12 @@ def run_sanity_tests(models_or_ref_dir, *, cache_dir, out_dir, ds_testing=None, 
         raise NotADirectoryError(cache_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if isinstance(models_or_ref_dir, (str, Path)) and Path(models_or_ref_dir).is_dir():
-        model_refs = _iter_run_dirs(Path(models_or_ref_dir))
-    else:
-        model_refs = list(as_collection(models_or_ref_dir))
-    if not model_refs:
+    tested_dirs = test_models(models_or_ref_dir, ds_tests=ds_testing, stm_tests=stm_testing,
+                              npz_dir=cache_dir, out_dir=out_dir, evaluate=False,
+                              infer_threshold=True, **kwargs)
+    if not tested_dirs:
         raise FileNotFoundError('No model refs were provided for sanity testing')
-
-    ds_targets  = _resolve_npz_inputs(ds_testing, cache_dir)
-    stm_targets = _resolve_npz_inputs(stm_testing, cache_dir)
-    run_video = bool(kwargs.get('run_video', False))
-    eval_plan = {}
-    raw_results, tested_dirs = [],  []
-    for mdl in model_refs:
-        best_model = resolve_best_pt_model(mdl)
-        mdl = Path(mdl)
-        source_dir = mdl if mdl.is_dir() else best_model.parent
-        target_dir = source_dir if source_dir.parent.resolve() == out_dir.resolve() else out_dir / source_dir.name
-        target_dir.mkdir(parents=True, exist_ok=True)
-        model_tag = _model_tag_from_run_dir(source_dir)
-        own_test = cache_dir/f'{model_tag}_test.npz'
-        threshold = float(kwargs.get('threshold', _infer_eval_threshold(source_dir)))
-
-        dataset_tests = []
-        seen = set()
-        # Prefer the model's paired own-test cache, then add shared dataset tests once.
-        if own_test.is_file():
-            dataset_tests.append((own_test, False))
-            seen.add(str(own_test.resolve()))
-        for path in ds_targets:
-            key = str(path.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            dataset_tests.append((path, run_video))
-
-        for test_npz, use_video in dataset_tests:
-            raw_tag = get_exporting_name(best_model, test_npz, 'raw', unit='clip')
-            raw_path = run_testing(best_model, test_npz, out_dir=target_dir, output_tag=raw_tag, video_mode=use_video)['path']
-            raw_results.append(Path(raw_path))
-            rel_path = Path(raw_path).relative_to(out_dir).as_posix()
-            eval_plan[rel_path] = {'mode': ('video' if use_video else 'clip'), 'threshold': threshold}
-
-        if kwargs.get('run_stream', True):
-            for test_npz in stm_targets:
-                raw_tag = get_exporting_name(best_model, test_npz, 'raw', unit='stream')
-                raw_path = run_testing(best_model, test_npz, out_dir=target_dir, output_tag=raw_tag, video_mode=True)['path']
-                raw_results.append(Path(raw_path))
-                rel_path = Path(raw_path).relative_to(out_dir).as_posix()
-                eval_plan[rel_path] = {'mode': 'stream', 'threshold': threshold}
-        tested_dirs.append(target_dir)
-
-    plan_path = out_dir/_EVAL_PLAN_NAME
-    with plan_path.open('w', encoding='utf-8') as f:
-        json.dump(eval_plan, f, indent=2)
-    # return {'run_dirs': tested_dirs, 'raw_results': raw_results}
-    return tested_dirs, raw_results
+    return tested_dirs, []
 
 
 def run_sanity_eval(source_dir, *, out_dir, raw_results=None, ds_testing=None, stm_testing=None, **kwargs):
@@ -347,9 +250,15 @@ def run_sanity_eval(source_dir, *, out_dir, raw_results=None, ds_testing=None, s
         summary_name = f"{get_exporting_name(model_path, test_cache, 'summary', unit=infer_mode)}.json"
         return any(p.name == summary_name for p in run_dir.rglob('*.json'))
 
-    def _infer_eval_mode(run_dir:Path) -> str:
+    def _infer_eval_mode(raw_path:Path) -> str:
         # Old raw NPZ files do not store the eval mode explicitly, so reuse the mode
         # implied by whichever summary file already exists in the source run dir.
+        stem = raw_path.stem
+        if stem.endswith('_stream-tst'):
+            return 'stream'
+        if stem.endswith('_video-tst'):
+            return 'video'
+        run_dir = raw_path.parent
         if _summary_exists(run_dir, 'stream'):
             return 'stream'
         if _summary_exists(run_dir, 'video'):
@@ -386,7 +295,7 @@ def run_sanity_eval(source_dir, *, out_dir, raw_results=None, ds_testing=None, s
         target_run_dir = out_dir/rel_parent
         target_run_dir.mkdir(parents=True, exist_ok=True)
         if path.parent != prev_run_dir:
-            model_tag = _model_tag_from_run_dir(path.parent)
+            model_tag = strip_timestamp_prefix(path.parent.name)
             print(f'\n\b=== {model_tag} model Evaluation ===\n= evaluated dir : {target_run_dir}')
             prev_run_dir = path.parent
         # The raw test NPZ already carries the model/cache refs needed to rebuild names.
@@ -394,28 +303,9 @@ def run_sanity_eval(source_dir, *, out_dir, raw_results=None, ds_testing=None, s
             model_path = data['model_path'].item() if isinstance(data['model_path'], np.ndarray) else data['model_path']
             test_cache = data['test_cache'].item() if isinstance(data['test_cache'], np.ndarray) else data['test_cache']
         plan_item = eval_plan.get(rel_raw, {})
-        mode = plan_item.get('mode') or _infer_eval_mode(path.parent)
-        threshold = kwargs.get('threshold', plan_item.get('threshold', _infer_eval_threshold(path.parent)))
-        output_name = get_exporting_name(model_path, test_cache, 'summary', unit=mode)
-        common = {'out_path': target_run_dir,
-                  'threshold': threshold,
-                  'threshold_dir': Path(f"th-{int(round(threshold * 100.0))}"),
-                  'overwrite': True,
-                  'show_roc': kwargs.get('show_roc', False),
-                  'roc_csv': kwargs.get('roc_csv', True),
-                  'print_policy': kwargs.get('print_policy', 'summary'),
-                  'print':  kwargs.get('print_report', False),
-                  }
-        if mode == 'stream':
-            analyze_stream_test(path, output_name=output_name,
-                                details_name=f"{get_exporting_name(model_path, test_cache, 'events')}.json",
-                                events_json=kwargs.get('events_json', True), plotting=kwargs.get('plotting', 'save'), **common,)
-        elif mode == 'video':
-            analyze_video_test(path, output_name=output_name, **common)
-        elif mode == 'clip':
-            analyze_clip_test(path, output_name=output_name, **common)
-        else:
-            raise ValueError(f'Unrecognized mode: {mode}')
+        mode = plan_item.get('mode') or _infer_eval_mode(path)
+        threshold = kwargs.get('threshold', plan_item.get('threshold', infer_eval_threshold(path.parent)))
+        evaluate_raw_test(path, mode, target_run_dir, threshold, **kwargs)
         evaluated.append(target_run_dir)
     return sorted(set(evaluated))
 
@@ -840,7 +730,7 @@ def _compare_run_outputs(test_run_dir: Path, ref_run_dir: Path, *, mode: str, cs
         return rel_path
 
     def _collect_run_outputs(run_dir: Path) -> dict[str, Any]:
-        run_tag = _model_tag_from_run_dir(run_dir)
+        run_tag = strip_timestamp_prefix(run_dir.name)
         files = {}
         for pattern in _EXPORTED_FILE_PATTERNS:
             for path in run_dir.rglob(pattern):
@@ -908,8 +798,8 @@ def _build_comparison_report(test_dir, ref_dir, *, mode: str) -> dict[str, Any]:
     test_dir, ref_dir = Path(test_dir), Path(ref_dir)
     tolerances = _resolve_tolerances(mode)
 
-    test_runs = {_model_tag_from_run_dir(path): path for path in _iter_run_dirs(test_dir)}
-    ref_runs = {_model_tag_from_run_dir(path): path for path in _iter_run_dirs(ref_dir)}
+    test_runs = {strip_timestamp_prefix(path.name): path for path in _iter_run_dirs(test_dir)}
+    ref_runs = {strip_timestamp_prefix(path.name): path for path in _iter_run_dirs(ref_dir)}
     missing_runs = sorted(set(ref_runs) - set(test_runs))
     extra_runs = sorted(set(test_runs) - set(ref_runs))
     status = 'fail' if (missing_runs or extra_runs) else 'pass'
@@ -1386,6 +1276,7 @@ def assert_outputs(test_dir, ref_dir, mode='no_train') -> tuple[bool, dict[str, 
 # endregion
 
 #* 1191 ->1161-> 1217-> 1199-> 1188(1,22,2) -> 1166(,22,2)->1155
+#* 1390(2,5,3)-> refact-01-1277(1,5,3)
 
 if __name__ == '__main__':
     import shutil

@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 
-def _strip_split_suffix(tag: str) -> str:
+def strip_split_suffix(tag: str) -> str:
     """Remove one trailing `_train` or `_test` split suffix."""
     for suffix in ('_train', '_test'):
         if tag.endswith(suffix):
@@ -10,9 +10,9 @@ def _strip_split_suffix(tag: str) -> str:
     return tag
 
 
-def _strip_timestamp_prefix(tag: str) -> str:
-    """Remove one `YYMMDD-HHMM_` run prefix when present."""
-    return tag.split('_', 1)[1] if re.match(r'^\d{6}-\d{4}_.+', tag) else tag
+def strip_timestamp_prefix(tag: str) -> str:
+    """ Remove one `YYMMDD_HH-MM-SS_` run prefix when present."""
+    return tag.split('_', 2)[2] if re.match(r'^\d{6}_\d{2}-\d{2}-\d{2}_.+', tag) else tag
 
 
 def _parse_specs(tag: str) -> tuple[str | None, str | None]:
@@ -99,7 +99,7 @@ def _resolve_model_parts(value) -> tuple[str, str | None]:
     else:
         tag = path.stem if path.suffix else path.name
 
-    tag = _strip_split_suffix(_strip_timestamp_prefix(tag))
+    tag = strip_split_suffix(strip_timestamp_prefix(tag))
     return tag, epoch_tag
 
 
@@ -107,7 +107,7 @@ def _resolve_test_tag(value) -> str:
     """Resolve one test/cache path or plain tag to its logical tag."""
     path = Path(value)
     tag = path.stem if path.suffix else path.name
-    return _strip_split_suffix(tag)
+    return strip_split_suffix(tag)
 
 
 def get_test_long_tag(model_ref, test_ref, *, include_epoch=True) -> str:
@@ -157,6 +157,7 @@ def get_test_title_lines(model_ref, test_ref) -> tuple[str, str]:
 # def build_test_artifact_name(model_ref, test_ref, kind, *, unit=None, short=False, include_best_epoch=True)-> str:
 def get_exporting_name(model_ref, test_ref, kind, *, unit='NA', short=False, **kwargs)-> str:
     """Build one canonical export stem from model/test refs and export kind."""
+
     base_tag = (get_test_short_tag(test_ref) if short else
                 get_test_long_tag(model_ref, test_ref, include_epoch=kwargs.get('include_epoch', True)))
 

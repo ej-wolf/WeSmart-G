@@ -16,8 +16,8 @@
       -e/ --epochs                  : number of epochs
       -bs/--batch-size              : batch size
       -hd/--hidden-dim              : hidden layer size
-      -sr/--split-ratio             : runtime train split ratio
-      -rs/--random-seed             : runtime split seed
+      -sr/--split-ratio             : runtime train/valid split ratio
+      -rs/--random-seed             : runtime train/valid split seed
 
     *** test ***
     Run inference on one cached NPZ and optionally evaluate the raw results.
@@ -69,7 +69,7 @@ def _run_train(args):
     """ Run training command."""
     kw = _kwargs_from_args(args,
                            ('work_dir', 'tag', 'lr', 'epochs', 'batch_size',
-                                   'hidden_dim', 'split_ratio', 'random_seed',))
+                                   'hidden_dim', 'valid_ratio', 'valid_seed',))
     run_dir = run_training(args.train_cache, args.valid_cache, **kw)
     print(f"Training done. Run dir: {run_dir}")
 
@@ -152,8 +152,8 @@ def main():
     train_p.add_argument('-e', '--epochs', type=int, default=None, help='Number of epochs')
     train_p.add_argument('-bs', '--batch-size', type=int, default=None, help='Batch size')
     train_p.add_argument('-hd', '--hidden-dim', type=int, default=None, help='Hidden layer size')
-    train_p.add_argument('-sr', '--split-ratio', type=float, default=None, help='Runtime train split ratio')
-    train_p.add_argument('-rs', '--random-seed', type=int, default=None, help='Runtime split seed')
+    train_p.add_argument('-sr', '--split-ratio', dest='valid_ratio', type=float, default=None, help='Runtime train/valid split ratio')
+    train_p.add_argument('-rs', '--random-seed', dest='valid_seed', type=int, default=None, help='Runtime train/valid split seed')
     train_p.set_defaults(fn=_run_train)
 
     test_p = sub.add_parser('test', help='Test model on cache npz')
