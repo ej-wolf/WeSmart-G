@@ -198,13 +198,9 @@ def resolve_sampling(config: dict[str, Any]) -> SamplingConfig:
 def resolve_payload_buffer_policy(config: dict[str, Any]) -> tuple[float, int]:
     sampling_cfg = dict(config.get("sampling", {}) or {})
     payload_history_sec = float(first_present(
-        sampling_cfg.get("payload_history_sec"),
-        default=8.0,
-    ))
+                   sampling_cfg.get("payload_history_sec"), default=8.0, ))
     payload_min_frames = int(first_present(
-        sampling_cfg.get("payload_min_frames"),
-        default=16,
-    ))
+                   sampling_cfg.get("payload_min_frames"), default=16,  ))
     if payload_history_sec <= 0:
         raise ValueError("sampling.payload_history_sec must be positive")
     if payload_min_frames <= 0:
@@ -302,15 +298,14 @@ def opencv_backend(name: str) -> int:
     raise ValueError("capture.backend must be 'ffmpeg' or 'any'")
 
 
-def stream_reader(
-    state: StreamState,
-    stop_event: threading.Event,
-    backend: int,
-    reconnect_delay_sec: float,
-    read_sleep_sec: float,
-    loop_files: bool,
-    play_in_realtime: bool,
-) -> None:
+def stream_reader( state: StreamState,
+                   stop_event: threading.Event,
+                   backend: int,
+                   reconnect_delay_sec: float,
+                   read_sleep_sec: float,
+                   loop_files: bool,
+                   play_in_realtime: bool,
+                  )-> None:
     # Reader threads are intentionally lightweight: decode RTSP/video and keep
     # only the newest frame. Temporal models should consume sampled copies in
     # the main loop below, not from here.
@@ -865,7 +860,9 @@ def main() -> None:
                                      device)
     if tms_runtimes:
         print("[INFO] tms_models="
-              + ", ".join(f"{tag}:{runtime.model_path.name}@thr{runtime.threshold:.2f}"
+              + ", ".join(f"{tag}:{runtime.model_path.name}@thr{runtime.threshold:.2f} "
+                          f"pool={runtime.feature_schema.get('pool_mode', 'N/A') if runtime.feature_schema else 'N/A'} "
+                          f"dim={runtime.feature_schema.get('feature_dim', 'N/A') if runtime.feature_schema else 'N/A'}"
                           for tag, runtime in tms_runtimes.items()),
               flush=True)
     else:
@@ -967,14 +964,21 @@ def main() -> None:
                                 ready_probe_windows.append((spec, frames))
                     for spec, frames in ready_probe_windows:
                         try:
+                            runtime = tms_runtimes.get(spec.tag)
+                            feature_schema = runtime.feature_schema if runtime and runtime.feature_schema else runtime_feature_schema
                             clip_vec = get_clip_features_vec(
                                 frames,
-                                pure_motion=bool(runtime_feature_schema["pure_motion"]),
-                                legacy=bool(runtime_feature_schema["legacy"]),
-                                temp_smooth=bool(runtime_feature_schema["temp_smooth"]),
-                                temp_kernel=int(runtime_feature_schema["temp_kernel"]),
-                                pool_mode=str(runtime_feature_schema["pool_mode"]),
-                                j_version=float(runtime_feature_schema["extractor_version"]),
+                                pure_motion=bool(feature_schema["pure_motion"]),
+                                legacy=bool(feature_schema["legacy"]),
+                                temp_smooth=bool(feature_schema["temp_smooth"]),
+                                temp_kernel=int(feature_schema["temp_kernel"]),
+                                pool_mode=str(feature_schema["pool_mode"]),
+                                top_k_ratio=float(feature_schema["top_k_ratio"]),
+                                top_k_min=int(feature_schema["top_k_min"]),
+                                motion_fps_ref=feature_schema["motion_fps_ref"],
+                                motion_fps_min=float(feature_schema["motion_fps_min"]),
+                                motion_fps_max=float(feature_schema["motion_fps_max"]),
+                                j_version=float(feature_schema["extractor_version"]),
                             )
                         except Exception as exc:
                             with item.state.lock:

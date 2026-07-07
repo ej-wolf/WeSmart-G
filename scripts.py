@@ -508,55 +508,6 @@ def sum_all_results(work_dir: str | Path, **kwargs):  # 107 -250
                 'AUC': auc,
                 }
 
-    def _print_rows(rows: list[dict]):
-        """Print the aggregated table in a simple aligned layout."""
-
-        def _clip_text(text, limit=24) -> str:
-            text = str(text)
-            return text if len(text) <= limit else text[:limit - 1] + '…'
-
-        cols = ['model', 'BE', 'train ds', 'test ds', 'window', 'stride', 'pool', 'fps_ref', 'feat_dim',
-                'threshold', 'unit',
-                'samples', 'support', 'FF', 'FT', 'TF', 'TT', 'Acc', 'Rec', 'FPR', 'AUC']
-        cols = [col for col in cols if col == 'BE' or any(col in row for row in rows)]
-        header_labels = {c: c if c.isupper() else c.title() for c in cols}
-        header_labels.update({'train ds': 'Train ds', 'test ds': 'Test ds',
-                              'fps_ref': 'FPS ref', 'feat_dim': 'Feat dim'})
-        display_rows = []
-        for row in rows:
-            disp = row.copy()
-            disp['model'], disp['BE'] = _model_disp(disp['model'])
-            disp['train ds'] = _clip_text(disp['train ds'])
-            disp['test ds'] = _clip_text(disp['test ds'])
-            for key in ('Acc', 'Rec', 'FPR', 'AUC'):
-                if key in disp and isinstance(disp[key], float):
-                    disp[key] = f'{disp[key]:.4f}'
-            if isinstance(disp.get('threshold'), float):
-                disp['threshold'] = f"{disp['threshold']:.2f}"
-            elif disp.get('threshold') in (None, ''):
-                disp['threshold'] = 'N/A'
-            display_rows.append(disp)
-
-        widths = {c: len(header_labels[c]) for c in cols}
-        for row in display_rows:
-            for col in cols:
-                widths[col] = max(widths[col], len(str(row.get(col, ''))))
-
-        print('\n=== Summary Results ===')
-        print(' | '.join(f'{header_labels[col]:<{widths[col]}}' for col in cols))
-        print('-+-'.join('-' * widths[col] for col in cols))
-        for row in display_rows:
-            line = []
-            for col in cols:
-                val = str(row.get(col, ''))
-                if col in {'window', 'stride', 'threshold', 'BE', 'fps_ref', 'feat_dim'}:
-                    line.append(f'{val:^{widths[col]}}')
-                elif col == 'samples':
-                    line.append(f'{val:>{widths[col]}}')
-                else:
-                    line.append(f'{val:<{widths[col]}}')
-            print(' | '.join(line))
-
     work_dir = Path(work_dir)
     if not work_dir.is_dir():
         raise NotADirectoryError(work_dir)
@@ -578,9 +529,78 @@ def sum_all_results(work_dir: str | Path, **kwargs):  # 107 -250
             json.dump(table, f, indent=2)
 
     if kwargs.get('print_cli', True):
-        _print_rows(table)
+        print_summary_results(table, mode=kwargs.get('print_mode', 'short'))
 
     return table
+
+
+def print_summary_results(rows: list[dict], mode='short', **kwargs):
+    """Print a summary-results table in `short` or `full` mode."""
+
+    def _clip_text(text, limit=24) -> str:
+        text = str(text)
+        return text if len(text) <= limit else text[:limit - 1] + '...'
+
+    def _model_disp(model_path: str) -> tuple[str, str]:
+        mdl_path = Path(model_path)
+        model_name = strip_timestamp_prefix(mdl_path.parent.name)
+        best_epoch = mdl_path.stem.split(".")[-1] if "." in mdl_path.stem else ""
+        return model_name, best_epoch
+
+    if mode not in {'short', 'full'}:
+        raise ValueError(f"Unsupported print mode: {mode}")
+    if not rows:
+        print('\n=== Summary Results ===')
+        return
+
+    if mode == 'full':
+        cols = ['model', 'BE', 'train ds', 'test ds', 'window', 'stride', 'pool', 'fps_ref', 'feat_dim',
+                'threshold', 'unit', 'samples', 'support', 'FF', 'FT', 'TF', 'TT', 'Acc', 'Rec', 'FPR', 'AUC']
+    else:
+        cols = ['model', 'BE', 'window', 'stride', 'pool', 'fps_ref', 'feat_dim',
+                'threshold', 'unit', 'samples', 'Acc', 'Rec', 'FPR', 'AUC']
+
+    cols = [col for col in cols if col == 'BE' or any(col in row for row in rows)]
+    header_labels = {c: c if c.isupper() else c.title() for c in cols}
+    header_labels.update({'train ds': 'Train ds', 'test ds': 'Test ds',
+                          'fps_ref': 'FPS ref', 'feat_dim': 'Feat dim'})
+
+    display_rows = []
+    for row in rows:
+        disp = row.copy()
+        disp['model'], disp['BE'] = _model_disp(disp['model'])
+        if 'train ds' in disp:
+            disp['train ds'] = _clip_text(disp['train ds'])
+        if 'test ds' in disp:
+            disp['test ds'] = _clip_text(disp['test ds'])
+        for key in ('Acc', 'Rec', 'FPR', 'AUC'):
+            if key in disp and isinstance(disp[key], float):
+                disp[key] = f'{disp[key]:.4f}'
+        if isinstance(disp.get('threshold'), float):
+            disp['threshold'] = f"{disp['threshold']:.2f}"
+        elif disp.get('threshold') in (None, ''):
+            disp['threshold'] = 'N/A'
+        display_rows.append(disp)
+
+    widths = {c: len(header_labels[c]) for c in cols}
+    for row in display_rows:
+        for col in cols:
+            widths[col] = max(widths[col], len(str(row.get(col, ''))))
+
+    print('\n=== Summary Results ===')
+    print(' | '.join(f'{header_labels[col]:<{widths[col]}}' for col in cols))
+    print('-+-'.join('-' * widths[col] for col in cols))
+    for row in display_rows:
+        line = []
+        for col in cols:
+            val = str(row.get(col, ''))
+            if col in {'window', 'stride', 'threshold', 'BE', 'fps_ref', 'feat_dim'}:
+                line.append(f'{val:^{widths[col]}}')
+            elif col == 'samples':
+                line.append(f'{val:>{widths[col]}}')
+            else:
+                line.append(f'{val:<{widths[col]}}')
+        print(' | '.join(line))
 
 
 def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs):
@@ -699,8 +719,6 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             pair = _find_test_pair()
             if pair is not None:
                 ds_npz.append(pair)
-        pair = _find_test_pair()
-        ds_npz = [pair] if pair is not None else []
         # if test_pair is not None and not test_pair.is_file():
         #     print_color(f"[WARN] Missing paired test cache for {run_dir.name}: {test_pair}", 'o')
         for tst_npz in resolve_npz_inputs(ds_tests, npz_dir):
@@ -976,11 +994,15 @@ def cache_builder():
 
     # *  Test test_models
 def test_runner():
-    mdl_dir  = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/w30-15_models/w30-15-tst")
-    op_dir = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/sanity-testing/testing")
-    tst_ds = Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/ds")
-    tst_strm = Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/strm")
-    test_models(mdl_dir, out_dir=op_dir, ds_tests= tst_ds, stm_tests=tst_strm)
+    # mdl_dir  = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/w30-15_models/w30-15-tst")
+    # op_dir = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/sanity-testing/testing")
+    mdl_dir = Path("work_dirs/models")
+    op_dir  = Path("work_dirs/testing")
+    tst_ds =  None# Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/ds")
+    tst_strm = None #Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/strm")
+    threshold = 0.6
+    test_models(mdl_dir, out_dir=op_dir, summary= op_dir, threshold=threshold,
+                ds_tests= tst_ds, stm_tests=tst_strm, test_pair=True)
 
 # * endregion
 
@@ -988,16 +1010,14 @@ if __name__ == "__main__":
     pass
 
     # cache_builder()
-    # test_runner()
-
-
+    test_runner()
 
     #* region Train models
     cache_dir = Path("data/cache/Joint_sets")
     work_dir = Path("work_dirs/models")
     sum_trn = True
 
-    train_models(cache_dir, work_dir, run_tests=True, summary=sum_trn)
+    # train_models(cache_dir, work_dir, run_tests=True, summary=sum_trn)
 
     #endregion
     # _______________________________________________________________________#

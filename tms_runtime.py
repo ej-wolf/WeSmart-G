@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from motion_feature_schema import assert_feature_schema_match, schema_has_na
+from motion_feature_schema import assert_feature_schema_match, build_feature_schema, schema_has_na
 from torch_clip_model import ClipMLP, LOCAL_CONFIG, _infer_hidden_dim_from_state
 
 
@@ -124,6 +124,7 @@ def collect_probe_window(state: Any, spec:TemporalWindowSpec, latest_t:float, )-
     last_trigger_t = state.temporal_probe_last_trigger_t.get(spec.tag)
     since_last = None if last_trigger_t is None else float(latest_t) - float(last_trigger_t)
     if since_last is not None and since_last + 1e-9 < float(spec.t_infer):
+        prev_status = state.temporal_probe_status.get(spec.tag, {})
         state.temporal_probe_status[spec.tag] = {
                         "ready": False,
                         "reason": "cooldown",
@@ -136,6 +137,10 @@ def collect_probe_window(state: Any, spec:TemporalWindowSpec, latest_t:float, )-
                         "min_frames": int(spec.min_frames),
                         "tolerance": float(spec.tolerance),
                          }
+        if "tms_prob" in prev_status:
+            state.temporal_probe_status[spec.tag]["tms_prob"] = prev_status["tms_prob"]
+        if "tms_pred" in prev_status:
+            state.temporal_probe_status[spec.tag]["tms_pred"] = prev_status["tms_pred"]
         return None
 
     min_t = float(latest_t) - float(spec.window_span) - float(spec.tolerance)
@@ -173,24 +178,25 @@ def temporal_probe_status_line(state: Any, spec: TemporalWindowSpec) -> str:
     frame_count = int(status.get("frame_count", 0))
     span_sec = float(status.get("span_sec", 0.0))
     reason = str(status.get("reason", "pending"))
-    feature_dim = status.get("feature_dim")
-    feature_suffix = f" ->{int(feature_dim)}d" if feature_dim is not None else ""
+    prob_text = f"{float(status['tms_prob']):.2f}" if "tms_prob" in status else "    "
+    pred_text = str(int(status["tms_pred"])) if "tms_pred" in status else " "
+    base = f"{spec.tag:<5} p={prob_text:>4} y={pred_text:<1} {span_sec:4.2f}/{spec.window_span:4.2f}s"
     if status.get("feature_error"):
-        return f"{spec.tag}: feat_err {status['feature_error']}"
+        return f"{base} feat_err {status['feature_error']}"
     if "tms_prob" in status:
-        return f"{spec.tag}: p={float(status['tms_prob']):.2f} y={int(status.get('tms_pred', 0))}{feature_suffix}"
+        return f"{base} pred"
     if bool(status.get("ready", False)):
-        return f"{spec.tag}: READY {frame_count}f {span_sec:.2f}/{spec.window_span:.2f}s{feature_suffix}"
+        return f"{base} READY"
     if reason == "cooldown":
         since_last = status.get("since_last_trigger_sec")
         if since_last is None:
-            return f"{spec.tag}: cooldown{feature_suffix}"
-        return f"{spec.tag}: cool {float(since_last):.2f}/{spec.t_infer:.2f}s{feature_suffix}"
+            return f"{base} cool"
+        return f"{base} cool {float(since_last):4.2f}/{spec.t_infer:4.2f}s"
     if reason == "span":
-        return f"{spec.tag}: span {frame_count}f {span_sec:.2f}/{spec.window_span:.2f}s{feature_suffix}"
+        return f"{base} span"
     if reason == "min_frames":
-        return f"{spec.tag}: cnt {frame_count}/{spec.min_frames} {span_sec:.2f}s{feature_suffix}"
-    return f"{spec.tag}: pending"
+        return f"{base} cnt {frame_count:02d}/{spec.min_frames:02d}"
+    return f"{base} pending"
 
 
 def probe_matches_temporal_profile(spec: TemporalWindowSpec, temporal_profile: dict[str, Any]) -> bool:
@@ -214,6 +220,19 @@ def validate_probe_temporal_profile(spec: TemporalWindowSpec, temporal_profile: 
 def validate_runtime_feature_schema(runtime_feature_schema: dict[str, Any], model_feature_schema: dict[str, Any]) -> None:
     """Fail early if the live feature builder does not match the model contract."""
     assert_feature_schema_match(model_feature_schema, runtime_feature_schema, context="runtime feature builder")
+
+
+def resolve_model_feature_schema(base_schema: dict[str, Any] | None,
+                                 runtime_feature_schema: dict[str, Any],
+                                 model_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the effective runtime feature schema for one TMS model."""
+    schema = dict(base_schema or runtime_feature_schema)
+    pooling = model_cfg.get("pooling", None)
+    if pooling is not None:
+        schema.update(build_feature_schema(**{**schema,
+                                              "j_version": schema.get("extractor_version"),
+                                              "pool_mode": pooling}))
+    return schema
 
 
 def _resolve_model_checkpoint(model_ref: str | Path, config_dir: Path) -> Path:
@@ -290,15 +309,16 @@ def load_tms_runtimes(
 
         input_dim = int(state["net.0.weight"].shape[1])
         feature_schema, temporal_profile, hidden_dim = _load_model_contract(model_path)
+        effective_feature_schema = resolve_model_feature_schema(feature_schema, runtime_feature_schema, item)
         if hidden_dim is None:
             hidden_dim = _infer_hidden_dim_from_state(state)
         hidden_dim = int(hidden_dim)
 
         if feature_schema and not schema_has_na(feature_schema):
-            validate_runtime_feature_schema(runtime_feature_schema, feature_schema)
-        elif input_dim != int(runtime_feature_schema["feature_dim"]):
+            validate_runtime_feature_schema(effective_feature_schema, feature_schema)
+        elif input_dim != int(effective_feature_schema["feature_dim"]):
             raise ValueError(
-                f"Runtime feature_dim mismatch for {model_path}: runtime={runtime_feature_schema['feature_dim']} model={input_dim}"
+                f"Runtime feature_dim mismatch for {model_path}: runtime={effective_feature_schema['feature_dim']} model={input_dim}"
             )
         if temporal_profile and not schema_has_na(temporal_profile):
             validate_probe_temporal_profile(probe_map[tag], temporal_profile)
@@ -315,7 +335,7 @@ def load_tms_runtimes(
             input_dim=input_dim,
             device=device,
             model=model,
-            feature_schema=feature_schema,
+            feature_schema=effective_feature_schema,
             temporal_profile=temporal_profile,
         )
     return runtimes

@@ -196,6 +196,7 @@ def save_analyze_summary(summary, out_path:Path|str, overwrite=False, **kwargs):
     output_dir_path = Path(output_dir) if output_dir is not None else None
     events_info = summary.get('events_info', None)
     timeline_csvs = summary.get('timeline_csvs', None)
+    roc_plot = summary.get('roc_plot', None)
     roc_csv = summary.get('roc_csv', None)
 
     save_summary = {'raw_results_path': summary.get('raw_results_path', None),
@@ -211,7 +212,9 @@ def save_analyze_summary(summary, out_path:Path|str, overwrite=False, **kwargs):
                     'recall': summary.get('recall', None),
                     'FPR': summary.get('FPR', None),
                     'ROC AUC': summary.get('roc_auc', None),
+                    'roc_error': summary.get('roc_error', None),
                     'roc_type': summary.get('raw_results_type', None),
+                    'roc_plot': Path(roc_plot).name if roc_plot not in {None, 'N/A'} else roc_plot,
                     'roc_csv': Path(roc_csv).name if roc_csv not in {None, 'N/A'} else roc_csv,
                     }
 
@@ -410,6 +413,15 @@ def roc_from_scores(y_true: np.ndarray, scores: np.ndarray, max_resolution=DEFAU
 
     auc = np.trapz(tpr, fpr)
     return {'fpr': fpr, 'tpr': tpr, 'thresholds': thresholds, 'auc': auc}
+
+
+def merge_roc_summary(dst: dict, src: dict) -> dict:
+    """Copy ROC fields from a score summary into the final threshold summary."""
+    for key in ('roc_auc', 'roc_csv', 'roc_plot', 'roc_error'):
+        if key in src:
+            dst[key] = src[key]
+    return dst
+
 
 # endregion
 
@@ -637,6 +649,7 @@ def analyze_clip_predictions(test_results:Path|str|dict, **kwargs): #552
     save_roc_csv = kwargs.get('roc_csv', True)
     summary['roc_plot'] = roc_base.with_suffix('.png').name if roc_base is not None else None
     summary['roc_csv'] = _roc_csv_name(True, roc_base, save_roc_csv)
+    merge_roc_summary(summary, kwargs.get('roc_summary', {}))
 
     if thr_dir is not None:
         save_analyze_summary(summary,
@@ -667,11 +680,13 @@ def analyze_clip_test(test_results: Path | str | dict, **kwargs):
                                                  overwrite=bool(kwargs.get('overwrite', False)))
     score_kwargs = dict(kwargs)
     score_kwargs['print'] = False
-    analyze_clip_scores(test_results, **score_kwargs)
+    score_summary = analyze_clip_scores(test_results, **score_kwargs)
     pred_kwargs = dict(kwargs)
+    pred_kwargs['roc_summary'] = score_summary
     if threshold_dir is not None:
         pred_kwargs['threshold_dir'] = threshold_dir
-    return analyze_clip_predictions(test_results, **pred_kwargs)
+    pred_summary = analyze_clip_predictions(test_results, **pred_kwargs)
+    return merge_roc_summary(pred_summary, score_summary)
 
 
 def analyze_video_scores(test_res: Path | str | dict, **kwargs):
@@ -729,6 +744,7 @@ def analyze_video_predictions(test_res: Path | str | dict, **kwargs):
     threshold = float(kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD))
     build_kwargs = dict(kwargs)
     build_kwargs.pop('threshold', None)
+    build_kwargs.pop('roc_summary', None)
     y_true, _, _, score_name = get_eval_arrays(raw_res, threshold=threshold)
     vid_true, vid_pred, _, excluded_videos = video_level_arrays(raw_res, threshold=threshold, **build_kwargs)
     summary = binary_metrics(vid_true, vid_pred)
@@ -767,6 +783,7 @@ def analyze_video_predictions(test_res: Path | str | dict, **kwargs):
     save_roc_csv = kwargs.get('roc_csv', True)
     summary['roc_plot'] = roc_base.with_suffix('.png').name if roc_base is not None else None
     summary['roc_csv'] = _roc_csv_name(True, roc_base, save_roc_csv)
+    merge_roc_summary(summary, kwargs.get('roc_summary', {}))
 
     if thr_dir is not None:
         save_analyze_summary(summary,
@@ -796,19 +813,23 @@ def analyze_video_test(test_res: Path | str | dict, **kwargs):
 
     score_kwargs = dict(kwargs)
     score_kwargs['print'] = False
-    analyze_clip_scores(test_res, **score_kwargs)
-    analyze_video_scores(test_res, **score_kwargs)
+    clip_score_summary = analyze_clip_scores(test_res, **score_kwargs)
+    video_score_summary = analyze_video_scores(test_res, **score_kwargs)
 
     clip_kwargs = dict(kwargs)
     clip_kwargs['print'] = False
     clip_kwargs['output_name'] = companion_summary_name(out_name, 'clip')
+    clip_kwargs['roc_summary'] = clip_score_summary
     if threshold_dir is not None:
         clip_kwargs['threshold_dir'] = threshold_dir
-    analyze_clip_predictions(test_res, **clip_kwargs)
+    clip_pred_summary = analyze_clip_predictions(test_res, **clip_kwargs)
+    merge_roc_summary(clip_pred_summary, clip_score_summary)
     pred_kwargs = dict(kwargs)
+    pred_kwargs['roc_summary'] = video_score_summary
     if threshold_dir is not None:
         pred_kwargs['threshold_dir'] = threshold_dir
-    return analyze_video_predictions(test_res, **pred_kwargs)
+    video_pred_summary = analyze_video_predictions(test_res, **pred_kwargs)
+    return merge_roc_summary(video_pred_summary, video_score_summary)
 
 
 def optimize_clip_threshold(test_results: Path | str | dict, threshold_range=DEFAULT_THRESHOLD_RANGE, mode='balanced_acc', **kwargs):
