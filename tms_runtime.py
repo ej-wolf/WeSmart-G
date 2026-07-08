@@ -35,6 +35,7 @@ class TmsModelRuntime:
     tag: str
     model_path: Path
     threshold: float
+    abnormal_tsh: float
     hidden_dim: int
     input_dim: int
     device: torch.device
@@ -52,49 +53,64 @@ class TmsCandidate:
     latest_t: float
 
 
-def default_temporal_probes() -> list[TemporalWindowSpec]:
-    """Return the default fast and slow TMS online probes."""
-    return [TemporalWindowSpec(tag="fast", window_span=1.2, t_infer=0.2, min_frames=5, tolerance=0.05),
-            TemporalWindowSpec(tag="slow", window_span=3.0, t_infer=0.6, min_frames=12, tolerance=0.05),]
+def enabled_tms_model_configs(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return enabled TMS model configs."""
+    tms_cfg = dict(config.get("tms", {}) or {})
+    model_cfgs = tms_cfg.get("models", None)
+    if model_cfgs is None:
+        return []
+    if not isinstance(model_cfgs, list):
+        raise ValueError("tms.models must be a list")
+    return [dict(item) for item in model_cfgs
+            if isinstance(item, dict) and item.get("enabled", True) is not False]
 
 
 def resolve_temporal_probes(config: dict[str, Any], first_present) -> list[TemporalWindowSpec]:
     """Load online TMS probe specs from config.
 
-    If `temporal.probes` is not defined, return the built-in default probes.
-    Validation here is intentionally strict so bad runtime settings fail early.
+    Use only the `tms.models[*]` config shape.
     """
-    temporal_cfg = dict(config.get("temporal", {}) or {})
-    probe_cfgs = temporal_cfg.get("probes")
-
-    if probe_cfgs is None:
-        return default_temporal_probes()
-    if not isinstance(probe_cfgs, list):
-        raise ValueError("temporal.probes must be a list")
+    tms_cfg = dict(config.get("tms", {}) or {})
+    payload_tolerance = tms_cfg.get("payload_tolerance")
+    model_cfgs = enabled_tms_model_configs(config)
+    if not model_cfgs:
+        return []
 
     specs: list[TemporalWindowSpec] = []
     seen_names: set[str] = set()
-    for index, item in enumerate(probe_cfgs):
+    for index, item in enumerate(model_cfgs):
         if not isinstance(item, dict):
-            raise ValueError(f"temporal.probes[{index}] must be a mapping")
-        tag = str(first_present(item.get("tag"), item.get("name"), default=f"probe_{index}")).strip()
+            raise ValueError(f"TMS probe/model [{index}] must be a mapping")
+        tag = str(item.get("tag", "")).strip()
         if not tag:
-            raise ValueError(f"temporal.probes[{index}] tag must be non-empty")
+            raise ValueError(f"TMS probe/model [{index}] tag must be non-empty")
         if tag in seen_names:
-            raise ValueError(f"Duplicate temporal probe tag: {tag}")
+            raise ValueError(f"Duplicate TMS probe/model tag: {tag}")
         seen_names.add(tag)
-        window_span = float(first_present(item.get("window_span"), item.get("window_sec")))
-        t_infer = float(first_present(item.get("t_infer"), item.get("infer_every_sec"), item.get("trigger_every_sec"), default=0.0))
-        min_frames = int(item.get("min_frames"))
-        tolerance = float(first_present(item.get("tolerance"), item.get("tolerance_sec"), default=0.05))
+        window_span = item.get("window_span")
+        t_infer = item.get("T_infer")
+        min_frames = item.get("min_frames")
+        tolerance = payload_tolerance
+        if window_span is None:
+            raise ValueError(f"TMS probe/model '{tag}' window_span is required")
+        if t_infer is None:
+            raise ValueError(f"TMS probe/model '{tag}' T_infer is required")
+        if min_frames is None:
+            raise ValueError(f"TMS probe/model '{tag}' min_frames is required")
+        if tolerance is None:
+            raise ValueError(f"tms.payload_tolerance is required for '{tag}'")
+        window_span = float(window_span)
+        t_infer = float(t_infer)
+        min_frames = int(min_frames)
+        tolerance = float(tolerance)
         if window_span <= 0:
-            raise ValueError(f"temporal.probes[{index}].window_span must be positive")
+            raise ValueError(f"TMS probe/model '{tag}' window_span must be positive")
         if t_infer <= 0:
-            raise ValueError(f"temporal.probes[{index}].t_infer must be positive")
+            raise ValueError(f"TMS probe/model '{tag}' T_infer must be positive")
         if min_frames <= 0:
-            raise ValueError(f"temporal.probes[{index}].min_frames must be positive")
+            raise ValueError(f"TMS probe/model '{tag}' min_frames must be positive")
         if tolerance < 0:
-            raise ValueError(f"temporal.probes[{index}].tolerance must be non-negative")
+            raise ValueError(f"tms.payload_tolerance for '{tag}' must be non-negative")
         specs.append(TemporalWindowSpec(tag=tag,
                                         window_span=window_span,
                                         t_infer=t_infer,
@@ -199,6 +215,25 @@ def temporal_probe_status_line(state: Any, spec: TemporalWindowSpec) -> str:
     return f"{base} pending"
 
 
+def temporal_probe_status_entry(state: Any, spec: TemporalWindowSpec) -> tuple[str, tuple[int, int, int] | None]:
+    """Return the printable probe line and optional overlay color."""
+    text = temporal_probe_status_line(state, spec)
+    status = state.temporal_probe_status.get(spec.tag, {})
+    prob = status.get("tms_prob")
+    if prob is None:
+        return text, None
+
+    prob = status.get("tms_color_prob", prob)
+    abnormal_tsh = float(status.get("abnormal_tsh", 0.0))
+    violence_tsh = float(status.get("tms_threshold", abnormal_tsh))
+    prob = float(prob)
+    if prob >= violence_tsh:
+        return text, (0, 0, 255)
+    if prob >= abnormal_tsh:
+        return text, (0, 255, 255)
+    return text, None
+
+
 def probe_matches_temporal_profile(spec: TemporalWindowSpec, temporal_profile: dict[str, Any]) -> bool:
     """Return whether one online probe is compatible with the model's canonical temporal profile."""
     target_window = float(temporal_profile.get("target_window"))
@@ -277,20 +312,13 @@ def load_tms_runtimes(
     device: torch.device,
 ) -> dict[str, TmsModelRuntime]:
     """Load the configured live TMS models and validate them against the runtime contract."""
-    tms_cfg = dict(config.get("tms", {}) or {})
-    model_cfgs = tms_cfg.get("models", None)
-    if model_cfgs is None:
+    model_cfgs = enabled_tms_model_configs(config)
+    if not model_cfgs:
         return {}
-    if not isinstance(model_cfgs, list):
-        raise ValueError("tms.models must be a list")
 
     probe_map = {spec.tag: spec for spec in temporal_probes}
     runtimes: dict[str, TmsModelRuntime] = {}
     for index, item in enumerate(model_cfgs):
-        if not isinstance(item, dict):
-            raise ValueError(f"tms.models[{index}] must be a mapping")
-        if item.get("enabled", True) is False:
-            continue
         tag = str(item.get("tag", "")).strip()
         if not tag:
             raise ValueError(f"tms.models[{index}] is missing tag")
@@ -302,6 +330,8 @@ def load_tms_runtimes(
         model_ref = item.get("model")
         if not model_ref:
             raise ValueError(f"tms.models[{index}] is missing model")
+        if "abnormal_tsh" not in item:
+            raise ValueError(f"tms.models[{index}] is missing abnormal_tsh")
         model_path = _resolve_model_checkpoint(model_ref, config_dir)
         state = torch.load(model_path, map_location=device)
         if not isinstance(state, dict):
@@ -331,6 +361,7 @@ def load_tms_runtimes(
             tag=tag,
             model_path=model_path,
             threshold=float(item.get("threshold", 0.5)),
+            abnormal_tsh=float(item["abnormal_tsh"]),
             hidden_dim=hidden_dim,
             input_dim=input_dim,
             device=device,
@@ -371,13 +402,17 @@ def run_tms_candidates(candidates: list[TmsCandidate], runtimes: dict[str, TmsMo
                 item.state.temporal_probe_status.setdefault(tag, {})
                 item.state.temporal_probe_status[tag]["tms_prob"] = float(prob)
                 item.state.temporal_probe_status[tag]["tms_pred"] = y_pred
+                item.state.temporal_probe_status[tag]["tms_color_prob"] = float(prob)
                 item.state.temporal_probe_status[tag]["tms_threshold"] = float(runtime.threshold)
+                item.state.temporal_probe_status[tag]["abnormal_tsh"] = float(runtime.abnormal_tsh)
                 item.state.temporal_probe_status[tag]["tms_model"] = runtime.model_path.name
                 item.state.temporal_probe_status[tag]["tms_latest_t"] = float(item.latest_t)
                 item.state.tms_results[tag] = {
                     "prob": float(prob),
+                    "color_prob": float(prob),
                     "pred": y_pred,
                     "threshold": float(runtime.threshold),
+                    "abnormal_tsh": float(runtime.abnormal_tsh),
                     "model": runtime.model_path.name,
                     "latest_t": float(item.latest_t),
                 }

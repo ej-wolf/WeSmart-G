@@ -84,11 +84,6 @@ from motion_feature_schema import (DEFAULT_POOL_MODE, DEFAULT_TOP_K_MIN, DEFAULT
 #* Defaults (ToDo config later if needed)
 TEST_RATIO = 0.2
 RANDOM_SEED = 42
-POOL_MODE = DEFAULT_POOL_MODE
-POOL_TOP_K_RATIO = DEFAULT_TOP_K_RATIO
-POOL_TOP_K_MIN = DEFAULT_TOP_K_MIN
-TEMPORAL_SMOOTHING = DEFAULT_TEMP_SMOOTHING
-TEMP_KERNEL = DEFAULT_TEMP_KERNEL
 MIN_ERROR = 1e-7
 
 #* Files formats
@@ -96,23 +91,20 @@ SPLIT_LISTS = {'train': "train_videos.txt",
                'valid': "valid_videos.txt",
                'test' : "test_videos.txt"}
 VIDEO_LIST = "_videos.txt"
-# CACHE_LIST = "_feats.npz"
 DEFAULT_TYPE = 'type_2'
-
 TRAIN_TAG = '_train'
 TEST_TAG = '_test'
 
 
+# region API funcs
+
 def split_json_ds(dir_path:str|Path, **kwargs) -> dict[str, list[Path]]:
-    """ Split a directory of JSON videos into train / test sets.
-    Parameters
-        dir_path : directory containing JSON files (one per video)
-    Returns
-        splits : dict {'train': list of Path objects
-                       'test' : list of Path objects}
-    Notes
-        The split is done at the VIDEO level (not clip level).
-        Deterministic split (controlled by RANDOM_SEED)
+    """ Splits ds into train/test sets. The split is done at VIDEO level (not clip level)
+    by splitting a directory of JSON videos into train/test sets.
+
+    :param      dir_path: directory containing JSON files (one per video)
+    :return     splits : dict {'train': list of Path objects
+                               'test' : list of Path objects}
     """
 
     dir_path = Path(dir_path)
@@ -153,30 +145,6 @@ def get_split_pair(cache: str|Path) -> str | Path:
     return pair_path if pair_path.is_file() else pair_name
 
 
-def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
-    """ Save annotation file lists according to split keys.
-        For each key in `splits`, a file named '<key>_videos.txt' is created
-        containing one JSON filename per line.
-    Parameters
-        splits : dict returned by split_json_ds
-        out_dir : directory where list files will be written
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for grp, paths in splits.items():
-        list_path = out_dir/f"{grp}{VIDEO_LIST}"
-        with open(list_path, 'w') as f:
-            for p in paths:
-                f.write(p.name + '\n')
-
-        print(f"Written {list_path} ({len(paths)} videos)")
-
-
-# --------------------------------------------------
-# Step A: feature extraction
-# --------------------------------------------------
-
 def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
     """ Precompute clip-level motion features from one or more JSON paths.
         (This is the core implementation for both dataset-based and stream build.
@@ -194,9 +162,9 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
     feature_schema = build_feature_schema(
                      pure_motion=kwargs.get('pure_motion', False),
                      legacy=kwargs.get('legacy', False),
-                     temp_smooth=kwargs.get('temp_smooth', TEMPORAL_SMOOTHING),
-                     temp_kernel=kwargs.get('temp_kernel', TEMP_KERNEL),
-                     pool_mode=kwargs.get('pool_mode', POOL_MODE),
+                     temp_smooth=kwargs.get('temp_smooth', DEFAULT_TEMP_SMOOTHING),
+                     temp_kernel=kwargs.get('temp_kernel', DEFAULT_TEMP_KERNEL),
+                     pool_mode=kwargs.get('pool_mode', DEFAULT_POOL_MODE),
                      top_k_ratio=kwargs.get('top_k_ratio', kwargs.get('pool_top_k_ratio', DEFAULT_TOP_K_RATIO)),
                      top_k_min=kwargs.get('top_k_min', kwargs.get('pool_top_k_min', DEFAULT_TOP_K_MIN)),
                      motion_fps_ref=kwargs['motion_fps_ref'] if 'motion_fps_ref' in kwargs else MOTION_FPS_REF,
@@ -248,41 +216,6 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
 
     print_color(f'Saved {len(labels)} clips to {out_path}', 'b')
     return out_path
-
-
-def _json_paths_from_list(json_dir:str|Path, list_file:str|Path) -> list[Path]:
-    """ Resolve JSON filenames from a text list into full paths under `json_dir`."""
-    # json_dir = Path(json_dir)
-    # list_file = Path(list_file)
-    with open(Path(list_file), 'r') as f:
-        video_names = [ln.strip() for ln in f if ln.strip()]
-    return [Path(json_dir)/vid for vid in video_names]
-
-
-# --------------------------------------------------
-# Step B: cache inspection
-# --------------------------------------------------
-
-# Legacy simple inspector kept for reference; replaced by cache_info(mode=...).
-# def inspect_feature_file(npz_path: str|Path):
-#     """ Inspect cached clip-level features. """
-#     npz_path = Path(npz_path)
-#     data = np.load(npz_path, allow_pickle=True)
-#
-#     X , y = data['X'], data['y']
-#     n = len(y)
-#     n_pos = int((y == 1).sum())
-#     n_neg = int((y == 0).sum())
-#
-#     print("==== Cached dataset inspection ====")
-#     print(f"File            : {npz_path.name}")
-#     print(f"#clips          : {n}")
-#     print(f"#positives      : {n_pos}")
-#     print(f"#negatives      : {n_neg}")
-#     print(f"Feature dim     : {X.shape[1] if X.ndim == 2 else 'N/A'}")
-#
-#     if n > 0:
-#         print(f'Feature min/max : {X.min():.4f} / {X.max():.4f}')
 
 
 def merge_cache_npz(npz_paths, out_path:str|Path):
@@ -368,45 +301,31 @@ def merge_cache_npz(npz_paths, out_path:str|Path):
     return out_path
 
 
-def _resolve_input_paths(npz_inputs) -> list[Path]:
-    """ Expand merge inputs where each item may be a file, dir, or glob mask."""
-    resolved = []
-    seen = set()
-
-    for item in as_collection(npz_inputs):
-        item = Path(item)
-        item_str = str(item)
-
-        if any(ch in item_str for ch in '*?[]'):
-            matches = [Path(p) for p in glob.glob(item_str)]
-        elif item.is_dir():
-            matches = sorted(p for p in item.iterdir() if p.is_file() and p.suffix == '.npz')
-        elif item.is_file():
-            matches = [item]
-        else:
-            matches = []
-
-        if not matches:
-            print_color(f"[WARN] No NPZ files matched: {item}", 'y')
-            continue
-
-        for path in matches:
-            if path.suffix != '.npz':
-                continue
-            key = str(path.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            resolved.append(path)
-
-    return resolved
-
+# Legacy simple inspector kept for reference; replaced by cache_info(mode=...).
+# def inspect_feature_file(npz_path: str|Path):
+#     """ Inspect cached clip-level features. """
+#     npz_path = Path(npz_path)
+#     data = np.load(npz_path, allow_pickle=True)
+#
+#     X , y = data['X'], data['y']
+#     n = len(y)
+#     n_pos = int((y == 1).sum())
+#     n_neg = int((y == 0).sum())
+#
+#     print("==== Cached dataset inspection ====")
+#     print(f"File            : {npz_path.name}")
+#     print(f"#clips          : {n}")
+#     print(f"#positives      : {n_pos}")
+#     print(f"#negatives      : {n_neg}")
+#     print(f"Feature dim     : {X.shape[1] if X.ndim == 2 else 'N/A'}")
+#     if n > 0:
+#         print(f'Feature min/max : {X.min():.4f} / {X.max():.4f}')
 
 def cache_info(path:str|Path, **kwargs):
-    """ Summarize a cached NPZ and optionally print per-videolist/details.
-    Args:
-        path: NPZ path with keys `X`, `y`, `meta`.
-    kwargs:
+    """ Summarize a cached NPZ and optionally print per-video list/details.
+
+    :param  path: NPZ path with keys X, y, meta.
+    kwargs options:
         mode (str): auto, dataset, stream
         list (bool)    : print video names.
         details (bool): print per-video table.
@@ -455,12 +374,14 @@ def cache_info(path:str|Path, **kwargs):
 
     path = Path(path)
     data = np.load(path, allow_pickle=True)
+
     cache_contract, used_legacy_contract = load_cache_contract_compact(path)
     feature_schema = dict(cache_contract['feature_schema'])
     temporal_schema = dict(cache_contract['temporal_schema'])
     source_caches = list(cache_contract['source_caches'])
-    meta = data['meta']
+    X:np.ndarray = data['X']
     y:np.ndarray = data['y']
+    meta = data['meta']
     support = [len(y)-y.sum(), y.sum()]  #* support[0]= counts of 0, sup[1]= counts of 1
     n_clips = len(meta)
 
@@ -580,6 +501,7 @@ def cache_info(path:str|Path, **kwargs):
                             ])
         source_msg = str(len(source_caches))
     feature_block = "\n".join(f"             {line}" for line in feature_lines)
+    feature_range = f"{X.min():.4f} / {X.max():.4f}" if X.size else "N/A"
 
     print(f"\n==== \"{path.stem}\" - {title} ====")
     print(f"Full path       : {path}\n"
@@ -591,7 +513,8 @@ def cache_info(path:str|Path, **kwargs):
           f"Window / stride : {temporal_msg}\n"
           f"Source caches   : {source_msg}\n"
           f"{support_line}\n"          
-          f"Features number : {data['X'].shape[1]}\n"
+          f"Features number : {X.shape[1]}\n"
+          f"Feature min/max : {feature_range}\n"
           f"Feature extraction\n{feature_block}\n"
           )
 
@@ -631,9 +554,69 @@ def cache_info(path:str|Path, **kwargs):
             'feature_schema': feature_schema,
             'source_caches_num': len(source_caches),
             'sample_size': len(names), 'support':support}
+
+# endregion
+
+
+# region CLI
 #165
 
+def _resolve_input_paths(npz_inputs) -> list[Path]:
+    """ Expand merge inputs where each item may be a file, dir, or glob mask."""
+    resolved = []
+    seen = set()
+
+    for item in as_collection(npz_inputs):
+        item = Path(item)
+        item_str = str(item)
+
+        if any(ch in item_str for ch in '*?[]'):
+            matches = [Path(p) for p in glob.glob(item_str)]
+        elif item.is_dir():
+            matches = sorted(p for p in item.iterdir() if p.is_file() and p.suffix == '.npz')
+        elif item.is_file():
+            matches = [item]
+        else:
+            matches = []
+
+        if not matches:
+            print_color(f"[WARN] No NPZ files matched: {item}", 'y')
+            continue
+
+        for path in matches:
+            if path.suffix != '.npz':
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(path)
+
+    return resolved
+
 def _run_build_cache_ds(args):
+    def _load_list(list_file) -> list[Path]:
+        """ Resolve JSON filenames from a text list into full paths under json_dir."""
+        # json_dir = Path(json_dir)
+        # list_file = Path(list_file)
+        with open(Path(list_file), 'r') as f:
+            video_names = [ln.strip() for ln in f if ln.strip()]
+        return [Path(jsons_dir) / vid for vid in video_names]
+
+    def save_vid_lists(spl_sets: dict[str, list[Path]]):
+        """ Save list to file according to split keys.
+            For each key in spl_sets, a file named '<key>_videos.txt' is created, containing one JSON filename per line.
+        :param  spl_sets: dict returned by split_json_ds
+        """
+
+        for grp, paths in spl_sets.items():
+            list_path = split_dir / f"{grp}{VIDEO_LIST}"
+            with open(list_path, 'w') as f:
+                for p in paths:
+                    f.write(p.name + '\n')
+            print(f"Written {list_path} ({len(paths)} videos)")
+
+
     jsons_dir:Path = args.jsons_dir
     cache_dir:Path = args.cache_dir
     split_dir:Path = args.split_dir or jsons_dir
@@ -650,12 +633,12 @@ def _run_build_cache_ds(args):
         print_color('[INFO] Using existing train/test split files','b')
     else:
         print_color(f'[INFO] Creating new train/test split\nrandom seed: {args.random_seed}','g')
-        splits = split_json_ds(jsons_dir, random_seed=args.random_seed, test_ratio=args.test_ratio)
-        save_vid_lists(splits, split_dir)
+        split_sets = split_json_ds(jsons_dir, random_seed=args.random_seed, test_ratio=args.test_ratio)
+        save_vid_lists(split_sets)
 
     eval_list = test_list if test_list.exists() else valid_list
     npz_name = args.cache_tag or jsons_dir.name
-    train_cache = build_cache_from_json(_json_paths_from_list(jsons_dir, train_list), cache_dir/f"{npz_name}_train",
+    train_cache = build_cache_from_json(_load_list(train_list), cache_dir/f"{npz_name}_train",
                                         allow_empty_lbl=args.allow_empty,
                                         json_type=args.json_type,
                                         temp_smooth=(not args.no_temp_smooth),
@@ -668,7 +651,7 @@ def _run_build_cache_ds(args):
                                         top_k_min=args.top_k_min,
                                         )
     cache_info(train_cache, mode='dataset')
-    test_cache = build_cache_from_json(_json_paths_from_list(jsons_dir, eval_list), cache_dir/f"{npz_name}_test",
+    test_cache = build_cache_from_json(_load_list(eval_list), cache_dir/f"{npz_name}_test",
                                        allow_empty_lbl=args.allow_empty,
                                        json_type=args.json_type,
                                        temp_smooth=(not args.no_temp_smooth),
@@ -722,9 +705,7 @@ def _run_stream_cache(args):
     cache_info(cache_path, mode='stream')
 
 
-# --------------------------------------------------
-# * CLI entry point
-# --------------------------------------------------
+
 def main():
     """ CLI entry point."""
     def _add_cache_build_args(prs):
@@ -734,10 +715,10 @@ def main():
         prs.add_argument('-e', '--allow-empty', action='store_true', help="allow empty (None) labels")
         prs.add_argument('-p', '--pure-motion', action='store_true', help='use only motion features, without the static overlap block')
         prs.add_argument('-l', '--legacy', action='store_true', help='use only the original 18 motion features')
-        prs.add_argument('-pm', '--pool-mode', default=POOL_MODE,
+        prs.add_argument('-pm', '--pool-mode', default=DEFAULT_POOL_MODE,
                          choices=['max', 'mean', 'lse', 'top_k', 'mean_max', 'mean_std_max', 'mm', 'msm'], help='clip pooling mode')
-        prs.add_argument('-kr', '--top-k-ratio', dest='top_k_ratio', type=float, default=POOL_TOP_K_RATIO, help='ratio for top_k pooling')
-        prs.add_argument('-k', '--top-k-min', dest='top_k_min', type=int, default=POOL_TOP_K_MIN, help='minimum pooled k for top_k')
+        prs.add_argument('-kr', '--top-k-ratio', dest='top_k_ratio', type=float, default=DEFAULT_TOP_K_RATIO, help='ratio for top_k pooling')
+        prs.add_argument('-k',  '--top-k-min'  , dest='top_k_min',   type=int, default=DEFAULT_TOP_K_MIN, help='minimum pooled k for top_k')
         prs.add_argument('--no-temp-smooth', action='store_true', help='disable temporal smoothing')
         prs.add_argument('--json-type', default=DEFAULT_TYPE, choices=['type_1', 'type_2', '1', '2'], help='input JSON format for loader')
 
@@ -793,9 +774,9 @@ def main():
     else:
         parser.print_help()
 
-#627(1,1,) / #636(1,1,1)
+# endregion
 #775(1,1,1)
 if __name__ == '__main__':
     pass
     main()
-#444(,2,) -> 482(1,4,4)- #555(1,1,4)
+#800(1,1,) -> 777(1,1,)
