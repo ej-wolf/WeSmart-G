@@ -1,0 +1,80 @@
+streams:
+  - id: stm_01
+    display_name: stream 01
+    enabled: true
+    url: ""
+  - id: stm_02
+    display_name: stream 02
+    enabled: false
+    url: ""
+  - id: stm_03
+    display_name: FightClub
+    enabled: false
+    url: ""
+
+model:
+  yolo_pose: "models/yolo26x-pose.pt"
+  conf: 0.5
+  imgsz: 736
+  half: true
+  ignored_classes: [3, 4]
+
+runtime:
+  device: "cuda:0"
+  max_batch_size: 8
+  poll_sleep_sec: 0.005
+  status_interval_sec: 5.0
+
+capture:
+  backend: 'any'
+  reconnect_delay_sec: 1.0
+  read_sleep_sec: 0.0
+  loop_files: true
+  play_in_realtime: true
+
+sampling:
+  mode: "frames"
+  step_frames: 5
+  window_size: 8
+
+tms:
+  payload_span: 8.0
+  payload_tolerance: 0.05
+  models:
+    - tag: slow
+      model: "models/tsm/slow.pt"
+      enabled: true
+      pooling: 'lse'
+      threshold: 0.5
+      abnormal_tsh: 1.0
+      window_span: 3.6
+      T_infer: 1.8
+      min_frames: 10
+
+    - tag: fast
+      model: "models/tsm/fast.pt"
+      enabled: true
+      pooling: 'mm'
+      threshold: 0.55
+      abnormal_tsh: 0.40
+      window_span: 1.2
+      T_infer: 0.5
+      min_frames: 4
+
+display:
+  enabled: true
+  window_name: "rtsp_yolo_pose_stream"
+  fps: 10
+  columns: 1
+  tile_width: 640
+  tile_height: 360
+  # max_width: 1280
+  # max_height: 720
+  show_boxes: true
+  show_keypoints: true
+  show_skeleton: true
+  show_status: true
+  keypoint_conf: 0.25
+
+output:
+  latest_payload_dir:
