@@ -14,7 +14,7 @@ import json
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import Dataset, DataLoader, Subset, random_split
+from torch.utils.data import Dataset, DataLoader, Subset, TensorDataset, random_split
 from torch.utils.tensorboard import SummaryWriter
 
 #* Project import
@@ -470,6 +470,67 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_
     print(f"\n=== Testing run complete ===\n"
           f"\tTested model : {test_model}\n"
           f"\tTested set   : {test_cache}\n"
+          f"\tPredictions npz: {out_path.name}\n")
+    return {'path': str(out_path), **save_payload}
+
+
+def run_stream_testing(test_model:str|Path, X:np.ndarray, y:np.ndarray, meta:np.ndarray,
+                       stream_name:str, **kwargs):
+    """Run model inference directly on extracted stream features."""
+    model_path = Path(test_model)
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y, dtype=np.int64)
+    if X.ndim != 2 or not len(X):
+        raise ValueError(f"No stream feature rows available for {stream_name}")
+    if len(X) != len(y) or len(meta) != len(y):
+        raise ValueError("Stream X/y/meta size mismatch")
+
+    state = torch.load(model_path, map_location=DEFAULT_DEVICE)
+    cfg_path = model_path.parent/LOCAL_CONFIG
+    if cfg_path.is_file():
+        with cfg_path.open('r', encoding='utf-8') as f:
+            hidden_dim = int(json.load(f)['hidden_dim'])
+    else:
+        hidden_dim = _infer_hidden_dim_from_state(state)
+
+    model = ClipMLP(X.shape[1], hidden_dim=hidden_dim).to(DEFAULT_DEVICE)
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    loader = DataLoader(
+        TensorDataset(torch.from_numpy(X), torch.from_numpy(y).float()),
+        batch_size=kwargs.get('batch_size', DEFAULT_BATCH_SIZE), shuffle=False)
+
+    probs = []
+    with torch.no_grad():
+        for batch_x, _ in loader:
+            probs.append(torch.sigmoid(model(batch_x.to(DEFAULT_DEVICE))).cpu().numpy())
+    y_prob = np.concatenate(probs, axis=0)
+
+    meta_video = np.asarray([Path(item['video']).stem for item in meta], dtype=str)
+    meta_t_start = np.asarray([item['t_start'] for item in meta], dtype=np.float32)
+    meta_t_end = np.asarray([item['t_end'] for item in meta], dtype=np.float32)
+    meta_n_frames = np.asarray([int(item.get('n_frames', -1)) for item in meta], dtype=np.int64)
+    save_payload = {
+        'model_path': str(model_path),
+        'test_cache': stream_name,
+        'y_true': y,
+        'y_prob': y_prob,
+        'cache_index': np.arange(len(y), dtype=np.int64),
+        'meta_video': meta_video,
+        'meta_t_start': meta_t_start,
+        'meta_t_end': meta_t_end,
+        'meta_n_frames': meta_n_frames,
+        'video_name': meta_video,
+        'time_stamp': meta_t_end,
+    }
+    out_name = kwargs.get('output_tag', f"{model_path.stem}_{Path(stream_name).stem}-tst.npz")
+    out_path = Path(kwargs.get('out_dir', model_path.parent))/str(out_name)
+    out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
+    np.savez_compressed(out_path, **save_payload)
+
+    print(f"\n=== Stream testing run complete ===\n"
+          f"\tTested model : {model_path}\n"
+          f"\tTested stream: {stream_name}\n"
           f"\tPredictions npz: {out_path.name}\n")
     return {'path': str(out_path), **save_payload}
 

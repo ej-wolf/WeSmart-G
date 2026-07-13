@@ -240,12 +240,12 @@ def zip_dir(target_dir:Path|str, method='file', protocol='zip', rm_policy='ask',
         for child in sorted(target_dir.iterdir()):
             if not _matches_mask(child):
                 continue
-            archive_path = _zip_one_path(child, protocol=protocol)
+            archive_path = zip_one_path(child, protocol=protocol)
             archived.append(archive_path)
             originals.append(child)
     else:
         members = [child for child in sorted(target_dir.rglob('*')) if child.is_file() and _matches_mask(child)]
-        archive_path = _zip_one_path(target_dir, protocol=protocol, members=members)
+        archive_path = zip_one_path(target_dir, protocol=protocol, members=members)
         archived.append(archive_path)
         originals.append(target_dir)
 
@@ -298,7 +298,7 @@ def unzip_dir(z: Path | str, rm_policy='ask'):
     return extracted
 
 #* compressing helpers
-def _zip_one_path(path: str | Path, protocol='zip', members=None):
+def zip_one_path(path: str | Path, protocol='zip', members=None):
     """ Archive one file or directory and return the created archive path."""
     path = Path(path)
     if not path.exists():

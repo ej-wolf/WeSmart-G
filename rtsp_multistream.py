@@ -211,6 +211,7 @@ def resolve_sampling(config: dict[str, Any]) -> SamplingConfig:
 def resolve_payload_buffer_policy(config: dict[str, Any])-> float:
     tms_cfg = dict(config.get('tms', {}) or {})
     payload_span = tms_cfg.get('payload_span')
+
     if payload_span is None:
         raise ValueError("tms.payload_span is missing")
     payload_span = float(payload_span)

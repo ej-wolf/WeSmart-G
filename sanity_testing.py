@@ -6,7 +6,7 @@
     ToDo: check file naming for training mode    e.g
         timeline_J-RWL_ft25_w30-15_6_11_8_full_resolution_erez.png
         timeline******************_6_11_8_full_resolution_erez.png
-        J-RWL_ft25_w30-15_BM111_cam-6-11-8_FRes_Ana_stream-summary.json
+        J-RWL_ft25_w30-15_BM111_cam-6-11-8_FRes_Ana_reports.json
 """
 
 
@@ -36,7 +36,7 @@ _MODE_TOLERANCE_PROFILE = {'all': 'loose', 'train': 'loose', 'no_train': 'strict
 
 _RESULT_REPORT_NAME = 'sanity_report'
 _EVAL_PLAN_NAME = '_sanity_eval_plan.json'
-_EXPORTED_FILE_PATTERNS = ('*-summary.json',  '*_stream-events.json', '*.npz',
+_EXPORTED_FILE_PATTERNS = ('*-summary.json', '*_clip-sum.json', '*_reports.json', '*_events.json', '*.npz',
                            'ROC_*.png',  'ROC_*.csv',  '*_timeline.csv', 'timeline_*.csv', 'timeline_*.png',)
 
 # TODO: consider moving these path-like JSON keys into a shared project-wide constant.
@@ -68,7 +68,8 @@ def _iter_run_dirs(base_dir: Path) -> list[Path]:
         if not path.is_dir():
             continue
         has_model = any(path.glob('best_model.*.pt')) or (path/'model.pt').is_file()
-        has_outputs = any(path.rglob('*-summary.json')) or any(path.rglob('*-tst.npz'))
+        has_outputs = (any(path.rglob('*-summary.json')) or any(path.rglob('*_reports.json'))
+                       or any(path.rglob('*_clip-sum.json')) or any(path.rglob('*-tst.npz')))
         if has_model or has_outputs:
             run_dirs.append(path)
     return run_dirs
@@ -368,8 +369,11 @@ def _compare_timeline_csv(test_path: Path, ref_path: Path, *, atol: float) -> di
                 'message': f'row count mismatch: {len(test_rows)} != {len(ref_rows)}',
                 'issue_type': 'shape', 'issue_count': 1}
 
-    req_cols = {'win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob', 'y_pred'}
-    if test_rows and (set(test_rows[0]) != set(ref_rows[0]) or not req_cols.issubset(test_rows[0])):
+    req_cols = {'win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob'}
+    test_cols = set(test_rows[0]) if test_rows else set()
+    ref_cols = set(ref_rows[0]) if ref_rows else set()
+    pred_cols = sorted(col for col in test_cols if col == 'y_pred' or col.startswith('y_prd-'))
+    if test_rows and (test_cols != ref_cols or not req_cols.issubset(test_cols) or not pred_cols):
         return {'ok': False, 'kind': 'csv', 'max_fp_err': 0.0,
                 'message': 'timeline columns mismatch', 'issue_type': 'shape', 'issue_count': 1}
 
@@ -386,10 +390,11 @@ def _compare_timeline_csv(test_path: Path, ref_path: Path, *, atol: float) -> di
 
         prob_delta = abs(float(test_row['y_prob']) - float(ref_row['y_prob']))
         max_prob_delta = max(max_prob_delta, prob_delta)
-        if int(test_row['y_pred']) != int(ref_row['y_pred']):
-            flip_count += 1
+        for pred_col in pred_cols:
+            if int(test_row[pred_col]) != int(ref_row[pred_col]):
+                flip_count += 1
 
-    flip_rate = (flip_count / len(test_rows)) if test_rows else 0.0
+    flip_rate = (flip_count/(len(test_rows)*len(pred_cols))) if test_rows and pred_cols else 0.0
     ok = (flip_count == 0 and max_prob_delta <= float(atol))
     return {'ok': ok,
             'kind': 'csv',
@@ -501,6 +506,8 @@ def _summary_sample_total(summary_json: dict[str, Any]) -> int:
     if isinstance(cm, list) and len(cm) == 2:
         return int(sum(sum(int(cell) for cell in row) for row in cm))
     cm = summary_json.get('cm_clips', None)
+    if isinstance(cm, list) and len(cm) == 2:
+        return int(sum(sum(int(cell) for cell in row) for row in cm))
     if isinstance(cm, dict):
         return int(sum(int(value) for value in cm.values()))
     return 0
@@ -512,6 +519,8 @@ def _summary_cm_cells(summary_json: dict[str, Any]) -> list[int]:
     if isinstance(cm, list) and len(cm) == 2 and all(isinstance(row, list) and len(row) == 2 for row in cm):
         return [int(cm[0][0]), int(cm[0][1]), int(cm[1][0]), int(cm[1][1])]
     cm = summary_json.get('cm_clips', None)
+    if isinstance(cm, list) and len(cm) == 2 and all(isinstance(row, list) and len(row) == 2 for row in cm):
+        return [int(cm[0][0]), int(cm[0][1]), int(cm[1][0]), int(cm[1][1])]
     if isinstance(cm, dict):
         return [int(cm.get('tn', 0)), int(cm.get('fp', 0)), int(cm.get('fn', 0)), int(cm.get('tp', 0))]
     return []
@@ -564,7 +573,7 @@ def _compare_summary_json(test_path: Path, ref_path: Path, *, tolerances: dict[s
 
 
 def _compare_stream_events_json(test_path: Path, ref_path: Path, *, tolerances: dict[str, float]) -> dict[str, Any]:
-    """Compare one stream-events JSON using one compact event-flip summary."""
+    """Compare one stream events JSON using one compact event-flip summary."""
     result = _compare_json_semantics(test_path, ref_path, tolerances=tolerances)
     test_json = result.pop('test_json')
     ref_json = result.pop('ref_json')
@@ -685,9 +694,10 @@ def _cmp_op_file(test_path:Path, ref_path:Path, *, mode: str, file_key='',
     key_path = Path(file_key) if file_key else test_path
     suffix = key_path.suffix.lower()[1:]
     if suffix == 'json':
-        if key_path.name.endswith('_stream-events.json'):
+        if key_path.name.endswith('_events.json'):
             return _compare_stream_events_json(test_path, ref_path, tolerances=json_tolerances)
-        if key_path.name.endswith('-summary.json'):
+        if (key_path.name.endswith('-summary.json') or key_path.name.endswith('_clip-sum.json')
+                or key_path.name.endswith('_reports.json')):
             return _compare_summary_json(test_path, ref_path, tolerances=json_tolerances, mode=mode)
         return _compare_json_semantics(test_path, ref_path, tolerances=json_tolerances)
     elif suffix == 'png':

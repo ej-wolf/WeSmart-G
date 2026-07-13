@@ -540,13 +540,15 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
             spans.append(tuple(active))
         return spans
 
-    def _minute_tick_step(span_sec: float) -> int:
-        """ Pick a readable minute-based tick spacing for timestamp axes."""
+    def _timeline_tick_step(span_sec: float) -> int:
+        """Pick a readable tick spacing for timestamp axes."""
+        if span_sec <= 3*60:
+            return 30
         if span_sec <= 10*60:
             return 60
         if span_sec <= 20*60:
             return 2*60
-        if span_sec <= 40*60:
+        if span_sec < 60*60:
             return 5*60
         return 10*60
 
@@ -592,7 +594,10 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
     t_frm = np.asarray([float(row['t_frm']) for row in rows], dtype=np.float64)
     t_start = np.asarray([float(row['t_start']) for row in rows], dtype=np.float64)
     y_prob = np.asarray([float(row['y_prob']) for row in rows], dtype=np.float64)
-    y_pred = np.asarray([float(row['y_pred']) for row in rows], dtype=np.float64)
+    pred_column = kwargs.get('pred_column', 'y_pred')
+    if pred_column not in rows[0]:
+        raise KeyError(f"timeline csv has no '{pred_column}' column: {csv_path}")
+    y_pred = np.asarray([float(row[pred_column]) for row in rows], dtype=np.float64)
     gt_label = (np.asarray([float(row[label_key]) for row in rows], dtype=np.float64)
                 if label_key is not None else None)
 
@@ -612,7 +617,7 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
     if save_to is None and not show:
         return
 
-    t_min = t_frm[0]
+    t_min = min(t_start[0], t_frm[0])
     t_max = t_frm[-1]
     if t_span is None:
         t1, t2 = t_min, t_max
@@ -671,12 +676,11 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
 
     x_left, x_right = t1, t2
     if x_format == 'time_stamp' and t2 > t1:
-        step_sec = _minute_tick_step(t2 - t1)
-        x_left = int(np.ceil(t1 / step_sec) * step_sec)
-        x_right = int(np.ceil(t2 / step_sec) * step_sec)
-        if x_right <= x_left:
-            x_right = x_left + step_sec
-        x_ticks = np.arange(x_left, x_right + 0.1, step_sec, dtype=np.float64)
+        step_sec = _timeline_tick_step(t2 - t1)
+        tick_start = np.ceil(t1 / step_sec) * step_sec
+        x_ticks = np.arange(tick_start, t2 + 0.1, step_sec, dtype=np.float64)
+        if not len(x_ticks):
+            x_ticks = np.asarray([t1, t2], dtype=np.float64)
     elif t2 > t1:
         x_ticks = np.linspace(t1, t2, num=6)
     else:

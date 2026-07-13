@@ -270,7 +270,9 @@ def resolve_threshold_dir(base_dir, threshold: float, overwrite=False, threshold
 
 def companion_summary_name(output_name: str, mode='clip')-> str:
     """ Build a related summary filename for clip/video companion outputs."""
-    for suffix in ('_clip-summary', '_video-summary', '_stream-summary'):
+    if output_name.endswith('_reports') and mode == 'clip':
+        return f"{output_name[:-len('_reports')]}_clip-sum"
+    for suffix in ('_clip-summary', '_video-summary'):
         if output_name.endswith(suffix):
             return f"{output_name[:-len(suffix)]}_{mode}-summary"
     return f"{output_name}_{mode}-summary"

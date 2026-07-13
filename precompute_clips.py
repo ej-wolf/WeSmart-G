@@ -145,6 +145,38 @@ def get_split_pair(cache: str|Path) -> str | Path:
     return pair_path if pair_path.is_file() else pair_name
 
 
+def extract_stream_features(streams, feature_schema:dict, temporal_profile:dict, **kwargs):
+    """ Build feature, label, and metadata arrays from named stream dictionaries."""
+    feats, labels, meta = [], [], []
+    for stream_name, stream_data in streams:
+        clips = slice_json_stream(
+            stream_data,
+            window_sec=temporal_profile['target_window'],
+            stride_sec=temporal_profile['target_stride'],
+            allow_empty_lbl=kwargs.get('allow_empty_lbl', False))
+        for clip in clips:
+            if clip['label'] is None:
+                continue
+            feats.append(get_clip_features_vec( clip['frames'],
+                         pure_motion=feature_schema['pure_motion'],
+                         legacy=feature_schema['legacy'],
+                         temp_smooth=feature_schema['temp_smooth'],
+                         temp_kernel=feature_schema['temp_kernel'],
+                         pool_mode=feature_schema['pool_mode'],
+                         top_k_ratio=feature_schema['top_k_ratio'],
+                         top_k_min=feature_schema['top_k_min'],
+                         j_version=feature_schema['extractor_version'],
+                         motion_fps_ref=feature_schema['motion_fps_ref'],
+                         motion_fps_min=feature_schema['motion_fps_min'],
+                         motion_fps_max=feature_schema['motion_fps_max'])
+                         )
+            labels.append(int(clip['label']))
+            meta.append({'video': stream_name, 't_start': clip['t_start'],
+                         't_end': clip['t_end'], 'n_frames': len(clip['frames'])})
+    X = np.stack(feats) if feats else np.zeros((0, int(feature_schema['feature_dim'])), dtype=np.float32)
+    return X, np.asarray(labels, dtype=np.int64), np.asarray(meta, dtype=object)
+
+
 def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
     """ Precompute clip-level motion features from one or more JSON paths.
         (This is the core implementation for both dataset-based and stream build.
@@ -173,42 +205,16 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
                  )
     temporal_schema = build_temporal_schema(kwargs.get('window', WINDOW_SEC), kwargs.get('stride', STRIDE_SEC),)
 
-    feats, labels, meta = [], [], []
-    for json_path in json_paths:
-        json_data = load_json_data(json_path, j_type=kwargs.get('json_type', DEFAULT_TYPE))
-        clips = slice_json_stream(json_data,
-                                  window_sec=kwargs.get('window', WINDOW_SEC),
-                                  stride_sec=kwargs.get('stride', STRIDE_SEC),
-                                  allow_empty_lbl=kwargs.get('allow_empty_lbl', False),)
-        for clip in clips:
-            if clip['label'] is None:
-                continue
-            #* extract all the features and compose them into features vector
-            clip_feat = get_clip_features_vec( clip['frames'],
-                                 pure_motion=bool(feature_schema['pure_motion']),
-                                 legacy=bool(feature_schema['legacy']),
-                                 temp_smooth=bool(feature_schema['temp_smooth']),
-                                 temp_kernel=int(feature_schema['temp_kernel']),
-                                 pool_mode=str(feature_schema['pool_mode']),
-                                 top_k_ratio=float(feature_schema['top_k_ratio']),
-                                 top_k_min=int(feature_schema['top_k_min']),
-                                 j_version=float(feature_schema['extractor_version']),
-                                 motion_fps_ref=feature_schema['motion_fps_ref'],
-                                 motion_fps_min=feature_schema['motion_fps_min'],
-                                 motion_fps_max=feature_schema['motion_fps_max'],
-                                 )
-            labels.append(int(clip['label']))
-            feats.append(clip_feat)
-            meta.append({'video': json_path.name,
-                         't_start': clip['t_start'],
-                         't_end': clip['t_end'],
-                         'n_frames': len(clip['frames']), } )
-
-    feats = np.stack(feats) if feats else np.zeros((0, int(feature_schema['feature_dim'])), dtype=np.float32)
-    labels = np.asarray(labels, dtype=np.int64)
+    streams = ((json_path.name, load_json_data(json_path, j_type=kwargs.get('json_type', DEFAULT_TYPE)))
+               for json_path in json_paths)
+    temporal_profile = {'target_window': temporal_schema['window'],
+                        'target_stride': temporal_schema['stride']}
+    feats, labels, meta = extract_stream_features(
+        streams, feature_schema, temporal_profile,
+        allow_empty_lbl=kwargs.get('allow_empty_lbl', False))
     #print_color(feats.shape)
     source_caches = [build_cache_record(out_path, feature_schema, temporal_schema)]
-    np.savez_compressed(out_path, X=feats, y=labels, meta=np.asarray(meta, dtype=object),
+    np.savez_compressed(out_path, X=feats, y=labels, meta=meta,
                         **{ FEATURE_SCHEMA_KEY: pack_json_value(feature_schema),
                             TEMPORAL_SCHEMA_KEY: pack_json_value(temporal_schema),
                             SOURCE_CACHES_KEY: pack_json_value(source_caches),},

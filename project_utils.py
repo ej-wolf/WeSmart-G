@@ -166,9 +166,11 @@ def get_exporting_name(model_ref, test_ref, kind, *, unit='NA', short=False, **k
     if kind == 'summary':
         if not unit:
             raise ValueError('summary export name requires unit')
+        if unit == 'stream':
+            return f'{base_tag}_reports'
         return f'{base_tag}_{unit}-summary'
     if kind == 'events':
-        return f'{base_tag}_stream-events'
+        return f'{base_tag}_events'
     if kind == 'timeline':
         return f'{base_tag}_stream-tst'
     if kind == 'raw':

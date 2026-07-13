@@ -9,20 +9,22 @@
     - run paired stream-JSON conversions with `run_stream_json_dual(...)`
 """
 
-import json, pickle, glob
+import copy, json, pickle, glob
 import re
 import time
 from datetime import datetime
 from pathlib import Path
 import numpy as np
+import torch
 #* Imports from local project
-from precompute_clips import (build_cache_from_json, merge_cache_npz, get_split_pair, WINDOW_SEC, STRIDE_SEC,
-                              RANDOM_SEED, split_json_ds, MOTION_FPS_REF)
+from precompute_clips import (build_cache_from_json, extract_stream_features, merge_cache_npz, get_split_pair,
+                              WINDOW_SEC, STRIDE_SEC, RANDOM_SEED, split_json_ds, MOTION_FPS_REF)
 from tms_trainer import run_training, run_testing
+from torch_clip_model import run_stream_testing
 from evaluation_core import analyze_clip_test, analyze_video_test, support_pair, DEFAULT_EVAL_THRESHOLD
 from stream_analysis import analyze_stream_test
 from common.my_local_utils import as_collection, get_unique_name, print_color
-from json_utils import list_json_sources
+from json_utils import list_json_sources, load_json_raw
 from motion_feature_schema import load_cache_contract_compact
 from project_utils import get_exporting_name, resolve_best_pt_model, strip_split_suffix, strip_timestamp_prefix
 
@@ -177,11 +179,9 @@ def build_cache_batch(dir_ls, pooling, t_slc, kwargs=None):
             pool_name = str(pool_name)
             for slc in as_collection(t_slc):
                 if isinstance(slc, dict):
-                    win  = float(slc['window'])
-                    strd = float(slc['stride'])
+                    win, strd  = slc['window'], slc['stride']
                 elif isinstance(slc, (tuple, list)) and len(slc) >= 2:
-                    win = float(slc[0])
-                    strd = float(slc[1])
+                    win, strd =  slc[0], slc[1]
                 elif isinstance(slc, str):
                     parts = [p.strip() for p in slc.split(':') if p.strip()]
                     if len(parts) != 2:
@@ -288,7 +288,10 @@ def resolve_npz_inputs(inputs, base_dir: Path | None = None) -> list[Path]:
 
 def infer_eval_threshold(run_dir: Path, default=DEFAULT_EVAL_THRESHOLD) -> float:
     """ Reuse the saved threshold from prior summaries, else fall back to default."""
-    for summary_path in sorted(Path(run_dir).rglob('*-summary.json')):
+    summary_paths = []
+    for pattern in ('*-summary.json', '*_clip-sum.json', '*_reports.json'):
+        summary_paths.extend(Path(run_dir).rglob(pattern))
+    for summary_path in sorted(summary_paths):
         try:
             with summary_path.open('r', encoding='utf-8') as f:
                 summary = json.load(f)
@@ -330,10 +333,9 @@ def evaluate_raw_test(raw_path, mode, out_dir, threshold=DEFAULT_EVAL_THRESHOLD,
         raise ValueError(f'Unrecognized mode: {mode}')
 
 
-def sum_all_results(work_dir: str | Path, **kwargs):  # 107 -250
-    """ Collect all summary JSON files under one work dir into one flat results table.
-    Usage:
-    :param work_dir: at a model/run root containing `*-summary.json` files
+def sum_all_results(res_dir: str | Path, **kwargs):  # 107 -250
+    """ Collect all summary/report JSON files under one work dir into one flat results table.
+    :param res_dir: at a model/run root containing summary/report JSON files
     optional sort, save_json, and print_cli control output formatting and export
     """
 
@@ -490,7 +492,7 @@ def sum_all_results(work_dir: str | Path, **kwargs):  # 107 -250
             support = support_pair(testing_set.get('clips_support', summary.get('support', None)))
         support_str = f'{support[0]}/{support[1]}' if support is not None else 'N/A'
 
-        cm = summary.get('confusion_matrix', [[None, None], [None, None]])
+        cm = summary.get('confusion_matrix', summary.get('cm_clips', [[None, None], [None, None]]))
         auc = summary.get('ROC AUC', summary.get('roc_auc', None))
         return {'model': str(model_path), 'cache': test_cache.stem,
                 'train ds': train_tag or train_ds,
@@ -498,29 +500,30 @@ def sum_all_results(work_dir: str | Path, **kwargs):  # 107 -250
                 'unit': unit, 'samples': samples, 'support': support_str,
                 'window': window, 'stride': stride, 'pool': pool,
                 'fps_ref': fps_ref, 'feat_dim': feat_dim, 'threshold': threshold,
-                'FF': cm[0][0],
-                'FT': cm[0][1],
-                'TF': cm[1][0],
-                'TT': cm[1][1],
+                'FF': cm[0][0], 'FT': cm[0][1],
+                'TF': cm[1][0], 'TT': cm[1][1],
                 'Acc': summary.get('accuracy', None),
                 'Rec': summary.get('recall', None),
                 'FPR': summary.get('FPR', None),
                 'AUC': auc,
                 }
 
-    work_dir = Path(work_dir)
-    if not work_dir.is_dir():
-        raise NotADirectoryError(work_dir)
+    res_dir = Path(res_dir)
+    if not res_dir.is_dir():
+        raise NotADirectoryError(res_dir)
 
-    summary_paths = sorted(work_dir.rglob('*-summary.json'))
+    summary_paths = []
+    for pattern in ('*-summary.json', '*_clip-sum.json', '*_reports.json'):
+        summary_paths.extend(res_dir.rglob(pattern))
+    summary_paths = sorted(summary_paths)
     if not summary_paths:
-        raise FileNotFoundError(f"No *-summary.json files found in {work_dir}")
+        raise FileNotFoundError(f"No summary/report JSON files found in {res_dir}")
 
     table = [_row_from_summary(p) for p in summary_paths]
     _sort_table(table)
     table = _drop_na_columns(table)
 
-    output_path = work_dir/kwargs.get('op_name', RESULT_NAME)
+    output_path = res_dir / kwargs.get('op_name', RESULT_NAME)
     with (output_path.with_suffix('.pkl')).open('wb') as f:
         pickle.dump(table, f)
 
@@ -640,7 +643,10 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
 def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
     """ Run tests for existing trained models without retraining them.
     :param models: single or list of model dir/ checkpoint path
-    :param ds_tests, stm_tests:  list or fir off npz files for dataset/stream evaluations
+    :param ds_tests: NPZ file, directory, mask, or list for dataset evaluations
+    :param stm_tests: Stream JSON/ZIP path, directory, stream dict, or homogeneous list
+    :param kwargs['stream_schema']: optional nested or flat feature/temporal contract
+    :param kwargs['threshold']: one threshold or a list/tuple/set of values between 0 and 1
     :param kwargs['summary']: if summary==True aggregates summaries with sum_all_results(...)
                               summary=<path> stores the aggregate summary
     """
@@ -649,11 +655,83 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
     out_dir = kwargs.pop('out_dir', None)
     evaluate = kwargs.pop('evaluate', True)
     infer_threshold = kwargs.pop('infer_threshold', False)
-    threshold_arg = kwargs.pop('threshold', None)
+    thresholds = kwargs.pop('threshold', None)
     summary = kwargs.pop('summary', False)
     test_pair = kwargs.pop('test_pair', False)
     ds_eval = kwargs.pop('ds_eval_mode', 'clip')
+    stream_schema = kwargs.pop('stream_schema', None)
     npz_dir = Path(npz_dir) if npz_dir is not None else None
+
+    feature_fields = {'extractor', 'extractor_version', 'feature_dim', 'pure_motion', 'legacy',
+                      'temp_smooth', 'temp_kernel', 'pool_mode', 'top_k_ratio', 'top_k_min',
+                      'motion_fps_ref', 'motion_fps_min', 'motion_fps_max'}
+    temporal_fields = {'target_window', 'target_stride'}
+
+    def _resolve_stream_schema(source:dict) -> tuple[dict, dict]:
+        values = {key: [] for key in feature_fields | temporal_fields}
+
+        def collect(node):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key in values:
+                        values[key].append(value)
+                    collect(value)
+            elif isinstance(node, (list, tuple)):
+                for value in node:
+                    collect(value)
+
+        collect(source)
+        missing = [key for key, found in values.items() if not found]
+        if missing:
+            raise ValueError(f"missing schema fields: {', '.join(sorted(missing))}")
+        for key, found in values.items():
+            if any(value != found[0] for value in found[1:]):
+                raise ValueError(f"conflicting values for schema field '{key}'")
+
+        ftr_scm = {key: values[key][0] for key in feature_fields}
+        temp_scm = {key: values[key][0] for key in temporal_fields}
+        if ftr_scm['extractor'] != 'extract_motion_features':
+            raise ValueError(f"unsupported feature extractor: {ftr_scm['extractor']}")
+        if temp_scm['target_window'] <= 0 or temp_scm['target_stride'] <= 0:
+            raise ValueError("target_window and target_stride must be positive")
+        return ftr_scm, temp_scm
+
+    def _load_stream_inputs(inputs) -> tuple[list[tuple[str, dict]], str]:
+        if inputs is None:
+            return [], 'streams'
+        items = list(inputs) if isinstance(inputs, (list, tuple, set)) else [inputs]
+        has_dict = [isinstance(item, dict) for item in items]
+        if any(has_dict) and not all(has_dict):
+            raise ValueError("stm_tests cannot mix stream dictionaries and paths")
+
+        if all(has_dict):
+            loaded = []
+            for index, data in enumerate(items):
+                name = Path(str(data.get('video') or f"stream_{index + 1}")).name
+                loaded.append((name, copy.deepcopy(data)))
+            return loaded, 'streams'
+
+        paths = []
+        for item in items:
+            path = Path(item)
+            if path.is_dir():
+                paths.extend(list_json_sources(path))
+            else:
+                paths.append(path)
+        loaded = []
+        for path in paths:
+            try:
+                data = load_json_raw(path)
+                loaded.append((path.name, data))
+            except Exception as exc:
+                print_color(f"[WARN] Skipping stream {path}: {type(exc).__name__}: {exc}", 'o')
+        if len(items) == 1 and Path(items[0]).is_dir():
+            source_name = Path(items[0]).name
+        elif len(paths) == 1:
+            source_name = paths[0].stem
+        else:
+            source_name = 'streams'
+        return loaded, source_name
 
     def _model_refs(refs) -> list[Path]:
         out = []
@@ -668,21 +746,48 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
                 out.append(ref)
         return out
 
-    def _threshold_for_run(run_dir: Path) -> float:
-        if threshold_arg is not None:
-            return float(threshold_arg)
-        if infer_threshold:
-            return infer_eval_threshold(run_dir, DEFAULT_EVAL_THRESHOLD)
-        return float(DEFAULT_EVAL_THRESHOLD)
-
-    def _run_raw_test(model_path:Path, tst_npz:Path, out_dir:Path, mode:str, thrsh:float):
+    def _run_raw_test(model_path:Path, tst_npz:Path, out_dir:Path, mode:str, thres:list[float]):
         raw_tag = get_exporting_name(model_path, tst_npz, 'raw', unit=mode)
         run_kwargs = {'video_mode': True}
         if kwargs.get('batch_size') is not None:
             run_kwargs['batch_size'] = kwargs['batch_size']
         res = run_testing(model_path, tst_npz, out_dir=out_dir, output_tag=raw_tag, **run_kwargs)
         if evaluate:
-            evaluate_raw_test(res['path'], mode, out_dir, thrsh, **kwargs)
+            for th in thres:
+                evaluate_raw_test(res['path'], mode, out_dir, th, **kwargs)
+
+    def _run_stream_test(model_path:Path, s098treams, source_name:str, schema, out_dir:Path,
+                         thres:list[float]):
+        ftr_schema, tmp_schema = schema
+        state = torch.load(model_path, map_location='cpu')
+        input_dim = int(state['net.0.weight'].shape[1])
+        if input_dim != int(ftr_schema['feature_dim']):
+            raise ValueError(
+                f"feature_dim mismatch: schema={ftr_schema['feature_dim']}, model={input_dim}")
+        feature_parts = []
+        for name, data in streams:
+            try:
+                part = extract_stream_features([(name, data)], ftr_schema, tmp_schema)
+                if len(part[1]):
+                    feature_parts.append(part)
+            except Exception as exc:
+                print_color(f"[WARN] Skipping stream {name}: {type(exc).__name__}: {exc}", 'o')
+        if not feature_parts:
+            raise ValueError("no valid stream windows were produced")
+        X = np.concatenate([part[0] for part in feature_parts])
+        y = np.concatenate([part[1] for part in feature_parts])
+        meta = np.concatenate([part[2] for part in feature_parts])
+        if X.shape[1] != int(ftr_schema['feature_dim']):
+            raise ValueError(
+                f"extracted feature width mismatch: schema={ftr_schema['feature_dim']}, actual={X.shape[1]}")
+        raw_tag = get_exporting_name(model_path, Path(source_name), 'raw', unit='stream')
+        run_kwargs = {'out_dir': out_dir, 'output_tag': raw_tag}
+        if kwargs.get('batch_size') is not None:
+            run_kwargs['batch_size'] = kwargs['batch_size']
+        res = run_stream_testing(model_path, X, y, meta, source_name, **run_kwargs)
+        if evaluate:
+            for value in thres:
+                evaluate_raw_test(res['path'], 'stream', out_dir, value, **kwargs)
 
     def _find_test_pair() -> Path|None: #23
         config_path = run_dir/'config.json'
@@ -701,6 +806,12 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             return None
         return pair
 
+    try:
+        streams, source_name = _load_stream_inputs(stm_tests)
+    except Exception as exc:
+        print_color(f"[WARN] Stream inputs skipped: {type(exc).__name__}: {exc}", 'o')
+        streams, source_name = [], 'streams'
+
     tested = []
     for ref_mdl in _model_refs(models):
         try:
@@ -712,7 +823,16 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
 
         target_dir = Path(out_dir)/run_dir.name if out_dir is not None else run_dir
         target_dir.mkdir(parents=True, exist_ok=True)
-        threshold = _threshold_for_run(run_dir)
+        try:
+            thres = thresholds
+            if thres is None:
+                thres = infer_eval_threshold(run_dir) if infer_threshold else DEFAULT_EVAL_THRESHOLD
+            thres = [float(value) for value in as_collection(thres)]
+            if any(not 0.0 < value < 1.0 for value in thres):
+                raise ValueError(f"Thresholds must be between 0 and 1: {thres}")
+        except Exception as exc:
+            print_color(f"[WARN] Tests skipped for {run_dir.name}: {type(exc).__name__}: {exc}", 'o')
+            continue
 
         ds_npz = []
         if test_pair:
@@ -727,21 +847,30 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
 
         # if test_pair.is_file():
         #     try:
-        #         _run_raw_test(b_mdl, test_pair, target_dir, ds_mode, threshold)
+        #         _run_raw_test(b_mdl, test_pair, target_dir, ds_mode, thres)
         #     except Exception as exc:
         #         print(f"[WARN] Dataset test failed for {run_dir.name} on {test_pair.name}: {type(exc).__name__}: {exc}")
         # ds_mode = 'video' if vid_mode else 'clip'
         for tst_npz in ds_npz:
             try:
-                _run_raw_test(b_mdl, tst_npz, target_dir, ds_eval, threshold)
+                _run_raw_test(b_mdl, tst_npz, target_dir, ds_eval, thres)
             except Exception as exc:
                 print(f"[WARN] Dataset test failed for {run_dir.name} on {tst_npz.name}: {type(exc).__name__}: {exc}")
 
-        for tst_npz in resolve_npz_inputs(stm_tests, npz_dir):
+        if streams:
             try:
-                _run_raw_test(b_mdl, tst_npz, target_dir, 'stream', threshold)
+                schema_source = stream_schema
+                if schema_source is None:
+                    config_path = b_mdl.parent/'config.json'
+                    if not config_path.is_file():
+                        raise FileNotFoundError(f"no stream_schema and no config file: {config_path}")
+                    with config_path.open('r', encoding='utf-8') as f:
+                        schema_source = json.load(f)
+                schema = _resolve_stream_schema(schema_source)
+                _run_stream_test( b_mdl, streams, source_name, schema, target_dir, thres)
             except Exception as exc:
-                print(f"[WARN] Stream test failed for {run_dir.name} on {tst_npz.name}: {type(exc).__name__}: {exc}")
+                print_color(
+                    f"[WARN] Stream test skipped for {run_dir.name}: {type(exc).__name__}: {exc}", 'o')
 
         tested.append(target_dir)
 
@@ -966,6 +1095,7 @@ def build_window_study(): # 80 -> 65
 #build_caches 966(1,26,7)/ log 985(1,33,4)- build-rf 968(1,31,4)-cleanup : 926
 #tst/trn-refactor 850(1,26,2)-> 872->
 #sumallres-rfc 947(5,22,4)
+#tst_mdl-rfc 1096(4,28,11)
 
 
 #_______________________________________________________________________#
@@ -994,14 +1124,25 @@ def cache_builder():
 
     # *  Test test_models
 def test_runner():
+
+    tmp_strm_test = ["/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/weSmart_demo.json",
+                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/Russian_Road_Rage- Micky_Mouse_&_Sponge_Bob.json",
+                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/F_60_1_2_0_0.json",
+                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/F_121_1_0_0_0.zip",
+                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_529_0_1_1_0.zip",
+                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_390_0_0_1_0.zip",
+                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_383_0_0_1_0.zip",
+                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_115_0_0_1_0.zip"]
+
     # mdl_dir  = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/w30-15_models/w30-15-tst")
-    # op_dir = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/sanity-testing/testing")
+    # op_dir = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/sanity-testing/testing"
     mdl_dir = Path("work_dirs/models")
-    op_dir  = Path("work_dirs/testing")
+    out_dir = Path("work_dirs/testing")
     tst_ds =  None# Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/ds")
-    tst_strm = None #Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/strm")
-    threshold = 0.6
-    test_models(mdl_dir, out_dir=op_dir, summary= op_dir, threshold=threshold,
+    # tst_strm = None #Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/strm")
+    tst_strm = tmp_strm_test # Path("data/json_files/testing")
+    threshold = [0.5, 0.6]
+    test_models(mdl_dir, out_dir=out_dir, summary= out_dir, threshold=threshold,
                 ds_tests= tst_ds, stm_tests=tst_strm, test_pair=True)
 
 # * endregion

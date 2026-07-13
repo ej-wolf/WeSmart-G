@@ -3,7 +3,7 @@ import csv
 import json
 import numpy as np
 
-from common.my_local_utils import print_color, serialize_json_data, resolve_output_path
+from common.my_local_utils import get_unique_name, print_color, serialize_json_data, resolve_output_path
 from project_utils import get_exporting_name, get_test_title_lines
 from visual_util import plot_timeline
 from evaluation_core import (DEFAULT_ROC_RES, DEFAULT_EVAL_THRESHOLD, PRINT_POLICY, DEFAULT_THRESHOLD_RANGE,
@@ -15,7 +15,12 @@ from evaluation_core import (DEFAULT_ROC_RES, DEFAULT_EVAL_THRESHOLD, PRINT_POLI
 STREAM_MATCH_MIN_OVERLAP = 1e-9
 STREAM_MATCH_MAX_LAG = None
 STREAM_MAX_EVENT_GAP = 1
-DEFAULT_REG_MODEL = Path("work_dirs/json_models/win-study/260414-1721_J-RWL_25ft_3w-1o5-stream-tst/best_model.148.pt")
+STREAM_VIDEO_TAG_LEN = 24
+
+def stream_video_tag(video_name, max_len=STREAM_VIDEO_TAG_LEN):
+    """ Return a filesystem-safe compact stream/video tag for output filenames."""
+    tag = str(video_name).replace('/', '_').replace('\\', '_').replace(' ', '_')
+    return tag[:max_len]
 
 
 def build_stream_events(mask, t_frm, step, max_event_gap=STREAM_MAX_EVENT_GAP):
@@ -23,23 +28,23 @@ def build_stream_events(mask, t_frm, step, max_event_gap=STREAM_MAX_EVENT_GAP):
     mask = np.asarray(mask, dtype=bool)
     t_frm = np.asarray(t_frm, dtype=np.float64)
     events = []
-    start_idx, last_pos_idx = None, None
+    start_idx, last_idx = None, None
     gap_count = 0
 
     for idx, is_pos in enumerate(mask):
         if is_pos and start_idx is None:
             start_idx = idx
-            last_pos_idx = idx
+            last_idx = idx
             gap_count = 0
         elif is_pos and start_idx is not None:
-            last_pos_idx = idx
+            last_idx = idx
             gap_count = 0
         elif not is_pos and start_idx is not None:
             gap_count += 1
             if gap_count <= max_event_gap:
                 continue
 
-            end_idx = last_pos_idx
+            end_idx = last_idx
             events.append({'start': float(t_frm[start_idx]),
                            'end'  : float(t_frm[end_idx] + step),
                            't_frm_start': float(t_frm[start_idx]),
@@ -47,11 +52,11 @@ def build_stream_events(mask, t_frm, step, max_event_gap=STREAM_MAX_EVENT_GAP):
                            'idx_start': int(start_idx),
                            'idx_end': int(end_idx),
                            })
-            start_idx, last_pos_idx = None, None
+            start_idx, last_idx = None, None
             gap_count = 0
 
     if start_idx is not None:
-        end_idx = last_pos_idx
+        end_idx = last_idx
         events.append({'start':float(t_frm[start_idx]),
                        'end' : float(t_frm[end_idx] + step),
                        't_frm_start': float(t_frm[start_idx]),
@@ -63,16 +68,16 @@ def build_stream_events(mask, t_frm, step, max_event_gap=STREAM_MAX_EVENT_GAP):
 
 
 def event_overlap(gt_event, pred_event):
-    """Return overlap duration and overlap ratio normalized by GT duration."""
+    """ Return overlap duration and overlap ratio normalized by GT duration."""
     start = max(float(gt_event['start']), float(pred_event['start']))
     end = min(float(gt_event['end']), float(pred_event['end']))
     overlap = max(0.0, end - start)
     gt_dur = max(float(gt_event['end']) - float(gt_event['start']), 1e-12)
-    return overlap, overlap / gt_dur
+    return overlap, overlap/gt_dur
 
 
 def match_stream_events(gt_events, pred_events, min_overlap, max_lag):
-    """Greedy match of predicted stream events to GT events."""
+    """ Greedy match of predicted stream events to GT events."""
     used_pred = set()
     detected_events, missed_events = [], []
 
@@ -100,16 +105,15 @@ def match_stream_events(gt_events, pred_events, min_overlap, max_lag):
         onset_lag, _, _, pred_idx, overlap, overlap_ratio, offset_err = candidates[0]
         used_pred.add(pred_idx)
         pred_event = pred_events[pred_idx]
-        detected_events.append({
-            'gt_idx': int(gt_idx),
-            'pred_idx': int(pred_idx),
-            'gt_event': dict(gt_event),
-            'pred_event': dict(pred_event),
-            'onset_lag': float(onset_lag),
-            'offset_err': float(offset_err),
-            'overlap': float(overlap),
-            'overlap_ratio': float(overlap_ratio),
-        })
+        detected_events.append({'gt_idx'  : int(gt_idx),
+                                'pred_idx': int(pred_idx),
+                                'gt_event': dict(gt_event),
+                                'pred_event': dict(pred_event),
+                                'onset_lag' : float(onset_lag),
+                                'offset_err': float(offset_err),
+                                'overlap': float(overlap),
+                                'overlap_ratio': float(overlap_ratio),
+                                })
 
     false_events = [dict(pred_event) for idx, pred_event in enumerate(pred_events) if idx not in used_pred]
     return detected_events, missed_events, false_events
@@ -297,7 +301,7 @@ def _build_stream_event_summary(stream_ctx, video_results):
                     'num_clips' : len(stream_ctx['y_true']),
                     'support_clips': support_counts(stream_ctx['y_true']),
                     'num_videos': len(video_results),
-                    'cm_clips': agg_cm,
+                    'cm_clips': [[agg_cm['tn'], agg_cm['fp']], [agg_cm['fn'], agg_cm['tp']]],
                     'false_positive_time': total_fp_time,
                     'miss_time': total_miss_time,
                     'detection_lag': all_onset_delays[0] if all_onset_delays else None,
@@ -422,24 +426,56 @@ def run_stream_event_analysis(stream_ctx) -> tuple[list[dict], dict]:
     return video_reports, summary
 
 
-def export_stream_timeline(report, summary_path, raw_res, *, overwrite: bool) -> Path:
-    """ Export stream timeline CSV and annotate the report with its filename."""
-
-    csv_fieldnames = ['win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob', 'y_pred']
+def export_stream_timeline(report, timeline_dir, raw_res, threshold:float) -> tuple[Path, str]:
+    """Create or extend one shared multi-threshold stream timeline CSV."""
+    base_fields = ['win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob']
     video_name = report['video']
-    video_tag = str(video_name).replace('/', '_').replace('\\', '_').replace(' ', '_')
+    video_tag = stream_video_tag(video_name)
     mdl_tag, _ = get_test_title_lines(raw_res.get('model_path', None), raw_res.get('test_cache', None))
     timeline_rows = report.pop('timeline_rows')
-    timeline_csv_path = summary_path.with_name(f"timeline_{mdl_tag}_{video_tag}.csv").with_suffix('.csv')
+    timeline_csv_path = Path(timeline_dir)/f"timeline_{mdl_tag}_{video_tag}.csv"
     timeline_csv_path.parent.mkdir(parents=True, exist_ok=True)
-    timeline_csv_path = resolve_unique_output_file(timeline_csv_path, overwrite=overwrite)
+
+    pred_base = f"y_prd-{int(round(threshold*100.0))}"
+    pred_column = pred_base
+    existing_rows, fieldnames = [], []
+    if timeline_csv_path.is_file():
+        with timeline_csv_path.open('r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            existing_rows = list(reader)
+
+        verified = (all(field in fieldnames for field in base_fields)
+                    and len(existing_rows) == len(timeline_rows)
+                    and all(existing[field] == str(current[field])
+                            for existing, current in zip(existing_rows, timeline_rows)
+                            for field in base_fields))
+        if not verified:
+            unique_path = get_unique_name(timeline_csv_path)
+            print_color(
+                f"[WARN] Timeline verification failed for {timeline_csv_path}; creating {unique_path.name}", 'o')
+            timeline_csv_path = unique_path
+            existing_rows, fieldnames = [], []
+
+    if existing_rows:
+        index = 2
+        while pred_column in fieldnames:
+            pred_column = f"{pred_base}({index})"
+            index += 1
+        fieldnames.append(pred_column)
+        for existing, current in zip(existing_rows, timeline_rows):
+            existing[pred_column] = current['y_pred']
+        rows_out = existing_rows
+    else:
+        fieldnames = base_fields + [pred_column]
+        rows_out = [{**{field: row[field] for field in base_fields},
+                     pred_column: row['y_pred']} for row in timeline_rows]
 
     with timeline_csv_path.open('w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=csv_fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(timeline_rows)
-    report['timeline_csv'] = timeline_csv_path.name
-    return timeline_csv_path
+        writer.writerows(rows_out)
+    return timeline_csv_path, pred_column
 
 
 def analyze_stream_events(test_res:Path|str|dict, **kwargs):
@@ -453,16 +489,19 @@ def analyze_stream_events(test_res:Path|str|dict, **kwargs):
     if plotting_mode not in {None, 'save', 'disp'}:
         raise ValueError("plotting must be one of: None, 'save', 'disp'")
 
-    def _plot_stream_timeline(csv_path:str):
+    def _plot_stream_timeline(csv_path:str, pred_column:str):
         """ Optionally render the saved timeline CSV."""
         if plotting_mode is None:
             return None
         if plotting_mode == 'save':
-            png_path = resolve_unique_output_file(Path(csv_path).with_name(f"timeline_{mdl_tag}_{video_tag}.png"), overwrite=overwrite)
+            png_path = resolve_unique_output_file(
+                summary_path.with_name(f"timeline_{mdl_tag}_{video_tag}.png"), overwrite=overwrite)
             plot_timeline(csv_path, save_to=png_path, show=False, threshold=threshold,
+                          pred_column=pred_column,
                           print_policy=kwargs.get('print_policy', PRINT_POLICY))
             return png_path.name
         plot_timeline(csv_path, show=True, threshold=threshold,
+                      pred_column=pred_column,
                       print_policy=kwargs.get('print_policy', PRINT_POLICY))
         return None
 
@@ -496,13 +535,17 @@ def analyze_stream_events(test_res:Path|str|dict, **kwargs):
 
         for report in video_reports:
             video_name = report['video']
-            video_tag = str(video_name).replace('/', '_').replace('\\', '_').replace(' ', '_')
+            video_tag = stream_video_tag(video_name)
             report.pop('onset_delays', None)
             report.pop('offset_errs' , None)
-            timeline_csv_path = export_stream_timeline(report, summary_path, raw_res, overwrite=overwrite)
-            timeline_plot_name = _plot_stream_timeline(timeline_csv_path)
+            timeline_csv_path, pred_column = export_stream_timeline(
+                report, out_base.parent, raw_res, threshold)
+            timeline_csv_ref = str(Path('..')/timeline_csv_path.name)
+            timeline_plot_name = _plot_stream_timeline(timeline_csv_path, pred_column)
+            report['timeline_csv'] = timeline_csv_ref
+            report['timeline_prediction_column'] = pred_column
             report['timeline_plot'] = timeline_plot_name
-            timeline_csvs.append(timeline_csv_path.name)
+            timeline_csvs.append(timeline_csv_ref)
             if timeline_plot_name is not None:
                 timeline_plots.append(timeline_plot_name)
 
@@ -575,7 +618,8 @@ def analyze_stream_test(test_res:Path|str|dict, **kwargs):
     clip_kwargs['roc_mode_code'] = 'stm'
     if threshold_dir is not None:
         clip_kwargs['threshold_dir'] = threshold_dir
-    analyze_clip_predictions(test_res, **clip_kwargs)
+    if kwargs.get('save_clip_sum', False):
+        analyze_clip_predictions(test_res, **clip_kwargs)
 
     event_kwargs = dict(kwargs)
     event_kwargs['roc_mode_code'] = 'stm'
@@ -583,12 +627,15 @@ def analyze_stream_test(test_res:Path|str|dict, **kwargs):
         event_kwargs['threshold_dir'] = threshold_dir
     return analyze_stream_events(test_res, **event_kwargs)
 
+#630(3,1,)
 
 def run_regression_suite(phase='refactor', **kwargs):
     """ Run stream regression outputs from cache NPZ files."""
     from torch_clip_model import run_testing
 
-    model_path = Path(kwargs.get('model_path', DEFAULT_REG_MODEL))
+    if kwargs.get('model_path', None) is None:
+        raise ValueError("run_regression_suite requires model_path")
+    model_path = Path(kwargs['model_path'])
     out_root = Path(kwargs.get('out_root', "work_dirs/json_models/testing")) / phase / 'stream_analysis'
     show_roc = bool(kwargs.get('show_roc', False))
     save_roc_csv = bool(kwargs.get('roc_csv', True))
