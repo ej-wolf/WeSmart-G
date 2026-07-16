@@ -3,7 +3,12 @@
     - run one sanity flow with `run_sanity_flow(...)`
     - compare one new output tree against a reference with `assert_outputs(...)`
     - keep old/new export-format compatibility in this layer instead of the evaluation modules
+    ToDo: check file naming for training mode    e.g
+        timeline_J-RWL_ft25_w30-15_6_11_8_full_resolution_erez.png
+        timeline******************_6_11_8_full_resolution_erez.png
+        J-RWL_ft25_w30-15_BM111_cam-6-11-8_FRes_Ana_reports.json
 """
+
 
 import csv, json
 import random, re
@@ -13,49 +18,49 @@ import numpy as np
 import torch
 #* Project imports 
 from common.my_local_utils import as_collection, print_color
-from evaluation_tools import (analyze_clip_test, analyze_stream_test, analyze_video_test,
-                              DEFAULT_EVAL_THRESHOLD)
 from precompute_clips import RANDOM_SEED
-from project_utils import get_exporting_name, resolve_best_pt_model
-from scripts import sum_all_results
-from torch_clip_model import run_testing, run_training
+from project_utils import get_exporting_name, strip_split_suffix, strip_timestamp_prefix
+from scripts import train_models, test_models, infer_eval_threshold, evaluate_raw_test
+from torch_clip_model import run_training
 
-DEFAULT_NPZ_TOLERANCES = 1e-6
-DEFAULT_CSV_TOLERANCES = 1e-3
+LOOSE_TOLERANCES = 0.05
+STRICT_TOLERANCES = 0.03
 DEFAULT_METRIC_TOLERANCES = {
-            'accuracy'  : 0.01,
-            'precision' : 0.01,
-            'recall'    : 0.01,
-            'f1'        : 0.01,
-            'auc'       : 0.01,
-             #'balanced_accuracy': 0.01,
-            'TPR'       : 0.01,
-            'FPR'       : 0.01,
-            'event_precision': 0.02,
-            'event_recall': 0.02,
-            'event_f1'  : 0.02,
-            'false_positive_time': 0.05,
-            'miss_time': 0.05,
-            'threshold': 1e-8,
-            }
+            'loose' : dict.fromkeys(['max_abs_error', 'cm_delta', 'event_f1'], LOOSE_TOLERANCES),
+            'strict': dict.fromkeys(['max_abs_error', 'cm_delta', 'event_f1'], STRICT_TOLERANCES),
+             }
+DEFAULT_CSV_TOLERANCES = {'loose': LOOSE_TOLERANCES, 'strict': STRICT_TOLERANCES}
+DEFAULT_NPZ_TOLERANCES = {'loose': 1e-3, 'strict': 1e-4}
+
+_MODE_TOLERANCE_PROFILE = {'all': 'loose', 'train': 'loose', 'no_train': 'strict', 'eval_only': 'strict'}
 
 _RESULT_REPORT_NAME = 'sanity_report'
 _EVAL_PLAN_NAME = '_sanity_eval_plan.json'
-_EXPORTED_FILE_PATTERNS = ('*-summary.json',  '*_stream-events.json', '*.npz',
+_EXPORTED_FILE_PATTERNS = ('*-summary.json', '*_clip-sum.json', '*_reports.json', '*_events.json', '*.npz',
                            'ROC_*.png',  'ROC_*.csv',  '*_timeline.csv', 'timeline_*.csv', 'timeline_*.png',)
 
-_STATUS_RANK = {'pass': 0, 'pass_with_drift': 1, 'fail': 2}
 # TODO: consider moving these path-like JSON keys into a shared project-wide constant.
 _JSON_PATH_KEYS = {'cache_dir', 'events_info', 'model_path', 'new_run_dir', 'output_dir', 'raw_results',
                    'raw_results_path', 'ref_dir', 'ref_run_dir', 'report_path', 'roc_csv', 'test_cache', 'threshold_dir',
                    'timeline_csv', 'timeline_csvs', 'timeline_plot', 'timeline_plots',}
+_STREAM_VIDEO_SUFFIXES = {'.mp4', '.avi', '.mkv', '.mov', '.m4v'}
+
+#* this section used only for local printing, and has no effect on sanity testing
+SCI_FORMAT = {'low':1e-3, 'high':1e4}
+def _fmt_num(val) -> str:
+    """Format one numeric comparison value compactly for console output."""
+    if val == 0:
+        return "0.0"
+    abs_val = abs(val)
+    if  abs_val < SCI_FORMAT['low'] or SCI_FORMAT['high'] <= abs_val:
+        return f"{val:.1e}"
+    if type(val) is int:
+        return f"{val}"
+    if 1 <= abs_val:
+        return f"{val:.4g}"
+    return f'{val:.4f}'.rstrip('0').rstrip('.')
 
 #* region Config And Small Shared Helpers
-def _model_tag_from_run_dir(run_dir: Path) -> str:
-    """Return the logical model tag, stripping one timestamp prefix when present."""
-    return run_dir.name.split('_', 1)[1] if re.match(r'^\d{6}-\d{4}_.+', run_dir.name) else run_dir.name
-
-
 def _iter_run_dirs(base_dir: Path) -> list[Path]:
     """List usable run dirs that already contain models or saved test outputs."""
     run_dirs = []
@@ -63,46 +68,14 @@ def _iter_run_dirs(base_dir: Path) -> list[Path]:
         if not path.is_dir():
             continue
         has_model = any(path.glob('best_model.*.pt')) or (path/'model.pt').is_file()
-        has_outputs = any(path.rglob('*-summary.json')) or any(path.rglob('*-tst.npz'))
+        has_outputs = (any(path.rglob('*-summary.json')) or any(path.rglob('*_reports.json'))
+                       or any(path.rglob('*_clip-sum.json')) or any(path.rglob('*-tst.npz')))
         if has_model or has_outputs:
             run_dirs.append(path)
     return run_dirs
 
-
-def _resolve_npz_inputs(inputs, base_dir: Path) -> list[Path]:
-    """Resolve NPZ files, dirs, or masks into one ordered unique list."""
-    resolved = []
-    seen = set()
-    for item in as_collection(inputs or []):
-        item = Path(item)
-        if not item.is_absolute():
-            item = base_dir / item
-        item_str = str(item)
-        if any(ch in item_str for ch in '*?[]'):
-            import glob
-            matches = [Path(p) for p in glob.glob(item_str)]
-        elif item.is_dir():
-            matches = sorted(p for p in item.iterdir() if p.is_file() and p.suffix == '.npz')
-        elif item.is_file():
-            matches = [item]
-        else:
-            matches = []
-        for path in matches:
-            key = str(path.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            resolved.append(path)
-    return resolved
-
-
-#* Shared runtime flags
-def _threshold_dir(threshold:float) -> Path:
-    return Path(f'th-{int(round(threshold*100.0))}')
-
-
 def _set_deterministic(seed: int) -> None:
-    """Apply one best-effort deterministic seed setup for Python, NumPy, and torch."""
+    """ Apply one best-effort deterministic seed setup for Python, NumPy, and torch."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -117,39 +90,119 @@ def _set_deterministic(seed: int) -> None:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+def _resolve_tolerances(mode: str, override: dict[str, float] | None = None) -> dict[str, float]:
+    """Return one normalized tolerance dict for the requested mode."""
+    profile = _MODE_TOLERANCE_PROFILE.get(str(mode), 'strict')
+    tolerances = dict(DEFAULT_METRIC_TOLERANCES[profile])
+    tolerances['csv'] = float(DEFAULT_CSV_TOLERANCES[profile])
+    tolerances['npz'] = float(DEFAULT_NPZ_TOLERANCES[profile])
+    if override:
+        tolerances.update(override)
+    tolerances['profile'] = profile
+    return tolerances
 
-def _infer_eval_threshold(run_dir: Path) -> float:
-    """Reuse the saved threshold from prior summaries, else fall back to the default."""
-    for summary_path in sorted(run_dir.rglob('*-summary.json')):
-        try:
-            with summary_path.open('r', encoding='utf-8') as f:
-                summary = json.load(f)
-            return float(summary.get('analysis_config', {}).get('threshold', DEFAULT_EVAL_THRESHOLD))
-        except Exception:
-            continue
-    return DEFAULT_EVAL_THRESHOLD
+
+def _iter_stream_json_files(dir_path: Path) -> dict[str, Path]:
+    """Map plain JSON filenames to paths for one directory."""
+    return {path.name: path for path in sorted(dir_path.iterdir())
+            if path.is_file() and path.suffix.lower() == '.json'}
+
+
+def _iter_stream_input_json_names(data_path: Path) -> list[str]:
+    """Resolve expected output JSON names from one video file or folder."""
+    if data_path.is_file():
+        if data_path.suffix.lower() not in _STREAM_VIDEO_SUFFIXES:
+            raise ValueError(f'Unsupported video input: {data_path}')
+        return [f'{data_path.stem}.json']
+    if not data_path.is_dir():
+        raise FileNotFoundError(data_path)
+    return [f'{path.stem}.json' for path in sorted(data_path.iterdir())
+            if path.is_file() and path.suffix.lower() in _STREAM_VIDEO_SUFFIXES]
+
+
+def _stream_json_cmp_score(row: dict[str, Any]) -> float:
+    """Rank failures by structural and annotation drift before numeric noise."""
+    return (
+        int(row['metadata']) * 1_000_000_000
+        + int(row['ann_intervals']) * 100_000_000
+        + int(row['ann_frames']) * 1_000_000
+        + int(row['frame_count']) * 500_000
+        + int(row['missing_extra']) * 50_000
+        + int(row['timestamps']) * 5_000
+        + int(row['det_counts']) * 500
+        + float(row['avg_abs']) * 10.0
+        + float(row['max_abs'])
+    )
+
+
+def _build_stream_json_cmp_row(file_name: str, ok: bool, cmp_report: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one nested compare report into one compact row."""
+    metadata = cmp_report.get('metadata', {})
+    frame_structure = cmp_report.get('frame_structure', {})
+    numeric = cmp_report.get('numeric', {})
+    annotations = cmp_report.get('annotations', {})
+
+    row = {'file': file_name,
+           'status': 'pass' if ok else 'fail',
+           'ok': bool(ok),
+           'metadata': len(metadata.get('unequal', {})),
+           'frame_count': int(frame_structure.get('frame_count') is not None),
+           'missing_extra': len(frame_structure.get('missing_frame_indices', [])) + len(frame_structure.get('extra_frame_indices', [])),
+           'timestamps': len(frame_structure.get('timestamp_mismatches', [])),
+           'det_counts': len(frame_structure.get('detection_count_mismatches', [])),
+           'ann_intervals': 0 if annotations.get('event_intervals_equal', True) else 1,
+           'ann_frames': len(annotations.get('frame_annotation_mismatches', [])),
+           'avg_abs': float(numeric.get('avg_abs', 0.0)),
+           'max_abs': float(numeric.get('max_abs', 0.0)),
+           'report': cmp_report,
+           }
+    row['score'] = _stream_json_cmp_score(row)
+    return row
+
+
+def _print_stream_json_verbose(file_report: dict[str, Any]) -> None:
+    """Print one concise expanded comparison block for a single file."""
+    report = file_report.get('report', {})
+    metadata = report.get('metadata', {})
+    frame_structure = report.get('frame_structure', {})
+    annotations = report.get('annotations', {})
+    numeric = report.get('numeric', {})
+    color = 'g' if file_report.get('ok', False) else 'r'
+
+    print_color(f"\n{file_report['file']} [{file_report['status']}]", color)
+    if metadata.get('unequal'):
+        print(f"  metadata keys: {', '.join(sorted(metadata['unequal']))}")
+    if frame_structure.get('frame_count'):
+        delta = frame_structure['frame_count']
+        print(f"  frame count: j1={delta.get('j1')} j2={delta.get('j2')}")
+    if frame_structure.get('missing_frame_indices'):
+        print(f"  missing frames: {len(frame_structure['missing_frame_indices'])} "
+              f"(first: {frame_structure['missing_frame_indices'][:5]})")
+    if frame_structure.get('extra_frame_indices'):
+        print(f"  extra frames: {len(frame_structure['extra_frame_indices'])} "
+              f"(first: {frame_structure['extra_frame_indices'][:5]})")
+    if frame_structure.get('timestamp_mismatches'):
+        print(f"  timestamp mismatches: {len(frame_structure['timestamp_mismatches'])} "
+              f"(first: {frame_structure['timestamp_mismatches'][:3]})")
+    if frame_structure.get('detection_count_mismatches'):
+        print(f"  detection-count mismatches: {len(frame_structure['detection_count_mismatches'])} "
+              f"(first: {frame_structure['detection_count_mismatches'][:3]})")
+    if not annotations.get('event_intervals_equal', True):
+        print("  event intervals: mismatch")
+    if annotations.get('frame_annotation_mismatches'):
+        print(f"  frame annotation mismatches: {len(annotations['frame_annotation_mismatches'])} "
+              f"(first: {annotations['frame_annotation_mismatches'][:3]})")
+    print(f"  numeric: avg_abs={_fmt_num(float(numeric.get('avg_abs', 0.0)))} "
+          f"max_abs={_fmt_num(float(numeric.get('max_abs', 0.0)))} "
+          f"path={numeric.get('max_path')}")
 
 # endregion
 
 #* region Run Execution Helpers
-def _run_dataset_test(model_path: Path, test_npz: Path, out_dir: Path, *, run_video: bool, **kwargs) -> str:
-    """Run one dataset test and save the raw `*-tst.npz` output."""
-    raw_tag = get_exporting_name(model_path, test_npz, 'raw', unit='clip')
-    res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag)
-    return str(res['path'])
-
-
-def _run_stream_test(model_path: Path, test_npz: Path, out_dir: Path, **kwargs) -> str:
-    """Run one stream test and save the raw `*-tst.npz` output."""
-    raw_tag = get_exporting_name(model_path, test_npz, 'raw', unit='stream')
-    res = run_testing(model_path, test_npz, out_dir=out_dir, output_tag=raw_tag, video_mode=True)
-    return str(res['path'])
-
-
 def train_sanity_models(cache_dir, out_dir, *, ds_testing=None, stm_testing=None, **kwargs):
     """ Train every `*_train.npz` cache in one directory and return the created run dirs."""
-    cache_dir = Path(cache_dir)
-    out_dir = Path(out_dir)
+    kwargs = dict(kwargs)
+    cache_dir, out_dir = Path(cache_dir),  Path(out_dir)
     if not cache_dir.is_dir():
         raise NotADirectoryError(cache_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -158,24 +211,22 @@ def train_sanity_models(cache_dir, out_dir, *, ds_testing=None, stm_testing=None
     if not train_caches:
         raise FileNotFoundError(f'No *_train.npz caches found in {cache_dir}')
 
-    deterministic = kwargs.get('deterministic', False)
-    base_seed = kwargs.get('random_seed', RANDOM_SEED)
-    train_kw = {k: kwargs[k] for k in ('lr', 'batch_size', 'hidden_dim', 'save_every',
-                                       'max_epochs', 'epochs', 'patience', 'min_delta',
-                                       'split_ratio', 'split_seed')
-                                        if k in kwargs and kwargs[k] is not None}
+    deterministic = kwargs.pop('deterministic', False)
+    if not deterministic:
+        return train_models(cache_dir, out_dir, run_tests=False, **kwargs)
+
+    base_seed = kwargs.pop('random_seed', RANDOM_SEED)
     run_dirs = []
     for index, train_cache in enumerate(train_caches):
-        if deterministic:
-            _set_deterministic(base_seed + index)
-        train_tag = train_cache.stem[:-len('_train')] if train_cache.stem.endswith('_train') else train_cache.stem
-        run_dir = Path(run_training(train_cache, tag=train_tag, work_dir=out_dir, **train_kw))
+        _set_deterministic(base_seed + index)
+        train_tag = strip_split_suffix(train_cache.stem)
+        run_dir = Path(run_training(train_cache, tag=train_tag, work_dir=out_dir, **kwargs))
         run_dirs.append(run_dir)
     return run_dirs
 
 
 def run_sanity_tests(models_or_ref_dir, *, cache_dir, out_dir, ds_testing=None, stm_testing=None, **kwargs):
-    """ Run tests for existing models or reference run dirs and save one eval plan."""
+    """ Run raw tests for existing models or reference run dirs."""
 
     cache_dir,out_dir = Path(cache_dir), Path(out_dir)
 
@@ -183,77 +234,32 @@ def run_sanity_tests(models_or_ref_dir, *, cache_dir, out_dir, ds_testing=None, 
         raise NotADirectoryError(cache_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if isinstance(models_or_ref_dir, (str, Path)) and Path(models_or_ref_dir).is_dir():
-        model_refs = _iter_run_dirs(Path(models_or_ref_dir))
-    else:
-        model_refs = list(as_collection(models_or_ref_dir))
-    if not model_refs:
+    tested_dirs = test_models(models_or_ref_dir, ds_tests=ds_testing, stm_tests=stm_testing,
+                              npz_dir=cache_dir, out_dir=out_dir, evaluate=False,
+                              infer_threshold=True, **kwargs)
+    if not tested_dirs:
         raise FileNotFoundError('No model refs were provided for sanity testing')
-
-    ds_targets = _resolve_npz_inputs(ds_testing, cache_dir)
-    stm_targets = _resolve_npz_inputs(stm_testing, cache_dir)
-    run_video = bool(kwargs.get('run_video', False))
-    eval_plan = {}
-    raw_results = []
-    tested_dirs = []
-
-    for mdl in model_refs:
-        best_model = resolve_best_pt_model(mdl)
-        mdl = Path(mdl)
-        src_run_dir = mdl if mdl.is_dir() else best_model.parent
-        target_run_dir = src_run_dir if src_run_dir.parent.resolve() == out_dir.resolve() else out_dir / src_run_dir.name
-        target_run_dir.mkdir(parents=True, exist_ok=True)
-        model_tag = _model_tag_from_run_dir(src_run_dir)
-        own_test = cache_dir/f'{model_tag}_test.npz'
-        threshold = float(kwargs.get('threshold', _infer_eval_threshold(src_run_dir)))
-
-        dataset_tests = []
-        seen = set()
-        # Prefer the model's paired own-test cache, then add shared dataset tests once.
-        if own_test.is_file():
-            dataset_tests.append((own_test, False))
-            seen.add(str(own_test.resolve()))
-        for path in ds_targets:
-            key = str(path.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            dataset_tests.append((path, run_video))
-
-        for test_npz, use_video in dataset_tests:
-            raw_path = _run_dataset_test(best_model, test_npz, target_run_dir,
-                                         run_video=bool(use_video), **kwargs)
-            raw_results.append(Path(raw_path))
-            rel_path = Path(raw_path).relative_to(out_dir).as_posix()
-            eval_plan[rel_path] = {'mode': ('video' if use_video else 'clip'), 'threshold': threshold}
-
-        if kwargs.get('run_stream', True):
-            for test_npz in stm_targets:
-                raw_path = _run_stream_test(best_model, test_npz, target_run_dir, **kwargs)
-                raw_results.append(Path(raw_path))
-                rel_path = Path(raw_path).relative_to(out_dir).as_posix()
-                eval_plan[rel_path] = {'mode': 'stream', 'threshold': threshold}
-        tested_dirs.append(target_run_dir)
-
-    plan_path = out_dir / _EVAL_PLAN_NAME
-    with plan_path.open('w', encoding='utf-8') as f:
-        json.dump(eval_plan, f, indent=2)
-    # return {'run_dirs': tested_dirs, 'raw_results': raw_results}
-    return tested_dirs, raw_results
+    return tested_dirs, []
 
 
 def run_sanity_eval(source_dir, *, out_dir, raw_results=None, ds_testing=None, stm_testing=None, **kwargs):
-    """Re-run only the evaluation phase from saved raw `*-tst.npz` outputs."""
+    """ Re-run only the evaluation phase from saved raw `*-tst.npz` outputs."""
 
     def _summary_exists(run_dir: Path, infer_mode: str)-> bool:
         if model_path is None or test_cache is None:
             return False
         summary_name = f"{get_exporting_name(model_path, test_cache, 'summary', unit=infer_mode)}.json"
-        return any(path.name == summary_name for path in run_dir.rglob('*.json'))
+        return any(p.name == summary_name for p in run_dir.rglob('*.json'))
 
-    def _infer_eval_mode(run_dir: Path) -> str:
+    def _infer_eval_mode(raw_path:Path) -> str:
         # Old raw NPZ files do not store the eval mode explicitly, so reuse the mode
         # implied by whichever summary file already exists in the source run dir.
+        stem = raw_path.stem
+        if stem.endswith('_stream-tst'):
+            return 'stream'
+        if stem.endswith('_video-tst'):
+            return 'video'
+        run_dir = raw_path.parent
         if _summary_exists(run_dir, 'stream'):
             return 'stream'
         if _summary_exists(run_dir, 'video'):
@@ -290,7 +296,7 @@ def run_sanity_eval(source_dir, *, out_dir, raw_results=None, ds_testing=None, s
         target_run_dir = out_dir/rel_parent
         target_run_dir.mkdir(parents=True, exist_ok=True)
         if path.parent != prev_run_dir:
-            model_tag = _model_tag_from_run_dir(path.parent)
+            model_tag = strip_timestamp_prefix(path.parent.name)
             print(f'\n\b=== {model_tag} model Evaluation ===\n= evaluated dir : {target_run_dir}')
             prev_run_dir = path.parent
         # The raw test NPZ already carries the model/cache refs needed to rebuild names.
@@ -298,28 +304,9 @@ def run_sanity_eval(source_dir, *, out_dir, raw_results=None, ds_testing=None, s
             model_path = data['model_path'].item() if isinstance(data['model_path'], np.ndarray) else data['model_path']
             test_cache = data['test_cache'].item() if isinstance(data['test_cache'], np.ndarray) else data['test_cache']
         plan_item = eval_plan.get(rel_raw, {})
-        mode = plan_item.get('mode') or _infer_eval_mode(path.parent)
-        threshold = kwargs.get('threshold', plan_item.get('threshold', _infer_eval_threshold(path.parent)))
-        output_name = get_exporting_name(model_path, test_cache, 'summary', unit=mode)
-        common = {'out_path': target_run_dir,
-                  'threshold': threshold,
-                  'threshold_dir': _threshold_dir(threshold),
-                  'overwrite': True,
-                  'show_roc': kwargs.get('show_roc', False),
-                  'roc_csv': kwargs.get('roc_csv', True),
-                  'print_policy': kwargs.get('print_policy', 'summary'),
-                  'print':  kwargs.get('print_report', False),
-                  }
-        if mode == 'stream':
-             analyze_stream_test(path, output_name=output_name,
-                                details_name=f"{get_exporting_name(model_path, test_cache, 'events')}.json",
-                                events_json=kwargs.get('events_json', True), plotting=kwargs.get('plotting', 'save'), **common,)
-        elif mode == 'video':
-            analyze_video_test(path, output_name=output_name, **common)
-        elif mode == 'clip':
-            analyze_clip_test(path, output_name=output_name, **common)
-        else:
-            raise ValueError(f'Unrecognized mode: {mode}')
+        mode = plan_item.get('mode') or _infer_eval_mode(path)
+        threshold = kwargs.get('threshold', plan_item.get('threshold', infer_eval_threshold(path.parent)))
+        evaluate_raw_test(path, mode, target_run_dir, threshold, **kwargs)
         evaluated.append(target_run_dir)
     return sorted(set(evaluated))
 
@@ -364,9 +351,67 @@ def _compare_csv_with_tolerance(test_path: Path, ref_path: Path, *, atol: float)
     return {'ok': True, 'kind': 'csv', 'max_fp_err': worst, 'message': None, 'issue_count': 0}
 
 
+def _compare_timeline_csv(test_path: Path, ref_path: Path, *, atol: float) -> dict[str, Any]:
+    """Compare one timeline CSV by label flips and probability drift."""
+    with test_path.open('r', encoding='utf-8', newline='') as f:
+        sample = f.readline()
+        f.seek(0)
+        delim = ';' if sample.count(';') > sample.count(',') else ','
+        test_rows = list(csv.DictReader(f, delimiter=delim))
+    with ref_path.open('r', encoding='utf-8', newline='') as f:
+        sample = f.readline()
+        f.seek(0)
+        delim = ';' if sample.count(';') > sample.count(',') else ','
+        ref_rows = list(csv.DictReader(f, delimiter=delim))
+
+    if len(test_rows) != len(ref_rows):
+        return {'ok': False, 'kind': 'csv', 'max_fp_err': 0.0,
+                'message': f'row count mismatch: {len(test_rows)} != {len(ref_rows)}',
+                'issue_type': 'shape', 'issue_count': 1}
+
+    req_cols = {'win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob'}
+    test_cols = set(test_rows[0]) if test_rows else set()
+    ref_cols = set(ref_rows[0]) if ref_rows else set()
+    pred_cols = sorted(col for col in test_cols if col == 'y_pred' or col.startswith('y_prd-'))
+    if test_rows and (test_cols != ref_cols or not req_cols.issubset(test_cols) or not pred_cols):
+        return {'ok': False, 'kind': 'csv', 'max_fp_err': 0.0,
+                'message': 'timeline columns mismatch', 'issue_type': 'shape', 'issue_count': 1}
+
+    flip_count, max_prob_delta = 0, 0.0
+    for row_idx, (test_row, ref_row) in enumerate(zip(test_rows, ref_rows)):
+        for key in ('win_idx', 'n_frm', 'gt_label'):
+            if test_row[key] != ref_row[key]:
+                return {'ok': False, 'kind': 'csv', 'max_fp_err': max_prob_delta,
+                        'message': f'{key} mismatch at row {row_idx}', 'issue_type': 'shape', 'issue_count': 1}
+        for key in ('t_frm', 't_start'):
+            if abs(float(test_row[key]) - float(ref_row[key])) > 1e-9:
+                return {'ok': False, 'kind': 'csv', 'max_fp_err': max_prob_delta,
+                        'message': f'{key} mismatch at row {row_idx}', 'issue_type': 'shape', 'issue_count': 1}
+
+        prob_delta = abs(float(test_row['y_prob']) - float(ref_row['y_prob']))
+        max_prob_delta = max(max_prob_delta, prob_delta)
+        for pred_col in pred_cols:
+            if int(test_row[pred_col]) != int(ref_row[pred_col]):
+                flip_count += 1
+
+    flip_rate = (flip_count/(len(test_rows)*len(pred_cols))) if test_rows and pred_cols else 0.0
+    ok = (flip_count == 0 and max_prob_delta <= float(atol))
+    return {'ok': ok,
+            'kind': 'csv',
+            'csv_style': 'timeline',
+            'max_fp_err': max_prob_delta,
+            'message': (None if ok else 'timeline drift'),
+            'issue_count': int(flip_count > 0 or max_prob_delta > float(atol)),
+            'flip_count': flip_count,
+            'flip_rate': flip_rate,
+            'rows': len(test_rows),
+            'max_prob_delta': max_prob_delta}
+
+
 def _compare_json_semantics(test_path: Path, ref_path: Path, *, tolerances: dict[str, float]) -> dict[str, Any]:
     """ Compare one JSON semantically, ignoring path-only differences."""
     summary = {'numeric_count': 0, 'other_count': 0}
+    numeric_issues, other_issues = [], []
 
     def _canonicalize_json_value(value: Any) -> Any:
         if isinstance(value, dict):
@@ -416,6 +461,7 @@ def _compare_json_semantics(test_path: Path, ref_path: Path, *, tolerances: dict
             if test_value != ref_value:
                 issues_ls.append(f'{path}: {test_value!r} != {ref_value!r}')
                 summary['other_count'] += 1
+                other_issues.append(path)
             return fp_err_max, issues_ls
 
         if isinstance(test_value, (float, int)) and isinstance(ref_value, (float, int)):
@@ -425,11 +471,13 @@ def _compare_json_semantics(test_path: Path, ref_path: Path, *, tolerances: dict
             if delta > tol:
                 issues_ls.append(f'{path}: numeric drift {delta:.9g} exceeds tolerance {tol:.9g}')
                 summary['numeric_count'] += 1
+                numeric_issues.append({'path': path, 'delta': delta, 'tol': tol})
             return fp_err_max, issues_ls
 
         if test_value != ref_value:
             issues_ls.append(f'{path}: {test_value!r} != {ref_value!r}')
             summary['other_count'] += 1
+            other_issues.append(path)
         return fp_err_max, issues_ls
 
     with test_path.open('r', encoding='utf-8') as f:
@@ -441,7 +489,150 @@ def _compare_json_semantics(test_path: Path, ref_path: Path, *, tolerances: dict
             'message': '; '.join(issues[:3]) if issues else None,
             'issue_count': len(issues),
             'numeric_count': summary['numeric_count'],
-            'other_count': summary['other_count']}
+            'other_count': summary['other_count'],
+            'numeric_issues': numeric_issues,
+            'other_issues': other_issues,
+            'test_json': test_json,
+            'ref_json': ref_json}
+
+
+def _summary_sample_total(summary_json: dict[str, Any]) -> int:
+    """Resolve one total sample count for summary percentage display."""
+    testing_set = summary_json.get('testing_set', {})
+    for key in ('clips_num', 'videos_num'):
+        if key in testing_set:
+            return int(testing_set[key])
+    cm = summary_json.get('confusion_matrix', None)
+    if isinstance(cm, list) and len(cm) == 2:
+        return int(sum(sum(int(cell) for cell in row) for row in cm))
+    cm = summary_json.get('cm_clips', None)
+    if isinstance(cm, list) and len(cm) == 2:
+        return int(sum(sum(int(cell) for cell in row) for row in cm))
+    if isinstance(cm, dict):
+        return int(sum(int(value) for value in cm.values()))
+    return 0
+
+
+def _summary_cm_cells(summary_json: dict[str, Any]) -> list[int]:
+    """ Extract one flattened confusion-matrix cell list from a summary JSON."""
+    cm = summary_json.get('confusion_matrix', None)
+    if isinstance(cm, list) and len(cm) == 2 and all(isinstance(row, list) and len(row) == 2 for row in cm):
+        return [int(cm[0][0]), int(cm[0][1]), int(cm[1][0]), int(cm[1][1])]
+    cm = summary_json.get('cm_clips', None)
+    if isinstance(cm, list) and len(cm) == 2 and all(isinstance(row, list) and len(row) == 2 for row in cm):
+        return [int(cm[0][0]), int(cm[0][1]), int(cm[1][0]), int(cm[1][1])]
+    if isinstance(cm, dict):
+        return [int(cm.get('tn', 0)), int(cm.get('fp', 0)), int(cm.get('fn', 0)), int(cm.get('tp', 0))]
+    return []
+
+
+def _compare_summary_json(test_path: Path, ref_path: Path, *, tolerances: dict[str, float], mode='train') -> dict[str, Any]:
+    """Compare one summary JSON and keep only summary-level drift metrics."""
+    result = _compare_json_semantics(test_path, ref_path, tolerances=tolerances)
+    test_json = result.pop('test_json')
+    ref_json = result.pop('ref_json')
+
+    metric_alias = {'ROC AUC': 'auc'}
+    summary_metrics = {'accuracy', 'precision', 'recall', 'f1', 'auc', 'TPR', 'FPR'}
+    metric_issues = []
+    for issue in result.get('numeric_issues', []):
+        path = issue['path']
+        if path.startswith('confusion_matrix') or path.startswith('cm_clips'):
+            continue
+        metric_key = metric_alias.get(path, path.rsplit('.', 1)[-1])
+        if metric_key in summary_metrics:
+            metric_issues.append({'metric': metric_key, 'delta': float(issue['delta'])})
+
+    sample_total  = _summary_sample_total(ref_json)
+    ref_cm_cells  = _summary_cm_cells(ref_json)
+    test_cm_cells = _summary_cm_cells(test_json)
+    cm_sum_delta = 0
+    if ref_cm_cells and test_cm_cells and len(ref_cm_cells) == len(test_cm_cells):
+        cm_sum_delta = sum(abs(int(test_v) - int(ref_v)) for test_v, ref_v in zip(test_cm_cells, ref_cm_cells))
+    cm_delta = (cm_sum_delta / sample_total) if sample_total else 0.0
+    max_abs_error = max((float(item['delta']) for item in metric_issues), default=0.0)
+    summary_style = 'stream_summary' if str(test_json.get('analysis_mode', '')).lower() == 'stream' else 'summary'
+    metric_tol = float(tolerances.get('max_abs_error', 0.0))
+    cm_tol = float(tolerances.get('cm_delta', 0.0))
+    other_count = int(result.get('other_count', 0))
+    metric_issue = int(max_abs_error > metric_tol)
+    cm_issue = int(cm_delta > cm_tol)
+    issue_count = metric_issue + other_count + cm_issue
+    ok = (issue_count == 0)
+
+    result.update({'ok': ok, 'message': (None if ok else result.get('message')),
+                   'issue_count': issue_count,
+                   'numeric_count': metric_issue + cm_issue,
+                   'json_style': summary_style,
+                   'max_abs_error': max_abs_error,
+                   'metric_tol': metric_tol,
+                   'cm_sum_delta': cm_sum_delta,
+                   'sample_total': sample_total,
+                   'cm_delta': cm_delta, 'cm_tol': cm_tol,})
+    return result
+
+
+def _compare_stream_events_json(test_path: Path, ref_path: Path, *, tolerances: dict[str, float]) -> dict[str, Any]:
+    """Compare one stream events JSON using one compact event-flip summary."""
+    result = _compare_json_semantics(test_path, ref_path, tolerances=tolerances)
+    test_json = result.pop('test_json')
+    ref_json = result.pop('ref_json')
+    test_videos = test_json.get('videos', [])
+    ref_videos = ref_json.get('videos', [])
+
+    def _event_totals(videos: list[dict[str, Any]]) -> dict[str, int]:
+        return {'pred': sum(int(video.get('pred_events_num', 0)) for video in videos),
+                'matched': sum(int(video.get('detected_events_num', 0)) for video in videos),
+                'missed': sum(int(video.get('missed_events_num', 0)) for video in videos),
+                'false': sum(int(video.get('false_events_num', 0)) for video in videos),
+                'gt': sum(int(video.get('gt_events_num', 0)) for video in videos),}
+
+    def _event_f1(totals: dict[str, int]) -> float:
+        matched = float(totals['matched'])
+        denom = (2.0*matched) + float(totals['false']) + float(totals['missed'])
+        return  (2.0*matched/denom) if denom > 0 else 0.0
+
+    changed = 0
+    ref_by_video = {video.get('video'): video for video in ref_videos}
+    test_by_video = {video.get('video'): video for video in test_videos}
+    for video_name in sorted(set(ref_by_video) | set(test_by_video)):
+        if test_by_video.get(video_name, {}) != ref_by_video.get(video_name, {}):
+            changed += 1
+
+    ref_totals = _event_totals(ref_videos)
+    test_totals = _event_totals(test_videos)
+    delta_cm = [abs(test_totals['matched'] - ref_totals['matched']),
+                abs(test_totals['missed'] - ref_totals['missed']),
+                abs(test_totals['false'] - ref_totals['false']),
+                abs(test_totals['matched'] - ref_totals['matched'])]
+    ref_cm = [ref_totals['matched'], ref_totals['missed'], ref_totals['false'], ref_totals['matched']]
+    event_flips = int(sum(delta_cm))
+    event_total = int(sum(ref_cm))
+    f1_delta = _event_f1(test_totals) - _event_f1(ref_totals)
+    other_count = int(result.get('other_count', 0))
+    f1_tol = float(tolerances.get('event_f1', 0.0))
+    f1_issue = int(abs(f1_delta) > f1_tol)
+    gt_changed = (test_totals['gt'] != ref_totals['gt'])
+    issue_count = int(event_flips > 0) + int(gt_changed) + other_count + f1_issue
+    result.update({'json_style': 'stream_events',
+                   'ok': (issue_count == 0),
+                   'issue_count': issue_count,
+                   'numeric_count': f1_issue,
+                   'message': (None if issue_count == 0 else result.get('message') or 'stream event drift'),
+                   'videos_changed': changed,
+                   'videos_total': len(ref_videos),
+                   'event_flips': event_flips,
+                   'event_total': event_total,
+                   'delta_cm': delta_cm,
+                   'ref_cm': ref_cm,
+                   'f1_delta': f1_delta,
+                   'gt_changed': gt_changed,
+                   'event_f1_tol': f1_tol,
+                   'pred_event_delta': abs(test_totals['pred'] - ref_totals['pred']),
+                   'matched_delta': abs(test_totals['matched'] - ref_totals['matched']),
+                   'missed_delta': abs(test_totals['missed'] - ref_totals['missed']),
+                   'false_delta': abs(test_totals['false'] - ref_totals['false']),})
+    return result
 
 
 def _cmp_png_pix(test_path: Path, ref_path: Path) -> dict[str, Any]:
@@ -496,16 +687,24 @@ def _compare_npz_semantics(test_path: Path, ref_path: Path, *, y_prob_atol: floa
     return {'ok': True, 'kind': 'npz', 'max_fp_err': max_fp_err, 'message': None}
 
 
-def _cmp_op_file(test_path:Path, ref_path:Path, *, mode: str,
+def _cmp_op_file(test_path:Path, ref_path:Path, *, mode: str, file_key='',
                  csv_atol: float, npz_y_prob_atol: float, json_tolerances: dict[str,float])-> dict[str, Any]:
     """Dispatch one semantic file comparison by suffix."""
     test_path, ref_path = Path(test_path), Path(ref_path)
-    suffix = test_path.suffix.lower()[1:]
+    key_path = Path(file_key) if file_key else test_path
+    suffix = key_path.suffix.lower()[1:]
     if suffix == 'json':
+        if key_path.name.endswith('_events.json'):
+            return _compare_stream_events_json(test_path, ref_path, tolerances=json_tolerances)
+        if (key_path.name.endswith('-summary.json') or key_path.name.endswith('_clip-sum.json')
+                or key_path.name.endswith('_reports.json')):
+            return _compare_summary_json(test_path, ref_path, tolerances=json_tolerances, mode=mode)
         return _compare_json_semantics(test_path, ref_path, tolerances=json_tolerances)
     elif suffix == 'png':
         return _cmp_png_pix(test_path, ref_path)
     elif suffix == 'csv':
+        if key_path.stem.startswith('timeline_'):
+            return _compare_timeline_csv(test_path, ref_path, atol=csv_atol)
         return _compare_csv_with_tolerance(test_path, ref_path, atol=csv_atol)
     elif suffix == 'npz':
         if mode == 'no_train':
@@ -515,7 +714,7 @@ def _cmp_op_file(test_path:Path, ref_path:Path, *, mode: str,
 
 
 def _compare_run_outputs(test_run_dir: Path, ref_run_dir: Path, *, mode: str, csv_atol: float,
-                         y_prob_atol:float, json_tolerances:dict[str, float])-> dict[str, Any]:
+                         y_prob_atol: float, json_tolerances: dict[str, float]) -> dict[str, Any]:
     """Compare all saved outputs for one run dir against its reference run."""
 
     def _normalize_output_name(rel_path,  run_tag: str) -> str:
@@ -541,7 +740,7 @@ def _compare_run_outputs(test_run_dir: Path, ref_run_dir: Path, *, mode: str, cs
         return rel_path
 
     def _collect_run_outputs(run_dir: Path) -> dict[str, Any]:
-        run_tag = _model_tag_from_run_dir(run_dir)
+        run_tag = strip_timestamp_prefix(run_dir.name)
         files = {}
         for pattern in _EXPORTED_FILE_PATTERNS:
             for path in run_dir.rglob(pattern):
@@ -565,7 +764,7 @@ def _compare_run_outputs(test_run_dir: Path, ref_run_dir: Path, *, mode: str, cs
     semantic_issues = []
     max_fp_err = 0.0
     for f in common_files:
-        result = _cmp_op_file(Path(test_files[f]), Path(ref_files[f]), mode=mode, csv_atol=csv_atol,
+        result = _cmp_op_file(Path(test_files[f]), Path(ref_files[f]), mode=mode, file_key=f, csv_atol=csv_atol,
                               npz_y_prob_atol=y_prob_atol, json_tolerances=json_tolerances, )
 
         max_fp_err = max(max_fp_err, float(result.get('max_fp_err', 0.0)))
@@ -573,15 +772,25 @@ def _compare_run_outputs(test_run_dir: Path, ref_run_dir: Path, *, mode: str, cs
         if not result.get('ok', True):
             if kind in mismatch_counts:
                 mismatch_counts[kind] += 1
-            semantic_issues.append({'file': f,
-                                    'kind': kind,
-                                    'message': result.get('message'),
-                                    'max_fp_err': float(result.get('max_fp_err', 0.0)),
-                                    'issue_count': int(result.get('issue_count', 1)),
-                                    'numeric_count': int(result.get('numeric_count', 0)),
-                                    'other_count': int(result.get('other_count', 0)),
-                                    'issue_type': result.get('issue_type', None),
-                                    'issue_key': result.get('issue_key', None),})
+            issue = {'file': f,
+                     'kind': kind,
+                     'message': result.get('message'),
+                     'max_fp_err': float(result.get('max_fp_err', 0.0)),
+                     'issue_count': int(result.get('issue_count', 1)),
+                     'numeric_count': int(result.get('numeric_count', 0)),
+                     'other_count': int(result.get('other_count', 0)),
+                     'issue_type': result.get('issue_type', None),
+                     'issue_key': result.get('issue_key', None),}
+            for key in ('csv_style', 'flip_count', 'flip_rate', 'rows', 'max_prob_delta',
+                        'json_style', 'max_abs_error', 'metric_tol',
+                        'cm_sum_delta', 'sample_total', 'cm_delta', 'cm_tol',
+                        'videos_changed', 'videos_total', 'pred_event_delta', 'pred_event_total',
+                        'matched_delta', 'matched_total', 'missed_delta', 'missed_total',
+                        'false_delta', 'false_total', 'gt_changed', 'event_flips', 'event_total',
+                        'delta_cm', 'ref_cm', 'f1_delta'):
+                if key in result:
+                    issue[key] = result[key]
+            semantic_issues.append(issue)
 
     return {'status': ('fail' if (missing or extra or semantic_issues) else 'pass'),
             'new_run_dir': str(test_run_dir),
@@ -594,15 +803,13 @@ def _compare_run_outputs(test_run_dir: Path, ref_run_dir: Path, *, mode: str, cs
 
 
 #* Semantic report formatting
-def _build_comparison_report(test_dir, ref_dir, *, mode: str, tolerance_update=None) -> dict[str, Any]:
-    """Build one per-run semantic comparison report for two output trees."""
-    test_dir = Path(test_dir)
-    ref_dir = Path(ref_dir)
-    tolerances = dict(DEFAULT_METRIC_TOLERANCES)
-    tolerances.update(tolerance_update or {})
+def _build_comparison_report(test_dir, ref_dir, *, mode: str) -> dict[str, Any]:
+    """ Build one per-run semantic comparison report for two output trees."""
+    test_dir, ref_dir = Path(test_dir), Path(ref_dir)
+    tolerances = _resolve_tolerances(mode)
 
-    test_runs = {_model_tag_from_run_dir(path): path for path in _iter_run_dirs(test_dir)}
-    ref_runs = {_model_tag_from_run_dir(path): path for path in _iter_run_dirs(ref_dir)}
+    test_runs = {strip_timestamp_prefix(path.name): path for path in _iter_run_dirs(test_dir)}
+    ref_runs = {strip_timestamp_prefix(path.name): path for path in _iter_run_dirs(ref_dir)}
     missing_runs = sorted(set(ref_runs) - set(test_runs))
     extra_runs = sorted(set(test_runs) - set(ref_runs))
     status = 'fail' if (missing_runs or extra_runs) else 'pass'
@@ -610,11 +817,10 @@ def _build_comparison_report(test_dir, ref_dir, *, mode: str, tolerance_update=N
     run_reports = []
     for run_key in sorted(set(test_runs) & set(ref_runs)):
         run_report = _compare_run_outputs(test_runs[run_key], ref_runs[run_key], mode=mode,
-                                          csv_atol=float(DEFAULT_CSV_TOLERANCES),
-                                          y_prob_atol=float(DEFAULT_NPZ_TOLERANCES),
+                                          csv_atol=float(tolerances['csv']), y_prob_atol=float(tolerances['npz']),
                                           json_tolerances=tolerances, )
         run_report['run'] = run_key
-        if _STATUS_RANK[run_report['status']] > _STATUS_RANK[status]:
+        if run_report['status'] == 'fail':
             status = run_report['status']
         run_reports.append(run_report)
 
@@ -660,13 +866,305 @@ def _print_cli_report(report: dict[str, Any]) -> None:
                           f"{row['max_fp_err']:^{w_2r['max']}.1e}",
                           f"{row['json']:^{w_2r['json']}} | {row['csv']:^{w_2r['csv']}} | {row['png']:^{w_2r['png']}}",
                )))
+def _print_issues(issues: dict[str, Any], mode: str) -> None:  #149
+    """Print one run mismatch block, with richer summaries in train mode."""
+    kind_order = {'npz': 0, 'csv': 1, 'json': 2, 'png': 3}
+    M_ZERO = [0, 0, 0, 0]
+    cur_issue: dict[str, Any] = {}
+
+    def _mat2str(m) -> str:
+        return f"[{m[0]}, {m[1]}]/[{m[2]}, {m[3]}]"
+
+    def _line_color(delta: float, tol: float = 0.0) -> str:
+        return 'g' if abs(float(delta)) <= float(tol) else 'r'
+
+    def _add_line(lines: list[tuple[str, str]], text: str, delta: float, tol: float = 0.0) -> None:
+        if abs(float(delta)) == 0.0:
+            return
+        lines.append((text, _line_color(delta, tol)))
+
+    def _render_file_block(file_name:str,lines: list[tuple[str, str]]) -> bool:
+        if not lines:
+            return False
+        print(f'-{file_name}:')
+        for text, color in lines:
+            print_color(f'\t{text}', color)
+        return True
+
+    def _print_csv_issue() -> bool:
+        file_name = cur_issue.get('file', '')
+        lines: list[tuple[str, str]] = []
+        if cur_issue.get('csv_style', None) == 'timeline':
+            flip_count = int(cur_issue.get('flip_count', 0))
+            rows = int(cur_issue.get('rows', 0))
+            flip_rate = float(cur_issue.get('flip_rate', 0.0))
+            max_prob_delta = float(cur_issue.get('max_prob_delta', 0.0))
+            _add_line(lines, f'flips = {flip_count}/{rows} ({100.0 * flip_rate:.2f}%)', flip_count)
+            _add_line(lines, f'max prob delta = {_fmt_num(max_prob_delta)}',
+                      max_prob_delta, tolerances.get('csv', 0.0))
+            return _render_file_block(file_name, lines)
+        if cur_issue.get('issue_type', None) == 'numeric':
+            max_fp_err = float(cur_issue.get('max_fp_err', 0.0))
+            _add_line(lines, f'max drift = {_fmt_num(max_fp_err)}', max_fp_err, tolerances.get('csv', 0.0))
+            return _render_file_block(file_name, lines)
+        lines.append((f"csv {cur_issue.get('message', 'mismatch')}", 'r'))
+        return _render_file_block(file_name, lines)
+
+    def _print_json_issue() -> bool:
+        file_name = cur_issue.get('file', '')
+        json_style = cur_issue.get('json_style', None)
+        lines: list[tuple[str, str]] = []
+        if json_style == 'stream_events':
+            videos_changed = cur_issue.get('videos_changed', 0)
+            event_flips = cur_issue.get('event_flips', 0)
+            f1_delta = cur_issue.get('f1_delta', 0.0)
+            _add_line(lines, f"videos changed = {videos_changed}/{cur_issue.get('videos_total', 0)}", videos_changed)
+            _add_line(lines, f"flipped events = {event_flips}/{cur_issue.get('event_total', 0)} "
+                                 f"\tCM ref:{_mat2str(cur_issue.get('ref_cm', M_ZERO))}\t delta:{_mat2str(cur_issue.get('delta_cm', M_ZERO))}", event_flips)
+            _add_line(lines, f"f1 delta = {_fmt_num(f1_delta)}", f1_delta, cur_issue.get('event_f1_tol', tolerances.get('event_f1', 0.0)))
+            if cur_issue.get('gt_changed', False):
+                lines.append(('gt changed = yes', 'r'))
+            return _render_file_block(file_name, lines)
+
+        if json_style in {'stream_summary', 'summary'}:
+            max_abs_err = float(cur_issue.get('max_abs_error', 0.0))
+            cm_sum_delta = float(cur_issue.get('cm_sum_delta', 0.0))
+            cm_delta = float(cur_issue.get('cm_delta', 0.0))
+            _add_line(lines, f'max metric error = {_fmt_num(max_abs_err)}',
+                      max_abs_err, cur_issue.get('metric_tol', tolerances.get('max_abs_error', 0.0)))
+            _add_line(lines, f"cm delta = {_fmt_num(cm_sum_delta)}/{cur_issue.get('sample_total', 0)} ({100.0 * cm_delta:.3f}%)",
+                      cm_delta,  cur_issue.get('cm_tol', tolerances.get('cm_delta', 0.0)) )
+            return _render_file_block(file_name, lines)
+
+        numeric_count = int(cur_issue.get('numeric_count', 0))
+        other_count = int(cur_issue.get('other_count', 0))
+        max_fp_err = float(cur_issue.get('max_fp_err', 0.0))
+        if numeric_count:
+            lines.append((f'json drifts={numeric_count}', 'r'))
+        if other_count:
+            lines.append((f'json other={other_count}', 'r'))
+        _add_line(lines, f'max = {_fmt_num(max_fp_err)}', max_fp_err)
+        if not lines:
+            lines.append((f"json issues={cur_issue.get('issue_count', 1)}", 'r'))
+        return _render_file_block(file_name, lines)
+
+    def _print_npz_issue() -> bool:
+        file_name = cur_issue.get('file', '')
+        lines: list[tuple[str, str]] = []
+        issue_key = cur_issue.get('issue_key', None)
+        if issue_key == 'y_prob':
+            max_fp_err = float(cur_issue.get('max_fp_err', 0.0))
+            _add_line(lines, f'npz y_prob max drift = {_fmt_num(max_fp_err)}',
+                      max_fp_err, tolerances.get('npz', 0.0))
+            return _render_file_block(file_name, lines)
+        if issue_key is not None:
+            lines.append((f'npz mismatch key = {issue_key}', ''))
+            return _render_file_block(file_name, lines)
+        lines.append(('npz mismatch', 'r'))
+        return _render_file_block(file_name, lines)
+
+    def _print_png_issue() -> bool:
+        file_name = cur_issue.get('file', '')
+        lines: list[tuple[str, str]] = []
+        issue_type = cur_issue.get('issue_type', None)
+        if issue_type == 'pixels':
+            lines.append(('png pixel mismatch', 'r'))
+            return _render_file_block(file_name, lines)
+        if issue_type == 'size':
+            lines.append(('png size mismatch', 'r'))
+            return _render_file_block(file_name, lines)
+        lines.append(('png mismatch', 'r'))
+        return _render_file_block(file_name, lines)
+
+    def _print_issue() -> bool:
+        kind = cur_issue.get('kind', 'other')
+        if kind == 'json':
+            return _print_json_issue()
+        if kind == 'csv':
+            return _print_csv_issue()
+        if kind == 'npz':
+            return _print_npz_issue()
+        if kind == 'png':
+            return _print_png_issue()
+        return _render_file_block(cur_issue.get('file', ''), [(cur_issue.get('message', 'mismatch'), 'r')])
+
+    #*** func code ***#
+    tolerances = _resolve_tolerances(mode)
+    if not (issues.get('files_missing') or issues.get('files_extra') or issues.get('semantic_issues')):
+        return
+    print_color(f"\n{issues['run']}:", 'r')
+    if issues.get('files_missing'):
+        print_color(f"  missing files: {len(issues['files_missing'])}", 'r')
+    if issues.get('files_extra'):
+        print_color(f"  extra files  : {len(issues['files_extra'])}", 'r')
+
+    for cur_issue in sorted(issues.get('semantic_issues', []),
+                            key=lambda item: (kind_order.get(item.get('kind', 'other'), 99), item.get('file', ''))):
+        _print_issue()
 
 # endregion
 
 #* region Public Sanity API
+def test_stream_jsons(tst, ref, op_dir=None, **kwargs):
+    """Compare generated stream JSON dirs and optionally save one JSON report."""
+    from json_stream_utils import compare_stream_json
+    def _resolve_tolerance(tol=None) -> dict[str, float]:
+        """ Resolve stream JSON numeric tolerances for this comparison."""
+        if isinstance(tol, str):
+            mode = tol.lower()
+            if mode == 'loose':
+                return  {'avg_abs': LOOSE_TOLERANCES, 'max_abs': LOOSE_TOLERANCES}
+            if mode == 'strict':
+                return {'avg_abs': STRICT_TOLERANCES, 'max_abs': STRICT_TOLERANCES}
+        elif isinstance(tol, dict):
+            return tol
+        elif isinstance(tol, (list, tuple)) and len(tol) == 2:
+            return {'avg_abs': tol[0], 'max_abs': tol[1]}
+        else:
+            return  {'avg_abs': LOOSE_TOLERANCES, 'max_abs': LOOSE_TOLERANCES}
+
+
+    tst = Path(tst)
+    ref = Path(ref)
+    op_dir = tst if op_dir is None else Path(op_dir)
+    if not tst.is_dir():
+        raise NotADirectoryError(tst)
+    if not ref.is_dir():
+        raise NotADirectoryError(ref)
+    op_dir.mkdir(parents=True, exist_ok=True)
+
+    selected_names = kwargs.pop('file_names', None)
+    tolerances = _resolve_tolerance(kwargs.pop('tolerances', None))
+    ignore_path_fields = bool(kwargs.pop('ignore_path_fields', True))
+    print_cli = bool(kwargs.pop('print_cli', False))
+    verbose = bool(kwargs.pop('verbose', False))
+    save_json = bool(kwargs.pop('save_json', True))
+    report_name = kwargs.pop('report_name', 'stream_json_sanity_report')
+
+    tst_files = _iter_stream_json_files(tst)
+    ref_files = _iter_stream_json_files(ref)
+    names = sorted(set(tst_files) & set(ref_files))
+    if selected_names is not None:
+        selected_names = set(as_collection(selected_names))
+        names = [name for name in names if name in selected_names]
+    files = []
+    for file_name in names:
+        ok, cmp_report = compare_stream_json(tst_files[file_name], ref_files[file_name],
+                                             tolerances=tolerances, ignore_path_fields=ignore_path_fields)
+        files.append(_build_stream_json_cmp_row(file_name, ok, cmp_report))
+
+    tst_names = set(tst_files) if selected_names is None else set(name for name in selected_names if name in tst_files)
+    ref_names = set(ref_files) if selected_names is None else set(name for name in selected_names if name in ref_files)
+    report = {'status': 'pass' if (not (tst_names - ref_names) and not (ref_names - tst_names) and
+                                   all(item['ok'] for item in files)) else 'fail',
+              'data_path': str(tst),
+              'ref_dir': str(ref),
+              'output_dir': str(op_dir),
+              'missing_refs': sorted(tst_names - ref_names),
+              'extra_refs': sorted(ref_names - tst_names),
+              'files': files,
+              }
+    if save_json:
+        report_path = op_dir / f'{report_name}.json'
+        with report_path.open('w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2)
+        report['report_path'] = str(report_path)
+    if print_cli:
+        print_strm_json_cmp(report, verbose=verbose)
+    return report
+
+
+def stream_json_sanity(data_path, ref_dir, output_dir, **kwargs):
+    """Generate plain stream JSONs, compare them to references, and return one structured report."""
+    from video_to_stream_data import process_video
+
+    data_path = Path(data_path)
+    ref_dir = Path(ref_dir)
+    output_dir = Path(output_dir)
+    if not ref_dir.is_dir():
+        raise NotADirectoryError(ref_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    default_group_tag = kwargs.get('default_group_tag', kwargs.get('group_ann', [0]))
+
+    expected_jsons = _iter_stream_input_json_names(data_path)
+    occupied = [name for name in expected_jsons if (output_dir / name).exists()]
+    if occupied:
+        raise FileExistsError(f'output_dir already contains target JSON files: {", ".join(occupied)}')
+
+    process_kwargs = dict(kwargs)
+    for key in ('default_group_tag', 'group_ann', 'zip_output', 'zip', 'output_path', 'file_names'):
+        process_kwargs.pop(key, None)
+    process_video(data_path,
+                  output_path=output_dir,
+                  default_grp_tag=default_group_tag,
+                  zip_output=False,
+                  **process_kwargs)
+
+    report = test_stream_jsons(output_dir, ref_dir, output_dir, file_names=expected_jsons, **kwargs)
+    report['data_path'] = str(data_path)
+    return report
+
+
+def print_strm_json_cmp(r, **kwargs):
+    """Print one compact stream JSON comparison table from `stream_json_sanity(...)`."""
+    rows = list(r.get('files', []))
+    verbose = bool(kwargs.get('verbose', False))
+    file_count = len(rows)
+
+    if r.get('status') == 'pass':
+        print_color(f"stream_json_sanity: pass ({file_count} files)", 'g')
+        if verbose:
+            for row in rows:
+                _print_stream_json_verbose(row)
+        return
+
+    print_color(f"stream_json_sanity: fail ({file_count} compared files)", 'r')
+    if r.get('missing_refs'):
+        print_color(f"missing refs: {', '.join(r['missing_refs'])}", 'r')
+    if r.get('extra_refs'):
+        print_color(f"extra refs: {', '.join(r['extra_refs'])}", 'r')
+
+    columns = [('file', 'file'), ('status', 'status'),  ('metadata', 'meta'),
+               ('ann_intervals', 'ann-int'), ('ann_frames', 'ann-frame'),
+               ('det_counts', 'det-cnt'), ('avg_abs', 'avg-abs'), ('max_abs', 'max-abs')]
+    widths = {key: len(label) for key, label in columns}
+    for row in rows:
+        widths['file'] = max(widths['file'], len(str(row['file'])))
+        widths['status'] = max(widths['status'], len(str(row['status'])))
+        widths['metadata'] = max(widths['metadata'], len(str(row['metadata'])))
+        widths['ann_intervals'] = max(widths['ann_intervals'], len(str(row['ann_intervals'])))
+        widths['ann_frames'] = max(widths['ann_frames'], len(str(row['ann_frames'])))
+        widths['det_counts'] = max(widths['det_counts'], len(str(row['det_counts'])))
+        widths['avg_abs'] = max(widths['avg_abs'], len(_fmt_num(float(row['avg_abs']))))
+        widths['max_abs'] = max(widths['max_abs'], len(_fmt_num(float(row['max_abs']))))
+
+    header = ' | '.join(f"{label:<{widths[key]}}" for key, label in columns)
+    rule = '-+-'.join('-' * widths[key] for key, _ in columns)
+    print(header)
+    print(rule)
+    for row in rows:
+        line = ' | '.join(( f"{row['file']:<{widths['file']}}",
+                            f"{row['status']:<{widths['status']}}",
+                            f"{row['metadata']:<{widths['metadata']}}",
+                            f"{row['ann_intervals']:<{widths['ann_intervals']}}",
+                            f"{row['ann_frames']:<{widths['ann_frames']}}",
+                            f"{row['det_counts']:<{widths['det_counts']}}",
+                            f"{_fmt_num(float(row['avg_abs'])):<{widths['avg_abs']}}",
+                            f"{_fmt_num(float(row['max_abs'])):<{widths['max_abs']}}", ))
+
+        if row.get('ok', False):
+            print(line)
+        else:
+            print_color(line, 'r')
+
+    if verbose:
+        for row in rows:
+            _print_stream_json_verbose(row)
+
+
 def run_sanity_flow(cache_dir, out_dir, ref_dir=None, ds_testing=None, stm_testing=None, **kwargs):
     """ Run one sanity flow and optionally compare it against a reference output tree.
-    
     :param cache_dir:
     mode ='all':` run full cycle testing:  train -> test -> eval
           'no_train': use models in ref_dir to skip training (test -> eval)
@@ -712,18 +1210,11 @@ def run_sanity_flow(cache_dir, out_dir, ref_dir=None, ds_testing=None, stm_testi
         run_dirs = run_sanity_eval(eval_dir, out_dir=out_dir, raw_results=results or None,
                                    ds_testing=ds_testing, stm_testing=stm_testing, **kwargs)
 
-    if mode in {'all', 'no_train', 'eval_only'}:
-        try:
-            sum_all_results(out_dir, save_json=kwargs.get('save_summery', True))
-        except Exception as exc:
-            print_color(f'[WARN] sum_all_results failed for {out_dir}: {type(exc).__name__}: {exc}', 'y')
-
-    compare_mode = 'train' if mode == 'all' else 'no_train'
     compare_requested = ref_dir is not None
     compare_ok = None
     comparison = None
     if compare_requested:
-        compare_ok, comparison = assert_outputs(out_dir, ref_dir, compare_mode)
+        compare_ok, comparison = assert_outputs(out_dir, ref_dir, mode)
 
     report = { 'status': 'pass' if (compare_ok is not False) else 'fail',
                'mode': mode,
@@ -731,7 +1222,7 @@ def run_sanity_flow(cache_dir, out_dir, ref_dir=None, ds_testing=None, stm_testi
                'out_dir': str(out_dir),
                'ref_dir': (str(ref_dir) if ref_dir is not None else None),
                'phases': phases,
-               'compare_mode': (compare_mode if compare_requested else None),
+               'compare_mode': (mode if compare_requested else None),
                'comparison': comparison,
                'run_dirs': [str(path) for path in run_dirs],
                }
@@ -747,84 +1238,29 @@ def assert_outputs(test_dir, ref_dir, mode='no_train') -> tuple[bool, dict[str, 
     Usage:
     :param test_dir: dir with the new generated outputs
     :param ref_dir: dir with verified output files
-    :param mode: 'no_train' allows old/new export-name compatibility and tiny numeric drift
-                 'train'  applies the training tolerances in `DEFAULT_METRIC_TOLERANCES`
+    :param mode: 'all' uses the loose tolerance profile
+                 'no_train' uses the strict tolerance profile
+                 'eval_only' uses the strict profile and ignores NPZ drift
     :returns   tuple (res:bool, comparison:dict): res = results, comparison stats
     """
     test_dir = Path(test_dir)
     ref_dir = Path(ref_dir)
     mode = str(mode)
-    if mode not in {'no_train', 'train'}:
-        print_color(f"assert_outputs: unsupported mode {mode!r}", 'r')
+    if mode not in {'all', 'no_train', 'eval_only'}:
+        print_color(f'assert_outputs: unsupported mode {mode!r}', 'r')
         return False, {'status': 'fail', 'missing_runs': [], 'extra_runs': [], 'runs': []}
 
-    comparison = _build_comparison_report(test_dir, ref_dir, mode=mode, tolerance_update=DEFAULT_METRIC_TOLERANCES)
-    def _fmt_num(value: float) -> str:
-        value = float(value)
-        abs_val = abs(value)
-        if value == 0:
-            return '0'
-        if abs_val < 1e-3 or abs_val >= 1e4:
-            return f'{value:.1e}'
-        if abs_val >= 1:
-            return str(int(value)) if value.is_integer() else f'{value:.4g}'
-        text = f'{value:.4f}'.rstrip('0').rstrip('.')
-        return text or '0'
-
+    tolerances = _resolve_tolerances(mode)
+    comparison = _build_comparison_report(test_dir, ref_dir, mode=mode)
     def _tolerance_lines() -> list[str]:
-        json_keys = ['accuracy', 'precision', 'recall', 'f1', 'auc', 'TPR', 'FPR',
-                     'event_precision', 'event_recall', 'event_f1',
-                     'false_positive_time', 'miss_time', 'threshold']
-        json_parts = [f'{key}={_fmt_num(DEFAULT_METRIC_TOLERANCES[key])}'
-                      for key in json_keys if key in DEFAULT_METRIC_TOLERANCES]
-        return [f"JSON tol: {', '.join(json_parts)}",
-                f'CSV tol : {_fmt_num(DEFAULT_CSV_TOLERANCES)}',
-                f'NPZ tol : y_prob={_fmt_num(DEFAULT_NPZ_TOLERANCES)}']
-
-    def _issue_sort_key(issue: dict[str, Any]) -> tuple[int, str]:
-        kind_order = {'npz': 0, 'csv': 1, 'json': 2, 'png': 3}
-        return kind_order.get(issue.get('kind', 'other'), 99), issue.get('file', '')
-
-    def _summarize_issue(issue: dict[str, Any]) -> str:
-        kind = issue.get('kind', 'other')
-        file_name = issue.get('file', '')
-        fp_err = issue.get('max_fp_err', 0.0)
-
-        if kind == 'json':
-            drift_count = issue.get('numeric_count', 0)
-            other_count = issue.get('other_count', 0)
-            parts = []
-            if drift_count:
-                parts.append(f'drifts={drift_count}')
-            if other_count:
-                parts.append(f'other={other_count}')
-            if not parts:
-                parts.append(f'issues={issue.get("issue_count", 1)}')
-            return f'{file_name}: json {", ".join(parts)}, max={_fmt_num(fp_err)}'
-
-        if kind == 'csv':
-            issue_type = issue.get('issue_type', None)
-            if issue_type == 'numeric':
-                return f'{file_name}: csv max drift = {_fmt_num(fp_err)}'
-            return f'{file_name}: csv {issue.get("message", "mismatch")}'
-
-        if kind == 'npz':
-            issue_key = issue.get('issue_key', None)
-            if issue_key == 'y_prob':
-                return f'{file_name}: npz y_prob max drift={_fmt_num(fp_err)}'
-            if issue_key is not None:
-                return f'{file_name}: npz mismatch key={issue_key}'
-            return f'{file_name}: npz mismatch'
-
-        if kind == 'png':
-            issue_type = issue.get('issue_type', None)
-            if issue_type == 'pixels':
-                return f'{file_name}: png pixel mismatch'
-            if issue_type == 'size':
-                return f'{file_name}: png size mismatch'
-            return f'{file_name}: png mismatch'
-
-        return f'{file_name}: {issue.get("message", "mismatch")}'
+        lines = [f"  field type  |\t max tolerance ",
+                 f"--------------+-----------------",
+                 f"JSON  summary :\t{_fmt_num(max(tolerances['max_abs_error'], tolerances['cm_delta']))} ",
+                 f"      events  :\t{_fmt_num(tolerances['event_f1']) } ",
+                 f"CSV max delta :\t{_fmt_num(tolerances['csv'])}"]
+        if mode != 'eval_only':
+            lines += [f"NPZ   d_prob  : {_fmt_num(tolerances['npz'])}"]
+        return lines
 
     res = not (comparison['missing_runs'] or comparison['extra_runs'] or
                any(run['files_missing'] or run['files_extra'] or run['semantic_issues']
@@ -834,9 +1270,9 @@ def assert_outputs(test_dir, ref_dir, mode='no_train') -> tuple[bool, dict[str, 
         print_color(f'\nOutput assertion passed for mode={mode}', 'g')
         return res, comparison
 
-    print_color(f'\nOutput assertion failed for mode={mode}', 'r')
+    print(f"\nOutput assertion failed for mode={mode}\ncomparison profile: {tolerances['profile']}")
     for line in _tolerance_lines():
-        print_color(line, 'r')
+        print(line)
 
     if comparison['missing_runs']:
         print_color(f"missing runs: {', '.join(comparison['missing_runs'])}", 'r')
@@ -844,21 +1280,13 @@ def assert_outputs(test_dir, ref_dir, mode='no_train') -> tuple[bool, dict[str, 
         print_color(f"extra runs: {', '.join(comparison['extra_runs'])}", 'r')
 
     for run_report in comparison['runs']:
-        if not (run_report['files_missing'] or run_report['files_extra'] or run_report['semantic_issues']):
-            continue
-        print_color(f'\n{run_report["run"]}:', 'r')
-        if run_report['files_missing']:
-            print_color(f'  missing files: {len(run_report["files_missing"])}', 'r')
-        if run_report['files_extra']:
-            print_color(f'  extra files  : {len(run_report["files_extra"])}', 'r')
-        for issue in sorted(run_report['semantic_issues'], key=_issue_sort_key):
-            print_color(f'  {_summarize_issue(issue)}', 'r')
+        _print_issues(run_report, mode)
     return res, comparison
 
 # endregion
 
-#*647->874/904(,1,1)915 -> 780(,9,3)-> 780(,9,1) -> 770(,14,1) self clr-> 734(,15,1) -> 672
-#* -> export-pt-res 693 -> commenting -> 749(,2,1)/777
+#* 1191 ->1161-> 1217-> 1199-> 1188(1,22,2) -> 1166(,22,2)->1155
+#* 1390(2,5,3)-> refact-01-1277(1,5,3)
 
 if __name__ == '__main__':
     import shutil
@@ -867,7 +1295,7 @@ if __name__ == '__main__':
                       'cam-6-11-8_FRes_Erz_ft25_w30-15.npz']
     ds_testsing    = ['J-All_ft25_w30-15_test.npz']
 
-    # 1st testing
+    #* 1st testing
     # d_tr = "work_dirs/json_models/sanity-testing/test_all-01"
     # d_nt = "work_dirs/json_models/sanity-testing/no_train"
     # d_rf = "work_dirs/json_models/w30-15-um"
@@ -875,13 +1303,21 @@ if __name__ == '__main__':
     # b_2, _ = assert_outputs(d_nt, d_rf, 'train')
     # print(f"train: {b_1}\n test:{b_2}")
 
-    tst_dir = 'work_dirs/json_models/sanity-testing/test-only_01'
+    #* 2nd testing
+    cache_path = 'data/cache/w30-15_um'
     rf_dir  = 'work_dirs/json_models/w30-15-um'
-
-    if Path(tst_dir).is_dir():
-        shutil.rmtree(tst_dir)
-    run_sanity_flow('data/cache/w30-15', tst_dir, rf_dir,
-                    ds_testing=ds_testsing, stm_testing=stream_testing, mode='no_train')
+    res_dir = 'work_dirs/json_models/sanity-testing/test-only_01'
+    md = 'all'# 'no_train'
+    if Path(res_dir).is_dir():
+        shutil.rmtree(res_dir)
+    # run_sanity_flow(cache_path, res_dir, rf_dir,
+    #                 ds_testing=ds_testsing, stm_testing=stream_testing, mode=md)
     # res_, info = assert_outputs(tst_dir, rf_dir, 'no_train')
-    # print(f"Assert outputs:{res_}\n")
-    # print(f"inof:{info}")
+    # print(f"Assert outputs:{res_}\ninfo:{info}")
+    
+    #* 3rd testing
+    d_ts = "/mnt/local-data/Python/Projects/weSmart/data/json_files/tst_conv/try_05"
+    d_rf = "/mnt/local-data/Python/Projects/weSmart/data/sanity-testing/json/260611-no_imgsz_g-0"
+    d_op = "/mnt/local-data/Python/Projects/weSmart/data/sanity-testing/json"
+    test_stream_jsons(d_ts, d_rf, d_op, print_cli=True)
+    #1412(2,5,4)

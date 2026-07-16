@@ -1,5 +1,16 @@
-import re
-import csv
+""" visual_util
+Plot, inspect, and debug visual results produced by the project pipelines.
+
+Public API includes:
+    play_frames(...)
+    plot_my_log(...)
+    plot_roc_curve(...)
+    draw_confusion_matrix(...)
+    plot_timeline(...)
+    json_to_box_frames(...)
+"""
+
+import re, csv, json
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,7 +20,10 @@ from matplotlib.ticker import FuncFormatter
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
-from common.my_local_utils import _load_log_lines, print_color, get_unique_name
+from common.my_local_utils import _load_log_lines, _make_unique_dir, _save_log, print_color, get_unique_name
+
+FRAME_H, FRAME_W = 1080, 1920
+CENTER_SCALE = 0.12
 
 def _close_all_on_key(event):
     if event.key in ('x', 'C'):
@@ -82,7 +96,7 @@ def play_frames(frames_dir, log=None, x: float = 1.0, event_color=False):
             for v in (r, g, b):
                 if isinstance(v, float) and 0.0 <= v <= 1.0:
                     v = int(round(v * 255))
-                v = int(max(0, min(255, int(v))))
+                v = max(0, min(255, int(v)))
                 vals.append(v)
             r, g, b = vals
             color_bgr = (b, g, r)
@@ -133,6 +147,102 @@ def play_frames(frames_dir, log=None, x: float = 1.0, event_color=False):
     cv2.destroyWindow(window_name)
 
 
+def json_to_box_frames(json_path, out_root, H: int = FRAME_H, W: int = FRAME_W, **kwargs):
+    """Render one current stream JSON into monochrome box frames for debugging."""
+    def _event_pairs(raw_events):
+        pairs = []
+        for ev in raw_events or []:
+            if isinstance(ev, (list, tuple)) and len(ev) >= 2:
+                pairs.append((int(ev[0]), ev[1]))
+            elif isinstance(ev, (int, float)) and not isinstance(ev, bool):
+                pairs.append((int(ev), None))
+        return pairs
+
+    json_path, out_root = Path(json_path), Path(out_root)
+
+    with json_path.open('r', encoding='utf-8') as fh:
+        data = json.load(fh)
+
+    frames = data.get('frames', [])
+    title  = data.get('video' , '')
+    if not frames:
+        return None, {'Duration': 0.0, 'Frames': 0, 'Events': 0, 'T_evn': 0.0, 'stat': {}}
+
+    if kwargs.get('clip_name'):
+        clip_name = str(kwargs['clip_name'])
+    elif kwargs.get('use_json_field', False) and isinstance(title, str) and title:
+        clip_name = Path(title).stem
+    else:
+        clip_name = json_path.stem.replace('.', '_')
+
+    clip_dir, clip_name = _make_unique_dir(out_root, clip_name, no_space=True)
+    event_lines, event_flags, times_s = [] , [], []
+    stat = {}
+
+    for idx, fr in enumerate(frames, start=1):
+        img = np.full((H, W), 255, dtype=np.uint8)
+        for det in fr.get('detection_list', []) or []:
+            box = det.get('bbox', [])
+            if len(box) != 4:
+                continue
+            x1, y1, x2, y2 = map(float, box)
+
+            if kwargs.get('y_from_bottom', False):
+                y1, y2 = 1.0 - y1, 1.0 - y2
+
+            px1 = max(0, min(W - 1, int(x1 * W)))
+            px2 = max(0, min(W - 1, int(x2 * W)))
+            py1 = max(0, min(H - 1, int(y1 * H)))
+            py2 = max(0, min(H - 1, int(y2 * H)))
+            if px2 <= px1 or py2 <= py1:
+                continue
+
+            cv2.rectangle(img, (px1, py1), (px2, py2), 0, thickness=1)
+            if kwargs.get('draw_center', False):
+                bb_w, bb_h = px2 - px1, py2 - py1
+                if bb_w > 0 and bb_h > 0:
+                    cx = px1 + bb_w // 2
+                    cy = py1 + bb_h // 2
+                    radius = max(1, int(CENTER_SCALE * min(bb_w, bb_h)))
+                    cv2.circle(img, (cx, cy), radius, 0, thickness=-1)
+
+        frame_num = fr.get('f', idx)
+        t_sec = float(fr.get('t', 0.0))
+        time_ms = int(t_sec * 1000)
+        times_s.append(t_sec)
+
+        pairs_ls = _event_pairs(fr.get('group_events') or fr.get('individual_events') or [])
+        event_flags.append(bool(pairs_ls))
+        for flag, _ in pairs_ls:
+            stat[flag] = stat.get(flag, 0) + 1
+        if pairs_ls:
+            event_txt = '[' + '; '.join(f"{flag}:{'NA' if conf is None else f'{float(conf):.4f}'}"
+                                        for flag, conf in pairs_ls) + ']'
+            event_lines.append(f"{time_ms},{frame_num},{event_txt}")
+
+        cv2.imwrite(str(clip_dir/f"frm_{frame_num:05d}_{time_ms:08d}.jpg"), img)
+
+    if event_lines:
+        _save_log(event_lines, clip_dir/f"{clip_name}_events.log")
+
+    duration = max(times_s) if times_s else 0.0
+    if len(times_s) > 1 and duration > 0:
+        dt = (max(times_s) - min(times_s)) / (len(times_s) - 1)
+        t_event = sum(event_flags) * dt
+    else:
+        t_event = 0.0
+
+    events_count, prev = 0, False
+    for cur in event_flags:
+        if cur and not prev:
+            events_count += 1
+        prev = cur
+
+    clip_info = {'Duration': duration, 'Frames': len(frames),
+                 'Events': events_count, 'T_evn': t_event, 'stat': stat}
+    return clip_name, clip_info
+#103
+
 def plot_my_log(log_path, **kwargs):
     """  Parse an MMEngine/MMAction text log and plot:
     kwargs:
@@ -150,8 +260,8 @@ def plot_my_log(log_path, **kwargs):
     # Example lines we match:
     # Epoch(train)  [3][60/73]  ...  loss: 0.3629  top1_acc: 0.9375 ...
     # Epoch(val) [10][18/18]    acc/top1: 2.0000  acc/top5: 2.0000 ...
-    train_pat = re.compile(r"Epoch\(train\)\s+\[(\d+)\]\[\d+/\d+\].*?loss:\s+([0-9.]+)\s+top1_acc:\s+([0-9.]+)")
-    val_pat   = re.compile(r"Epoch\(val\)\s+\[(\d+)\]\[\d+/\d+\].*?acc/top1:\s+([0-9.]+)")
+    train_pat = re.compile(r"Epoch\(train\)\s+\[(\d+)]\[\d+/\d+].*?loss:\s+([0-9.]+)\s+top1_acc:\s+([0-9.]+)")
+    val_pat   = re.compile(r"Epoch\(val\)\s+\[(\d+)]\[\d+/\d+].*?acc/top1:\s+([0-9.]+)")
 
     # Aggregate per epoch (mean over all train iters)
     train_losses = {}  # epoch -> [losses]
@@ -186,6 +296,7 @@ def plot_my_log(log_path, **kwargs):
     val_epochs = sorted(val_acc.keys())
     val_acc_vals = [val_acc[e] for e in val_epochs]
 
+    plotted = False
     #* 1) Plot loss
     if plot_loss:
         fig = plt.figure()
@@ -194,6 +305,7 @@ def plot_my_log(log_path, **kwargs):
         plt.title("Training loss vs epoch")
         plt.grid(True, alpha=0.3)
         plt.legend(); plt.tight_layout()
+        plotted = True
 
     #* 2) Plot accuracy-ish (train top1 and val metric)
     if plot_acc:
@@ -205,9 +317,10 @@ def plot_my_log(log_path, **kwargs):
         plt.title("Train / val accuracy vs epoch")
         plt.grid(True, alpha=0.3)
         plt.legend(); plt.tight_layout()
+        plotted = True
 
-    fig.canvas.mpl_connect('key_press_event', _close_all_on_key)
-    plt.show()
+    if plotted:
+        plt.show()
 
 #****** ROC plotting *****
 def plot_roc_curve(roc: dict, **kwargs):
@@ -296,8 +409,8 @@ def draw_confusion_matrix(cm, **kwargs):
     if save_to is None and not show:
         return
 
-    tn, fp = float(cm[0, 0]), float(cm[0, 1])
-    fn, tp = float(cm[1, 0]), float(cm[1, 1])
+    tn, fp = cm[0, 0], cm[0, 1]
+    fn, tp = cm[1, 0], cm[1, 1]
     neg_total = tn + fp
     pos_total = fn + tp
     rate_cm = np.asarray([
@@ -427,13 +540,15 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
             spans.append(tuple(active))
         return spans
 
-    def _minute_tick_step(span_sec: float) -> int:
-        """ Pick a readable minute-based tick spacing for timestamp axes."""
+    def _timeline_tick_step(span_sec: float) -> int:
+        """Pick a readable tick spacing for timestamp axes."""
+        if span_sec <= 3*60:
+            return 30
         if span_sec <= 10*60:
             return 60
         if span_sec <= 20*60:
             return 2*60
-        if span_sec <= 40*60:
+        if span_sec < 60*60:
             return 5*60
         return 10*60
 
@@ -479,7 +594,10 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
     t_frm = np.asarray([float(row['t_frm']) for row in rows], dtype=np.float64)
     t_start = np.asarray([float(row['t_start']) for row in rows], dtype=np.float64)
     y_prob = np.asarray([float(row['y_prob']) for row in rows], dtype=np.float64)
-    y_pred = np.asarray([float(row['y_pred']) for row in rows], dtype=np.float64)
+    pred_column = kwargs.get('pred_column', 'y_pred')
+    if pred_column not in rows[0]:
+        raise KeyError(f"timeline csv has no '{pred_column}' column: {csv_path}")
+    y_pred = np.asarray([float(row[pred_column]) for row in rows], dtype=np.float64)
     gt_label = (np.asarray([float(row[label_key]) for row in rows], dtype=np.float64)
                 if label_key is not None else None)
 
@@ -499,8 +617,8 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
     if save_to is None and not show:
         return
 
-    t_min = float(t_frm[0])
-    t_max = float(t_frm[-1])
+    t_min = min(t_start[0], t_frm[0])
+    t_max = t_frm[-1]
     if t_span is None:
         t1, t2 = t_min, t_max
     else:
@@ -549,21 +667,20 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
                         alpha=0.40, linewidth=1.0, zorder=1)
 
     ax.plot(plot_t, plot_prob, color='black', linewidth=1.9, label='raw probability', zorder=3)
-    plot_max = float(np.max(plot_prob)) if len(plot_t) > 0 else 0.0
+    plot_max = np.max(plot_prob) if len(plot_t) > 0 else 0.0
     if plot_gt:
         if plot_gt_vals is None:
             raise KeyError(f"timeline csv has no GT label column: {csv_path}")
-    ax.axhline(float(threshold), color='#E53935', linestyle='--', linewidth=1.4, zorder=2)
-    plot_max = max(plot_max, float(threshold), 1.0)
+    ax.axhline(threshold, color='#E53935', linestyle='--', linewidth=1.4, zorder=2)
+    plot_max = max(plot_max, threshold, 1.0)
 
     x_left, x_right = t1, t2
     if x_format == 'time_stamp' and t2 > t1:
-        step_sec = _minute_tick_step(t2 - t1)
-        x_left = int(np.ceil(t1 / step_sec) * step_sec)
-        x_right = int(np.ceil(t2 / step_sec) * step_sec)
-        if x_right <= x_left:
-            x_right = x_left + step_sec
-        x_ticks = np.arange(x_left, x_right + 0.1, step_sec, dtype=np.float64)
+        step_sec = _timeline_tick_step(t2 - t1)
+        tick_start = np.ceil(t1 / step_sec) * step_sec
+        x_ticks = np.arange(tick_start, t2 + 0.1, step_sec, dtype=np.float64)
+        if not len(x_ticks):
+            x_ticks = np.asarray([t1, t2], dtype=np.float64)
     elif t2 > t1:
         x_ticks = np.linspace(t1, t2, num=6)
     else:
@@ -581,9 +698,10 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
 
     legend_handles = [Patch(facecolor='#8BCB88', edgecolor='#63B56C', alpha=0.35, label='GT positive'),
                       Patch(facecolor='#A9D3F0', edgecolor='#7FB9E5', alpha=0.40, label='Predicted positive'),
-                      Line2D([0], [0], color='black', linewidth=1.9, label='raw probability')]
-    legend_handles.append(Line2D([0], [0], color='#E53935', linestyle='--', linewidth=1.4,
-                                 label=f'Threshold={float(threshold):.2f}'))
+                      Line2D([0], [0], color='black', linewidth=1.9, label='raw probability'),
+                      Line2D([0], [0], color='#E53935', linestyle='--', linewidth=1.4, label=f'Threshold={threshold:.2f}'),
+                      ]
+
     ax.legend(handles=legend_handles, loc='upper left', framealpha=0.9)
 
     if pred_spans:
@@ -624,12 +742,12 @@ def tst_plot_timeline():
     plot_timeline(tst_f, ('24:45', '30:15'), plot_gt=True, gt_offset=0.5)
     pass
 
-
+#748(20,14,5)
 if __name__ == "__main__":
 
     log_path = "./work_dirs/R50_bbrfm_01/20251209_042904/20251209_042904.log"
     rlv_log = "./work_dirs/tsm_R50_MMA_RLVS/20251214_112723/20251214_112723.log"
-    rwf_log = "./work_dirs/tsm_R50_MMA_RWF/20251214_094114/20251214_094114.log"
+    #rwf_log = "./work_dirs/tsm_R50_MMA_RWF/20251214_094114/20251214_094114.log"
     rwf_log = "/work_dirs/tsm_R50_MMA_RWF/20251215_023321/20251215_023321.log"
     # l =  "./work_dirs/tsm_R50_MMA_JOINT/20251215_041і232/20251215_041232.log"
     l =  "work_dirs/tsm_R50_MMA_nc2-l4-b4-v/20251231_104730/20251231_104730.log"

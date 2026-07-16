@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 
-def _strip_split_suffix(tag: str) -> str:
+def strip_split_suffix(tag: str) -> str:
     """Remove one trailing `_train` or `_test` split suffix."""
     for suffix in ('_train', '_test'):
         if tag.endswith(suffix):
@@ -10,9 +10,9 @@ def _strip_split_suffix(tag: str) -> str:
     return tag
 
 
-def _strip_timestamp_prefix(tag: str) -> str:
-    """Remove one `YYMMDD-HHMM_` run prefix when present."""
-    return tag.split('_', 1)[1] if re.match(r'^\d{6}-\d{4}_.+', tag) else tag
+def strip_timestamp_prefix(tag: str) -> str:
+    """ Remove one `YYMMDD_HH-MM-SS_` run prefix when present."""
+    return tag.split('_', 2)[2] if re.match(r'^\d{6}_\d{2}-\d{2}-\d{2}_.+', tag) else tag
 
 
 def _parse_specs(tag: str) -> tuple[str | None, str | None]:
@@ -44,21 +44,21 @@ def _strip_same_specs(tag: str, specs: str | None) -> str:
     return tag
 
 
-def _resolve_best_epoch(path: Path) -> int | None:
-    """Resolve one best epoch from a model path or run dir when available."""
+def _resolve_epoch_tag(path: Path) -> str | None:
+    """Resolve one compact epoch tag: `BM` for best-model refs, else `epNNN`."""
     if path.suffix == '.pt':
-        for pattern in (r'best_model\.(\d+)', r'checkpoint_ep-(\d+)'):
-            match = re.fullmatch(pattern, path.stem)
-            if match:
-                return int(match.group(1))
+        match = re.fullmatch(r'best_model\.(\d+)', path.stem)
+        if match:
+            return 'BM'
+        match = re.fullmatch(r'checkpoint_ep-(\d+)', path.stem)
+        if match:
+            return f"ep{int(match.group(1))}"
         return None
 
     if path.exists() and path.is_dir():
         best_models = sorted(path.glob('best_model.*.pt'))
         if best_models:
-            match = re.fullmatch(r'best_model\.(\d+)', best_models[-1].stem)
-            if match:
-                return int(match.group(1))
+            return 'BM'
     return None
 
 
@@ -88,10 +88,10 @@ def resolve_best_pt_model(model_ref) -> Path:
     raise FileNotFoundError(path)
 
 
-def _resolve_model_parts(value) -> tuple[str, int | None]:
-    """Resolve one model tag and optional epoch from a path or plain tag."""
+def _resolve_model_parts(value) -> tuple[str, str | None]:
+    """Resolve one model tag and optional epoch tag from a path or plain tag."""
     path = Path(value)
-    epoch = _resolve_best_epoch(path)
+    epoch_tag = _resolve_epoch_tag(path)
     if path.suffix == '.pt':
         tag = path.parent.name
     elif path.exists() and path.is_dir():
@@ -99,22 +99,22 @@ def _resolve_model_parts(value) -> tuple[str, int | None]:
     else:
         tag = path.stem if path.suffix else path.name
 
-    tag = _strip_split_suffix(_strip_timestamp_prefix(tag))
-    return tag, epoch
+    tag = strip_split_suffix(strip_timestamp_prefix(tag))
+    return tag, epoch_tag
 
 
 def _resolve_test_tag(value) -> str:
     """Resolve one test/cache path or plain tag to its logical tag."""
     path = Path(value)
     tag = path.stem if path.suffix else path.name
-    return _strip_split_suffix(tag)
+    return strip_split_suffix(tag)
 
 
 def get_test_long_tag(model_ref, test_ref, *, include_epoch=True) -> str:
     """ Resolve one compact shared base tag for test/eval artifacts.
     ToDo: generalize for any epoch, with special tag for best one"""
 
-    model_name, best_epoch = _resolve_model_parts(model_ref)
+    model_name, epoch_tag = _resolve_model_parts(model_ref)
     test_name = _resolve_test_tag(test_ref)
     same_tag = (test_name == model_name)
 
@@ -132,8 +132,8 @@ def get_test_long_tag(model_ref, test_ref, *, include_epoch=True) -> str:
         test_name = ''
 
     parts = [model_name]
-    if include_epoch and best_epoch is not None:
-        parts.append(f"BM{best_epoch}")
+    if include_epoch and epoch_tag is not None:
+        parts.append(epoch_tag)
     if test_name:
         parts.append(test_name)
     return '_'.join(parts)
@@ -157,6 +157,7 @@ def get_test_title_lines(model_ref, test_ref) -> tuple[str, str]:
 # def build_test_artifact_name(model_ref, test_ref, kind, *, unit=None, short=False, include_best_epoch=True)-> str:
 def get_exporting_name(model_ref, test_ref, kind, *, unit='NA', short=False, **kwargs)-> str:
     """Build one canonical export stem from model/test refs and export kind."""
+
     base_tag = (get_test_short_tag(test_ref) if short else
                 get_test_long_tag(model_ref, test_ref, include_epoch=kwargs.get('include_epoch', True)))
 
@@ -165,9 +166,11 @@ def get_exporting_name(model_ref, test_ref, kind, *, unit='NA', short=False, **k
     if kind == 'summary':
         if not unit:
             raise ValueError('summary export name requires unit')
+        if unit == 'stream':
+            return f'{base_tag}_reports'
         return f'{base_tag}_{unit}-summary'
     if kind == 'events':
-        return f'{base_tag}_stream-events'
+        return f'{base_tag}_events'
     if kind == 'timeline':
         return f'{base_tag}_stream-tst'
     if kind == 'raw':

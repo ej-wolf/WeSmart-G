@@ -33,7 +33,6 @@
 """
 
 import numpy as np
-from json_utils import load_json_data
 from common.my_local_utils import print_color
 
 N_Keypoints = 17
@@ -539,12 +538,12 @@ def test_motion_sequence(tst_json:dict, eps= 1e-5):
 
 
 if __name__ == '__main__':
+    from json_utils import load_json_data
     # json_example = "/mnt/local-data/Projects/Wesmart/data/usual_jsons_from_events/event_18.json"
     # json_example = "data/json_data/full_ann_w_keys/new_21_1_keypoints.json"
     # json_newfrmt = "data/json_data/jsons_nf/cam3_5_4.json"
     json_example = "data/json_files/tst_conv/try_03 (tms)/Russian_Road_Rage- Micky_Mouse_&_Sponge_Bob.json"
     # static_json_ = "data/json_data/static_clip.json"
-
     test_motion_sequence(load_json_data(json_example), eps=1e-5)
     print_color("✔✔✔ Old Format OK !\n", 'g')
     test_motion_sequence(load_json_data(json_example, j_type='2'), eps=1e-5)

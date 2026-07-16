@@ -43,23 +43,16 @@ import torch
 from ultralytics import YOLO
 
 from motion_feature_schema import get_clip_features_vec, build_feature_schema
-from tms_runtime import (
-    TemporalWindowSpec,
-    TmsCandidate,
-    collect_probe_window,
-    load_tms_runtimes,
-    resolve_temporal_probes,
-    run_tms_candidates,
-    temporal_probe_status_line,
-)
-
+from tms_runtime import (TemporalWindowSpec, TmsCandidate, collect_probe_window, load_tms_runtimes,
+                         resolve_temporal_probes, run_tms_candidates, temporal_probe_status_entry,
+                         temporal_probe_status_line,)
 try:
     import yaml
 except ImportError:  # pragma: no cover - handled at runtime with a clear error.
     yaml = None
 
-
 ROOT = Path(__file__).resolve().parent
+TMS_DEFAULT_CONFIG = ROOT/"configs/RTSP_TMS/rtsp_multistream_tms.default.yaml"
 
 COCO_SKELETON = ((5,  7),
                  (7,  9),
@@ -78,6 +71,12 @@ COCO_SKELETON = ((5,  7),
                  (1,   3),
                  (2,   4),)
 
+CLASS_COLORS = ( (  0, 220, 255),
+                 (  0, 180,   0),
+                 (255, 120,   0),
+                 (255,   0, 180),
+                 (140, 120, 255),
+                 (255, 255,   0),)
 
 @dataclass
 class SamplingConfig:
@@ -107,7 +106,7 @@ class StreamState:
     url: str
     display_name: str
     payload_history_sec: float
-    payload_min_frames: int
+    tms_tags: set[str]
     source_is_file: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
     frame: np.ndarray | None = None
@@ -128,9 +127,8 @@ class StreamState:
     latest_payload: dict[str, Any] | None = None
     dashboard_position: tuple[int, int] | None = None
     sample_count: int = 0
-    # TMS online runtime state: shared buffer health + per-probe readiness.
+    # TMS online runtime state: shared payload span + per-probe readiness.
     payload_window_span_sec: float = 0.0
-    critical_low_buffer: bool = True
     temporal_probe_status: dict[str, dict[str, Any]] = field(default_factory=dict)
     temporal_probe_last_trigger_t: dict[str, float] = field(default_factory=dict)
     tms_results: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -150,6 +148,21 @@ def load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Config root must be a mapping, got {type(data).__name__}")
     return data
+
+
+def load_runtime_config(config_path: Path, default_path: Path = TMS_DEFAULT_CONFIG) -> dict[str, Any]:
+    base = load_yaml(default_path)
+    override = load_yaml(config_path)
+
+    def merge(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
+        for key, value in src.items():
+            if isinstance(value, dict) and isinstance(dst.get(key), dict):
+                dst[key] = merge(dict(dst[key]), value)
+            else:
+                dst[key] = value
+        return dst
+
+    return merge(base, override)
 
 
 def first_present(*values: Any, default: Any = None) -> Any:
@@ -195,25 +208,19 @@ def resolve_sampling(config: dict[str, Any]) -> SamplingConfig:
     return SamplingConfig(requested_mode, "frames", step_frames, None)
 
 
-def resolve_payload_buffer_policy(config: dict[str, Any]) -> tuple[float, int]:
-    sampling_cfg = dict(config.get("sampling", {}) or {})
-    payload_history_sec = float(first_present(
-        sampling_cfg.get("payload_history_sec"),
-        default=8.0,
-    ))
-    payload_min_frames = int(first_present(
-        sampling_cfg.get("payload_min_frames"),
-        default=16,
-    ))
-    if payload_history_sec <= 0:
-        raise ValueError("sampling.payload_history_sec must be positive")
-    if payload_min_frames <= 0:
-        raise ValueError("sampling.payload_min_frames must be positive")
-    return payload_history_sec, payload_min_frames
+def resolve_payload_buffer_policy(config: dict[str, Any])-> float:
+    tms_cfg = dict(config.get('tms', {}) or {})
+    payload_span = tms_cfg.get('payload_span')
 
+    if payload_span is None:
+        raise ValueError("tms.payload_span is missing")
+    payload_span = float(payload_span)
+    if payload_span <= 0:
+        raise ValueError("tms.payload_span must be positive")
+    return payload_span
 
 # TMS online buffer support: shared payload-history pruning and health tracking.
-def normalize_imgsz(value: Any) -> int | tuple[int, int]:
+def normalize_imgsz(value: Any) -> int|tuple[int, int]:
     if isinstance(value, (list, tuple)):
         if len(value) != 2:
             raise ValueError("model.imgsz list/tuple must contain [height, width]")
@@ -238,15 +245,16 @@ def is_file_source(url: str) -> bool:
     return Path(value).exists()
 
 
-def enabled_streams(
-    config: dict[str, Any],
-    config_dir: Path,
-    payload_history_sec: float,
-    payload_min_frames: int,
-) -> list[StreamState]:
-    stream_cfgs = config.get("streams", [])
+def stream_tms_specs(state: StreamState, temporal_probes: list[TemporalWindowSpec]) -> list[TemporalWindowSpec]:
+    return [spec for spec in temporal_probes if spec.tag in state.tms_tags]
+
+
+def enabled_streams(config: dict[str, Any], config_dir:Path, payload_span:float, ) -> list[StreamState]:  # 37
+    stream_cfgs = config.get('streams', [])
     if not isinstance(stream_cfgs, list) or not stream_cfgs:
         raise ValueError("Config must contain a non-empty streams list")
+    enabled_tms_tags = {str(item.get("tag", "")).strip() for item in config.get("tms", {}).get("models", []) or []
+                        if isinstance(item, dict) and item.get("enabled", True) is not False and str(item.get("tag", "")).strip()}
 
     states: list[StreamState] = []
     seen_ids: set[str] = set()
@@ -261,26 +269,37 @@ def enabled_streams(
         url = item.get("url")
         if not url:
             raise ValueError(f"streams[{index}] is missing url")
+        tms_tags = item.get("tms_tags", None)
+        if tms_tags is None:
+            resolved_tms_tags = set(enabled_tms_tags)
+        else:
+            if not isinstance(tms_tags, list) or not tms_tags:
+                raise ValueError(f"streams[{index}].tms_tags must be a non-empty list")
+            resolved_tms_tags = set()
+            for tag_value in tms_tags:
+                tag = str(tag_value).strip()
+                if not tag:
+                    raise ValueError(f"streams[{index}].tms_tags contains an empty tag")
+                if tag in resolved_tms_tags:
+                    raise ValueError(f"streams[{index}].tms_tags contains duplicate tag: {tag}")
+                if tag not in enabled_tms_tags:
+                    raise ValueError(f"streams[{index}].tms_tags unknown or disabled tag: {tag}")
+                resolved_tms_tags.add(tag)
         seen_ids.add(stream_id)
         resolved_url = resolve_stream_source(str(url), config_dir)
-        states.append(
-            StreamState(
-                stream_id=stream_id,
-                url=resolved_url,
-                display_name=str(item.get("display_name") or stream_id),
-                payload_history_sec=float(payload_history_sec),
-                payload_min_frames=int(payload_min_frames),
-                source_is_file=is_file_source(resolved_url),
-            )
-        )
-
+        states.append( StreamState( stream_id=stream_id, url=resolved_url,
+                                    display_name=str(item.get('display_name') or stream_id),
+                                    payload_history_sec=float(payload_span),
+                                    tms_tags=resolved_tms_tags,
+                                    source_is_file=is_file_source(resolved_url),)
+                       )
     if not states:
         raise ValueError("No enabled streams found in config")
     return states
 
 
 def stream_ids_by_enabled_state(config: dict[str, Any]) -> tuple[list[str], list[str]]:
-    enabled: list[str] = []
+    enabled : list[str] = []
     disabled: list[str] = []
     for index, item in enumerate(config.get("streams", []) or []):
         if not isinstance(item, dict):
@@ -302,15 +321,14 @@ def opencv_backend(name: str) -> int:
     raise ValueError("capture.backend must be 'ffmpeg' or 'any'")
 
 
-def stream_reader(
-    state: StreamState,
-    stop_event: threading.Event,
-    backend: int,
-    reconnect_delay_sec: float,
-    read_sleep_sec: float,
-    loop_files: bool,
-    play_in_realtime: bool,
-) -> None:
+def stream_reader( state: StreamState,
+                   stop_event: threading.Event,
+                   backend: int,
+                   reconnect_delay_sec: float,
+                   read_sleep_sec: float,
+                   loop_files: bool,
+                   play_in_realtime: bool,
+                   )-> None:
     # Reader threads are intentionally lightweight: decode RTSP/video and keep
     # only the newest frame. Temporal models should consume sampled copies in
     # the main loop below, not from here.
@@ -387,10 +405,11 @@ def stream_reader(
             time.sleep(reconnect_delay_sec)
 
 
-def should_sample_state(state: StreamState, sampling: SamplingConfig) -> InferenceItem | None:
+def should_sample_state(state: StreamState, sampling: SamplingConfig) -> InferenceItem|None:
     with state.lock:
         if state.frame is None:
             return None
+
         frame_index = int(state.frame_index)
         if frame_index == state.last_inferred_frame_index:
             return None
@@ -407,12 +426,8 @@ def should_sample_state(state: StreamState, sampling: SamplingConfig) -> Inferen
 
         state.last_inferred_frame_index = frame_index
         frame = state.frame.copy()
-        return InferenceItem(
-            state=state,
-            frame=frame,
-            frame_index=frame_index,
-            time_sec=float(state.frame_time_sec),
-        )
+        return InferenceItem( state=state, frame=frame, frame_index=frame_index,
+                              time_sec=float(state.frame_time_sec),)
 
 
 def tensor_item(value: Any) -> float:
@@ -422,6 +437,7 @@ def tensor_item(value: Any) -> float:
 
 
 def result_to_detection_list(result: Any, conf_thresh: float, ignored_classes: set[int]) -> list[dict[str, Any]]:
+
     detections: list[dict[str, Any]] = []
     if result.boxes is None or result.keypoints is None or len(result.boxes) == 0:
         return detections
@@ -443,45 +459,29 @@ def result_to_detection_list(result: Any, conf_thresh: float, ignored_classes: s
             conf_values = kpts_conf[det_index].detach().cpu().unsqueeze(-1)
         keypoints_xyc = torch.cat([keypoints_norm, conf_values], dim=-1)
 
-        detections.append(
-            {
-                "class": cls_id,
-                "conf": conf,
-                "bbox": [x1, y1, x2, y2],
-                "key_points": keypoints_xyc.flatten().tolist(),
-            }
-        )
+        detections.append( { 'class': cls_id, 'conf': conf, 'bbox': [x1, y1, x2, y2],
+                              'key_points': keypoints_xyc.flatten().tolist(),} )
     return detections
 
 
-def color_for_class(cls_id: int) -> tuple[int, int, int]:
-    palette = (
-        (0, 220, 255),
-        (0, 180, 0),
-        (255, 120, 0),
-        (255, 0, 180),
-        (140, 120, 255),
-        (255, 255, 0),
-    )
-    return palette[int(cls_id) % len(palette)]
+def draw_pose_overlay( frame: np.ndarray,
+                       detections: list[dict[str, Any]],
+                       names: dict[int, str] | list[str] | None,
+                       show_boxes: bool,
+                       show_keypoints: bool,
+                       show_skeleton: bool,
+                       keypoint_conf: float,
+                      ) -> np.ndarray:
+    def match_color(i:int) -> tuple[int, int, int]:
+        return CLASS_COLORS[int(i) % len(CLASS_COLORS)]
 
-
-def draw_pose_overlay(
-    frame: np.ndarray,
-    detections: list[dict[str, Any]],
-    names: dict[int, str] | list[str] | None,
-    show_boxes: bool,
-    show_keypoints: bool,
-    show_skeleton: bool,
-    keypoint_conf: float,
-) -> np.ndarray:
     out = frame.copy()
     height, width = out.shape[:2]
 
     for det in detections:
         cls_id = int(det.get("class", 0))
         conf = float(det.get("conf", 0.0))
-        color = color_for_class(cls_id)
+        color = match_color(cls_id)
         x1n, y1n, x2n, y2n = [float(value) for value in det["bbox"]]
         x1 = int(np.clip(round(x1n * width), 0, max(width - 1, 0)))
         y1 = int(np.clip(round(y1n * height), 0, max(height - 1, 0)))
@@ -549,7 +549,6 @@ def prune_payload_history(state: StreamState, latest_t: float) -> None:
     while state.sample_window and float(state.sample_window[0].get("t", 0.0)) < min_t:
         state.sample_window.popleft()
     state.payload_window_span_sec = payload_window_span_sec(state.sample_window)
-    state.critical_low_buffer = len(state.sample_window) < int(state.payload_min_frames)
 
 
 def safe_filename(value: str) -> str:
@@ -559,29 +558,25 @@ def safe_filename(value: str) -> str:
 def write_latest_payload(output_dir: Path, state: StreamState, payload: dict[str, Any]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{safe_filename(state.stream_id)}.latest.json"
-    document = {
-        "stream_id": state.stream_id,
-        "display_name": state.display_name,
-        "payload_history_sec": float(state.payload_history_sec),
-        "payload_min_frames": int(state.payload_min_frames),
-        "payload_window_span_sec": float(state.payload_window_span_sec),
-        "critical_low_buffer": bool(state.critical_low_buffer),
-        "window_len": len(state.sample_window),
-        "temporal_probes": state.temporal_probe_status,
-        "tms_results": state.tms_results,
-        "latest_detection_count": int(state.latest_det_count),
-        "latest_frame": payload,
-        "window": list(state.sample_window),
-    }
+    document = { 'stream_id': state.stream_id,
+                 'display_name': state.display_name,
+                 'tms_tags': sorted(state.tms_tags),
+                 'payload_history_sec': float(state.payload_history_sec),
+                 'payload_window_span_sec': float(state.payload_window_span_sec),
+                 'window_len': len(state.sample_window),
+                 'temporal_probes': {tag: state.temporal_probe_status[tag] for tag in sorted(state.temporal_probe_status)
+                                     if tag in state.tms_tags},
+                 'tms_results': {tag: state.tms_results[tag] for tag in sorted(state.tms_results)
+                                 if tag in state.tms_tags},
+                 'latest_detection_count': int(state.latest_det_count),
+                 'latest_frame': payload,
+                 'window': list(state.sample_window),
+                 }
     path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
 
 
-def update_state_after_inference(
-    item: InferenceItem,
-    payload: dict[str, Any],
-    display_frame: np.ndarray,
-    output_dir: Path | None,
-) -> None:
+def update_state_after_inference( item: InferenceItem, payload: dict[str, Any], display_frame:np.ndarray,
+                                  output_dir: Path|None,) -> None:
     # Called once per sampled stream frame after YOLO-pose finishes.
     # This is the central place where the latest pose payload becomes available
     # to temporal models. If adding another pose-based temporal model, append or
@@ -595,38 +590,32 @@ def update_state_after_inference(
         item.state.latest_det_count = len(payload["detection_list"])
         item.state.latest_infer_time = time.monotonic()
         item.state.inferred_count += 1
-
     if output_dir is not None:
         write_latest_payload(output_dir, item.state, payload)
 
 
 # TMS online status integration: expose shared buffer health and per-probe readiness.
-def status_lines(state: StreamState, sampling: SamplingConfig, temporal_probes: list[TemporalWindowSpec]) -> list[str]:
+def status_lines(state: StreamState, sampling: SamplingConfig, temporal_probes: list[TemporalWindowSpec]) -> list[tuple[str, tuple[int, int, int] | None]]:
     now = time.monotonic()
-    frame_age = now - state.frame_wall_time if state.frame_wall_time else 0.0
-    infer_age = now - state.latest_infer_time if state.latest_infer_time else 0.0
     if sampling.resolved_mode == "time":
         sample_text = f"sample={float(sampling.sample_period_sec):.3f}s"
     else:
         sample_text = f"sample={sampling.step_frames}f"
 
-    lines = [f"{state.display_name}",
-             f"frame={state.frame_index} infer={state.inferred_count} det={state.latest_det_count}",
-             f"{sample_text} payload={len(state.sample_window)} span={state.payload_window_span_sec:.1f}/{state.payload_history_sec:.1f}s",
-             f"age={frame_age:.1f}s infer_age={infer_age:.1f}s",
-            (f"CRITICAL low buffer <{state.payload_min_frames}/{state.payload_history_sec:.1f}s"
-             if state.critical_low_buffer else f"buffer_ok min={state.payload_min_frames}" ) ,
-             "connected" if state.connected else f"disconnected r={state.reconnect_count}",
-             state.last_error[:80] if state.last_error else "",
+    title_state = "connected" if state.connected else f"disconnected r={state.reconnect_count}"
+    lines = [(f"{state.display_name} : {title_state}", None),
+             (f"frame={state.frame_index} infer={state.inferred_count} det={state.latest_det_count}", None),
+             (f"{sample_text} payload={len(state.sample_window)} span={state.payload_window_span_sec:.1f}/{state.payload_history_sec:.1f}s", None),
+             (state.last_error[:80] if state.last_error else "", None),
              ]
-    for spec in temporal_probes:
-        lines.append(temporal_probe_status_line(state, spec))
+    for spec in stream_tms_specs(state, temporal_probes):
+        lines.append(temporal_probe_status_entry(state, spec))
     return lines
 
 
-def draw_status(tile: np.ndarray, lines: list[str]) -> np.ndarray:
+def draw_status(tile: np.ndarray, lines: list[tuple[str, tuple[int, int, int] | None]]) -> np.ndarray:
     out = tile.copy()
-    clean_lines = [line for line in lines if line]
+    clean_lines = [item for item in lines if item[0]]
     if not clean_lines:
         return out
     line_height = 20
@@ -634,10 +623,11 @@ def draw_status(tile: np.ndarray, lines: list[str]) -> np.ndarray:
     box_h = pad * 2 + line_height * len(clean_lines)
     overlay = out.copy()
     cv2.rectangle(overlay, (0, 0), (out.shape[1], box_h), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.55, out, 0.45, 0, out)
-    for idx, line in enumerate(clean_lines):
+    cv2.addWeighted(overlay, 0.60, out, 0.40, 0, out)
+    text_color = (230, 230, 230)
+    for idx, (line, color) in enumerate(clean_lines):
         y = pad + 15 + idx * line_height
-        cv2.putText(out, line, (pad, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(out, line, (pad, y), cv2.FONT_HERSHEY_SIMPLEX, 0.46, color or text_color, 1, cv2.LINE_AA)
     return out
 
 
@@ -678,21 +668,19 @@ def make_dashboard(
         rows.append(cv2.hconcat(tiles[start:start + columns]))
     dashboard = cv2.vconcat(rows)
 
-    max_width = int(display_cfg.get("max_width", 0) or 0)
-    max_height = int(display_cfg.get("max_height", 0) or 0)
+    max_width  = int(display_cfg.get('max_width', 0) or 0)
+    max_height = int(display_cfg.get('max_height', 0) or 0)
     scale = 1.0
     if max_width > 0 or max_height > 0:
         height, width = dashboard.shape[:2]
         if max_width > 0:
-            scale = min(scale, float(max_width) / max(float(width), 1.0))
+            scale = min(scale, float(max_width) /max(float(width), 1.0))
         if max_height > 0:
-            scale = min(scale, float(max_height) / max(float(height), 1.0))
+            scale = min(scale, float(max_height)/max(float(height), 1.0))
         if scale < 1.0:
-            dashboard = cv2.resize(
-                dashboard,
-                (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
-                interpolation=cv2.INTER_AREA,
-            )
+            dashboard = cv2.resize(dashboard,
+                             (max(1, int(round(width*scale))), max(1, int(round(height * scale)))),
+                                   interpolation=cv2.INTER_AREA, )
     return dashboard
 
 
@@ -733,13 +721,9 @@ def print_display_layout_once(
     return True
 
 
-def maybe_print_status(
-    states: list[StreamState],
-    sampling: SamplingConfig,
-    temporal_probes: list[TemporalWindowSpec],
-    interval_sec: float,
-    last_print: float,
-) -> float:
+def maybe_print_status( states: list[StreamState], sampling: SamplingConfig,
+                        temporal_probes: list[TemporalWindowSpec],
+                        interval_sec: float, last_print: float, ) -> float:
     if interval_sec <= 0:
         return last_print
     now = time.monotonic()
@@ -750,14 +734,12 @@ def maybe_print_status(
     for state in states:
         with state.lock:
             error_part = f" err={state.last_error[:80]}" if state.last_error else ""
-            critical_part = " CRIT_LOW_BUFFER" if state.critical_low_buffer else ""
-            probe_part = " ".join(temporal_probe_status_line(state, spec) for spec in temporal_probes)
-            parts.append(
-                f"{state.stream_id}: frame={state.frame_index} infer={state.inferred_count} "
-                f"det={state.latest_det_count} window={len(state.sample_window)} "
-                f"span={state.payload_window_span_sec:.1f}/{state.payload_history_sec:.1f}s "
-                f"connected={state.connected}{critical_part}{error_part} {probe_part}".strip()
-            )
+            probe_part = " ".join(temporal_probe_status_line(state, spec) for spec in stream_tms_specs(state, temporal_probes))
+            parts.append(f"{state.stream_id}: frame={state.frame_index} infer={state.inferred_count} "
+                         f"det={state.latest_det_count} window={len(state.sample_window)} "
+                         f"span={state.payload_window_span_sec:.1f}/{state.payload_history_sec:.1f}s "
+                         f"connected={state.connected}{error_part} {probe_part}".strip()
+                         )
     print("[STATUS] " + " | ".join(parts), flush=True)
     return now
 
@@ -765,7 +747,6 @@ def maybe_print_status(
 def close_display_windows(display_enabled: bool, window_name: str) -> None:
     if not display_enabled:
         return
-
     try:
         cv2.destroyWindow(window_name)
     except cv2.error:
@@ -788,15 +769,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config_path = args.config.resolve()
-    config = load_yaml(config_path)
+    config = load_runtime_config(config_path)
     sampling = resolve_sampling(config)
-    payload_history_sec, payload_min_frames = resolve_payload_buffer_policy(config)
+    payload_history_sec = resolve_payload_buffer_policy(config)
     runtime_feature_schema = build_feature_schema()
     temporal_probes = resolve_temporal_probes(config, first_present=first_present)
     states = enabled_streams(config,
                              config_path.parent,
-                             payload_history_sec=payload_history_sec,
-                             payload_min_frames=payload_min_frames)
+                             payload_span=payload_history_sec)
     enabled_ids, disabled_ids = stream_ids_by_enabled_state(config)
 
     model_cfg = dict(config.get("model", {}) or {})
@@ -844,8 +824,7 @@ def main() -> None:
     print("[INFO] "
           f"streams={len(states)} device={device} half={half} imgsz={imgsz} "
           f"sampling={sampling.resolved_mode} step_frames={sampling.step_frames} "
-          f"sample_period_sec={sampling.sample_period_sec} payload_history_sec={states[0].payload_history_sec} "
-          f"payload_min_frames={states[0].payload_min_frames}",
+          f"sample_period_sec={sampling.sample_period_sec} payload_history_sec={states[0].payload_history_sec}",
           flush=True,)
     print("[INFO] temporal_probes="
           + ", ".join(f"{spec.tag}(span={spec.window_span:.2f}s every={spec.t_infer:.2f}s "
@@ -858,14 +837,12 @@ def main() -> None:
           f"pure_motion={runtime_feature_schema['pure_motion']} legacy={runtime_feature_schema['legacy']}",
           flush=True)
 
-    tms_runtimes = load_tms_runtimes(config,
-                                     config_path.parent,
-                                     runtime_feature_schema,
-                                     temporal_probes,
-                                     device)
+    tms_runtimes = load_tms_runtimes(config, config_path.parent, runtime_feature_schema, temporal_probes, device)
     if tms_runtimes:
         print("[INFO] tms_models="
-              + ", ".join(f"{tag}:{runtime.model_path.name}@thr{runtime.threshold:.2f}"
+              + ", ".join(f"{tag}:{runtime.model_path.name}@thr{runtime.threshold:.2f} "
+                          f"pool={runtime.feature_schema.get('pool_mode', 'N/A') if runtime.feature_schema else 'N/A'} "
+                          f"dim={runtime.feature_schema.get('feature_dim', 'N/A') if runtime.feature_schema else 'N/A'}"
                           for tag, runtime in tms_runtimes.items()),
               flush=True)
     else:
@@ -961,20 +938,27 @@ def main() -> None:
                     # the shared payload history without running the model yet.
                     ready_probe_windows: list[tuple[TemporalWindowSpec, list[dict[str, Any]]]] = []
                     with item.state.lock:
-                        for spec in temporal_probes:
+                        for spec in stream_tms_specs(item.state, temporal_probes):
                             frames = collect_probe_window(item.state, spec, latest_t=float(payload["t"]))
                             if frames is not None:
                                 ready_probe_windows.append((spec, frames))
                     for spec, frames in ready_probe_windows:
                         try:
+                            runtime = tms_runtimes.get(spec.tag)
+                            feature_schema = runtime.feature_schema if runtime and runtime.feature_schema else runtime_feature_schema
                             clip_vec = get_clip_features_vec(
                                 frames,
-                                pure_motion=bool(runtime_feature_schema["pure_motion"]),
-                                legacy=bool(runtime_feature_schema["legacy"]),
-                                temp_smooth=bool(runtime_feature_schema["temp_smooth"]),
-                                temp_kernel=int(runtime_feature_schema["temp_kernel"]),
-                                pool_mode=str(runtime_feature_schema["pool_mode"]),
-                                j_version=float(runtime_feature_schema["extractor_version"]),
+                                pure_motion=bool(feature_schema["pure_motion"]),
+                                legacy=bool(feature_schema["legacy"]),
+                                temp_smooth=bool(feature_schema["temp_smooth"]),
+                                temp_kernel=int(feature_schema["temp_kernel"]),
+                                pool_mode=str(feature_schema["pool_mode"]),
+                                top_k_ratio=float(feature_schema["top_k_ratio"]),
+                                top_k_min=int(feature_schema["top_k_min"]),
+                                motion_fps_ref=feature_schema["motion_fps_ref"],
+                                motion_fps_min=float(feature_schema["motion_fps_min"]),
+                                motion_fps_max=float(feature_schema["motion_fps_max"]),
+                                j_version=float(feature_schema["extractor_version"]),
                             )
                         except Exception as exc:
                             with item.state.lock:
@@ -1026,6 +1010,7 @@ def main() -> None:
             thread.join(timeout=2.0)
         close_display_windows(display_enabled, window_name)
 
-# 1457(14!,1,,10) 1099
+# 1457(14!,1,,10) 1099 -> 1039(,1,)
+# 1059 -> 987
 if __name__ == "__main__":
     main()

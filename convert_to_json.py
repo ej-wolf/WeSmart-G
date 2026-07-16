@@ -1,4 +1,4 @@
-""" CLI interface for video_to_json_bb_keypoints_folder
+""" CLI interface for video_to_stream_data
     Converts one or more videos into structured JSON dict.
     YOLO detector used for people detection and extracting
     bound-boxes and key-points at frame level.
@@ -6,8 +6,7 @@
 
     Usage:
     >> convert_to_json.py [-h] VIDEO [-m MODEL] [-o OUT] [-s SAMPLE_RATE] [-c CONF]
-                              [-g GROUP_ANN [GROUP_ANN ...]] [-a ANN_FILE]
-                              [-t TENSION] [-f FIGHT] [-fa FALL]
+                              [-g GROUP_ANN [GROUP_ANN ...]] [-a ANN_PATH]
     Options:
       -h, --help                  show this help message and exit
       VIDEO                       Path to input video or dir of videos (.mp4, .mkv, ...)
@@ -16,14 +15,11 @@
       -s/--sample-rate RATE       Sampling rate in Hz
       -c/--conf CONF              YOLO detection confidence threshold
       -g/--group-ann [GROUP_ANN ...]  Default annotation for group event
-      -a/--ann-file ANN_FILE      Optional annotation text file
-      -t/--tension TENSION        Tension interval(s) in format START-END, e.g. 00:01:00-00:01:30, -00:00:40, 00:05:00-
-      -f/--fight FIGHT            Fight interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-
-      -fa/--fall FALL             Fall interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-
+      -a/--ann-path ANN_PATH      Optional annotation file or annotation directory
 """
 import argparse
 from pathlib import Path
-from video_to_json_bb_keypoints_folder import process_video
+from video_to_stream_data import process_video
 from common.my_local_utils import print_color
 
 def main():
@@ -35,10 +31,8 @@ def main():
     parser.add_argument( '-s', '--sample-rate', type=float, help="Sampling rate in Hz")
     parser.add_argument( '-c', '--conf', type=float, help="YOLO detection confidence threshold")
     parser.add_argument( '-g', '--group-ann', type=int, nargs='+', help="Default annotation for group event")
-    parser.add_argument( '-a', '--ann-file', type=Path, help="Optional annotation text file")
-    parser.add_argument( '-t', '--tension', action="append", help="Tension interval(s) in format START-END, e.g. 00:01:00-00:01:30, -00:00:40, 00:05:00-")
-    parser.add_argument( '-f', '--fight', action="append", help="Fight interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
-    parser.add_argument( '-fa','--fall', action="append", help="Fall interval(s) in format START-END, e.g. 00:02:10-00:02:40, 00:03:00-")
+    parser.add_argument( '-a', '--ann-path', '--ann-file', dest='ann_path', type=Path,
+                         help="Optional annotation file or annotation directory")
     parser.add_argument( '-sw', '--show', action='store_true', help='Show video during processing')
     parser.add_argument( '-z', '--zip', action='store_true', help='save JSONs as zip file')
 
@@ -46,20 +40,17 @@ def main():
     if args.conf is not None:
         print_color(args.conf)
 
-    process_kwargs = dict(input_path=args.video,
+    process_kwargs = dict(input_videos=args.video,
                           output_path=args.out,
-                          ann_file=args.ann_file,
-                          default_group_tag=args.group_ann,
-                          tension_intervals=args.tension,
-                          fight_intervals=args.fight,
-                          fall_intervals=args.fall,
+                          ann_path=args.ann_path,
+                          default_grp_tag=args.group_ann,
                           model_path=args.model,
                           zip_output=args.zip,)
                           # show=args.show)
     if args.sample_rate is not None:
         process_kwargs['sample_rate'] = args.sample_rate
     if args.conf is not None:
-        process_kwargs['conf_thresh'] = args.conf
+        process_kwargs['yolo_threshold'] = args.conf
     if args.show is not None:
         process_kwargs['show'] = args.show
 
