@@ -20,6 +20,7 @@ import torch
 from common.my_local_utils import as_collection, print_color
 from precompute_clips import RANDOM_SEED
 from project_utils import get_exporting_name, strip_split_suffix, strip_timestamp_prefix
+from stream_metric_tools import load_timeline_csv
 from scripts import train_models, test_models, infer_eval_threshold, evaluate_raw_test
 from torch_clip_model import run_training
 
@@ -353,16 +354,10 @@ def _compare_csv_with_tolerance(test_path: Path, ref_path: Path, *, atol: float)
 
 def _compare_timeline_csv(test_path: Path, ref_path: Path, *, atol: float) -> dict[str, Any]:
     """Compare one timeline CSV by label flips and probability drift."""
-    with test_path.open('r', encoding='utf-8', newline='') as f:
-        sample = f.readline()
-        f.seek(0)
-        delim = ';' if sample.count(';') > sample.count(',') else ','
-        test_rows = list(csv.DictReader(f, delimiter=delim))
-    with ref_path.open('r', encoding='utf-8', newline='') as f:
-        sample = f.readline()
-        f.seek(0)
-        delim = ';' if sample.count(';') > sample.count(',') else ','
-        ref_rows = list(csv.DictReader(f, delimiter=delim))
+    test_data = load_timeline_csv(test_path)
+    ref_data = load_timeline_csv(ref_path)
+    test_rows = test_data['rows']
+    ref_rows = ref_data['rows']
 
     if len(test_rows) != len(ref_rows):
         return {'ok': False, 'kind': 'csv', 'max_fp_err': 0.0,
@@ -370,8 +365,8 @@ def _compare_timeline_csv(test_path: Path, ref_path: Path, *, atol: float) -> di
                 'issue_type': 'shape', 'issue_count': 1}
 
     req_cols = {'win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob'}
-    test_cols = set(test_rows[0]) if test_rows else set()
-    ref_cols = set(ref_rows[0]) if ref_rows else set()
+    test_cols = set(test_data['fieldnames'])
+    ref_cols = set(ref_data['fieldnames'])
     pred_cols = sorted(col for col in test_cols if col == 'y_pred' or col.startswith('y_prd-'))
     if test_rows and (test_cols != ref_cols or not req_cols.issubset(test_cols) or not pred_cols):
         return {'ok': False, 'kind': 'csv', 'max_fp_err': 0.0,

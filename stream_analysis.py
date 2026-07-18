@@ -5,6 +5,8 @@ import numpy as np
 
 from common.my_local_utils import get_unique_name, print_color, serialize_json_data, resolve_output_path
 from project_utils import get_exporting_name, get_test_title_lines
+from stream_metric import get_timeline_timing
+from stream_metric_tools import load_timeline_csv
 from visual_util import plot_timeline
 from evaluation_core import (DEFAULT_ROC_RES, DEFAULT_EVAL_THRESHOLD, PRINT_POLICY, DEFAULT_THRESHOLD_RANGE,
                              cm_dict, companion_summary_name, get_eval_arrays, resolve_input, roc_summary,
@@ -428,6 +430,20 @@ def run_stream_event_analysis(stream_ctx) -> tuple[list[dict], dict]:
 
 def export_stream_timeline(report, timeline_dir, raw_res, threshold:float) -> tuple[Path, str]:
     """Create or extend one shared multi-threshold stream timeline CSV."""
+    def output_metadata_rows(rows):
+        timing = get_timeline_timing(rows, metadata)
+        source = Path(str(metadata.get('source', video_name))).name
+        fps = timing['fps']
+        fps = int(round(fps)) if abs(fps - round(fps)) < 0.05 else round(fps, 3)
+        win_span = round(timing['window_span'], 3)
+        infer_t = round(1.0/timing['frq_i'], 3)
+        return [['source', source],
+                ['win_span', win_span],
+                ['fps', fps],
+                ['infer_t', infer_t],
+                ['infer_frq', round(1.0/infer_t, 9)],
+                ['other data', '']]
+
     base_fields = ['win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob']
     video_name = report['video']
     video_tag = stream_video_tag(video_name)
@@ -439,15 +455,16 @@ def export_stream_timeline(report, timeline_dir, raw_res, threshold:float) -> tu
     pred_base = f"y_prd-{int(round(threshold*100.0))}"
     pred_column = pred_base
     existing_rows, fieldnames = [], []
+    metadata = {}
     if timeline_csv_path.is_file():
-        with timeline_csv_path.open('r', newline='', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            fieldnames = list(reader.fieldnames or [])
-            existing_rows = list(reader)
+        loaded = load_timeline_csv(timeline_csv_path)
+        fieldnames = loaded['fieldnames']
+        existing_rows = loaded['rows']
+        metadata = loaded['metadata']
 
         verified = (all(field in fieldnames for field in base_fields)
                     and len(existing_rows) == len(timeline_rows)
-                    and all(existing[field] == str(current[field])
+                    and all(existing[field] == current[field]
                             for existing, current in zip(existing_rows, timeline_rows)
                             for field in base_fields))
         if not verified:
@@ -456,6 +473,7 @@ def export_stream_timeline(report, timeline_dir, raw_res, threshold:float) -> tu
                 f"[WARN] Timeline verification failed for {timeline_csv_path}; creating {unique_path.name}", 'o')
             timeline_csv_path = unique_path
             existing_rows, fieldnames = [], []
+            metadata = {}
 
     if existing_rows:
         index = 2
@@ -472,6 +490,8 @@ def export_stream_timeline(report, timeline_dir, raw_res, threshold:float) -> tu
                      pred_column: row['y_pred']} for row in timeline_rows]
 
     with timeline_csv_path.open('w', newline='', encoding='utf-8') as f:
+        metadata_writer = csv.writer(f)
+        metadata_writer.writerows(output_metadata_rows(rows_out))
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows_out)

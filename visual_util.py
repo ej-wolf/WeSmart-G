@@ -21,6 +21,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from common.my_local_utils import _load_log_lines, _make_unique_dir, _save_log, print_color, get_unique_name
+from stream_metric_tools import load_timeline_csv
 
 FRAME_H, FRAME_W = 1080, 1920
 CENTER_SCALE = 0.12
@@ -576,29 +577,19 @@ def plot_timeline(csv_path, t_span=None, **kwargs):
         return base
 
     csv_path = Path(csv_path)
-    if not csv_path.is_file():
-        raise FileNotFoundError(f"timeline csv not found: {csv_path}")
-
-    rows = []
-    with csv_path.open('r', newline='', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append(row)
-
-    if not rows:
-        raise ValueError(f"timeline csv is empty: {csv_path}")
+    rows = load_timeline_csv(csv_path)['rows']
 
     label_key = 'gt_label' if 'gt_label' in rows[0] else 'y_true' if 'y_true' in rows[0] else None
     if 't_start' not in rows[0]:
         raise KeyError(f"timeline csv has no 't_start' column: {csv_path}")
-    t_frm = np.asarray([float(row['t_frm']) for row in rows], dtype=np.float64)
-    t_start = np.asarray([float(row['t_start']) for row in rows], dtype=np.float64)
-    y_prob = np.asarray([float(row['y_prob']) for row in rows], dtype=np.float64)
+    t_frm = np.asarray([row['t_frm'] for row in rows], dtype=np.float64)
+    t_start = np.asarray([row['t_start'] for row in rows], dtype=np.float64)
+    y_prob = np.asarray([row['y_prob'] for row in rows], dtype=np.float64)
     pred_column = kwargs.get('pred_column', 'y_pred')
     if pred_column not in rows[0]:
         raise KeyError(f"timeline csv has no '{pred_column}' column: {csv_path}")
-    y_pred = np.asarray([float(row[pred_column]) for row in rows], dtype=np.float64)
-    gt_label = (np.asarray([float(row[label_key]) for row in rows], dtype=np.float64)
+    y_pred = np.asarray([row[pred_column] for row in rows], dtype=np.float64)
+    gt_label = (np.asarray([row[label_key] for row in rows], dtype=np.float64)
                 if label_key is not None else None)
 
     plot_gt = bool(kwargs.get('plot_gt', gt_label is not None))
@@ -734,7 +725,7 @@ def tst_plot_timeline():
     # tst_f = Path(f"work_dirs/json_models/draft/stream-tst_J-RWL_25ft_3w-1o5/tst-12_F_141_0_0_0_0_timeline.csv")
     tst_f = Path(f"work_dirs/json_models/testing/cam6_11_5_y26/JRWL_25ft_3ws15_bm-148_cam6_11_5_y26_timeline.csv")
     plot_timeline(tst_f, plot_gt=True, gt_offset=0.1)
-    plot_timeline(tst_f, ('00:00','05:15'),plot_gt=True,gt_offset=0.5)
+    plot_timeline(tst_f, ('00:00', '05:15'),plot_gt=True,gt_offset=0.5)
     plot_timeline(tst_f, ('04:45', '10:15'), plot_gt=True, gt_offset=0.5)
     plot_timeline(tst_f, ('09:45', '15:15'), plot_gt=True, gt_offset=0.5)
     plot_timeline(tst_f, ('14:45', '20:15'), plot_gt=True, gt_offset=0.5)

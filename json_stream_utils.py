@@ -46,9 +46,12 @@ def _bbox_iou(box_1, box_2) -> float:
 
 
 #* region Stream JSON info *****************************#
+
 FPS_TOLERANCES = 0.2
 SJ_INFO_REPORT  = 'stream_json_info.json'
 SJ_INFO_SUMMARY = 'stream_json_info.csv'
+SJ_META_INFO = 'stream_meta_info.json'
+DEFAULT_STREAM_META_PATH = Path.cwd() /'work_dirs'/SJ_META_INFO
 
 def _frame_delta_stats(frames: list[dict[str, Any]]) -> tuple[list[float], float]:
     times = [float(frame.get('t', 0.0)) for frame in frames]
@@ -108,7 +111,7 @@ def print_stream_json_info(report: dict[str, Any], **kwargs) -> None:
 def stream_json_info(sj_path, op_path=None, **kwargs) -> dict[str, Any]:
     """Inspect one SJ directory or list of SJ files and return aggregated info."""
 
-    def _resolve_output_path(op_path: str | Path | None, save_format: str) -> Path | None:
+    def _resolve_output_path(op_path: str | Path | None, save_format: str)-> Path|None:
         if op_path is None:
             return None
         op_path = Path(op_path)
@@ -243,34 +246,157 @@ def stream_json_info(sj_path, op_path=None, **kwargs) -> dict[str, Any]:
     # return report
 
 
+def collect_stream_meta(sj_path, op_path=None) -> dict[str, Any]:
+    """Collect extendable per-stream metadata from plain or zipped SJ files."""
+    def _effective_fps(data: dict[str, Any]) -> float:
+        def valid(val) -> float | None:
+            return val if np.isfinite(val) and val > 0.0 else None
+
+        #* common format
+        sampling = data.get('sampling rate', data.get('sampling_rate'))
+        if isinstance(sampling, dict):
+            value = valid(sampling.get('effective'))
+            if value is not None:
+                return value
+
+        timing = data.get('timing')
+        value = valid(timing.get('sampling_rate_hz')) if isinstance(timing, dict) else None
+        if value is not None:
+            return value
+        #* legacy format
+        video_fps = valid(data.get('fps'))
+        step = valid(data.get('step'))
+        if video_fps is not None and step is not None:
+            return video_fps / step
+        raise ValueError('missing valid effective FPS')
+
+    def _entry_id(stem:str, fps:float| None, ylth:float|None) -> tuple:
+        return (stem,
+                None if fps is None else float(fps),
+                None if ylth is None else float(ylth))
+
+    if isinstance(sj_path, (list, tuple, set)):
+        sj_files = [resolve_json_source(path) for path in sj_path]
+        if not sj_files:
+            raise ValueError('No stream JSON files were provided')
+    else:
+        sj_path = Path(sj_path)
+        if sj_path.is_dir():
+            sj_files = list_json_sources(sj_path)
+            if not sj_files:
+                raise FileNotFoundError(f'No stream JSON files found in {sj_path}')
+        else:
+            sj_files = [resolve_json_source(sj_path)]
+
+    records, existing_ids = [], set()
+    output_path = Path(op_path) if op_path is not None else DEFAULT_STREAM_META_PATH
+    output_path = (output_path / SJ_META_INFO
+                   if output_path.is_dir() or output_path.suffix == '' else output_path)
+    if output_path.is_file():
+        with output_path.open('r', encoding='utf-8') as file:
+            saved = json.load(file)
+        saved_records = saved.get('streams', []) if isinstance(saved, dict) else []
+        if not isinstance(saved_records, list):
+            raise ValueError(f'Invalid streams list in {output_path}')
+        for record in saved_records:
+            if not isinstance(record, dict):
+                continue
+            record = dict(record)
+            record.pop('key', None)
+            records.append(record)
+            if record.get('stem') is not None:
+                existing_ids.add(_entry_id(record['stem'], record.get('fps'),
+                                           record.get('yolo_threshold')))
+
+    added, skipped, bad_files = [], [], []
+    for path in sj_files:
+        try:
+            data = load_json_raw(path)
+            frames = data.get('frames')
+            if not isinstance(frames, list):
+                raise ValueError('missing frames list')
+
+            stem = path.name[:-len('.json.zip')] if path.name.lower().endswith('.json.zip') else path.stem
+            fps = _effective_fps(data)
+            ylth = data.get('detection_threshold')
+            if ylth is None:
+                detector = data.get('detector')
+                ylth = detector.get('threshold') if isinstance(detector, dict) else None
+            ylth = float(ylth) if ylth is not None else None
+
+            counts = []
+            for frame in frames:
+                detections = frame.get('bbs_list_of_keypoints')
+                if detections is None:
+                    detections = frame.get('detection_list', frame.get('detections_list', []))
+                counts.append(len(detections) if isinstance(detections, (list, tuple)) else 0)
+
+            entry_id = _entry_id(stem, fps, ylth)
+            if entry_id in existing_ids:
+                skipped.append({'stem': stem, 'fps': fps, 'yolo_threshold': ylth})
+                continue
+
+            longest_run = current_run = 0
+            for count in counts:
+                current_run = current_run + 1 if count > 0 else 0
+                longest_run = max(longest_run, current_run)
+
+            duration = (max(0.0, float(frames[-1].get('t', 0.0))
+                           - float(frames[0].get('t', 0.0))) if len(frames) > 1 else 0.0)
+            record = {'stem': stem, 'fps': fps, 'yolo_threshold': ylth,
+                      'duration': duration,
+                      'frames': len(frames),
+                      'person_dets': sum(counts), 'max_dets_frame': max(counts, default=0),
+                      'consecutive_det_frames': longest_run}
+            records.append(record)
+            existing_ids.add(entry_id)
+            added.append(record)
+        except Exception as error:
+            print_color(f'[WARN] collect_stream_meta skipped {path}: '
+                        f'{type(error).__name__}: {error}', 'y')
+            bad_files.append({'file': str(path),
+                              'error': f'{type(error).__name__}: {error}'})
+
+    if output_path is not None and added:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {'version': 1, 'streams': records}
+        with output_path.open('w', encoding='utf-8') as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+
+    return {'path': str(output_path) if output_path is not None else None,
+            'added': added,
+            'skipped': skipped,
+            'bad_files': bad_files,
+            'count': len(records)}
+
+
 def draw_json_streams(json_path, criteria, cutoff: float, **kwargs) -> tuple[list[Path], dict[str, float]]:
     """ Draw random SJs until the selected duration criteria reaches
         cutoff within tolerance."""
 
-    def _load_sj_list(json_path) -> list[Path]:
-        if isinstance(json_path, (list, tuple, set)):
-            paths = [resolve_json_source(p) for p in json_path]
+    def _load_sj_list(p) -> list[Path]:
+        if isinstance(p, (list, tuple, set)):
+            paths = [resolve_json_source(p) for p in p]
             if not paths:
                 raise ValueError('No stream JSON files were provided')
             return paths
-
-        json_path = Path(json_path)
-        if json_path.is_dir():
-            paths = list_json_sources(json_path)
+        p = Path(p)
+        if p.is_dir():
+            paths = list_json_sources(p)
             if not paths:
-                raise FileNotFoundError(f'No stream JSON files found in {json_path}')
+                raise FileNotFoundError(f'No stream JSON files found in {p}')
             return paths
         try:
-            return [resolve_json_source(json_path)]
+            return [resolve_json_source(p)]
         except FileNotFoundError:
             pass
-        raise FileNotFoundError(json_path)
+        raise FileNotFoundError(p)
 
-    def _normalize_criteria(criteria) -> tuple[list[str | int], list[Any]]:
-        crits = list(criteria) if isinstance(criteria, (list, tuple, set)) else [criteria]
-        crits = ['t_total' if crit == 'total' else crit for crit in crits]
+    def _normalize_criteria(crt) -> tuple[list[str | int], list[Any]]:
+        crt_ls = list(crt) if isinstance(crt, (list, tuple, set)) else [crt]
+        crt_ls = ['t_total' if crit == 'total' else crit for crit in crt_ls]
         valid = {'t_total', 'empty', TAG_NO_EVENT, TAG_ABNORMAL, TAG_FALL, TAG_TENSION, TAG_FIGHT}
-        return [crit for crit in crits if crit in valid], [crit for crit in crits if crit not in valid]
+        return [crit for crit in crt_ls if crit in valid], [crit for crit in crt_ls if crit not in valid]
 
     def _stream_duration(frames: list[dict[str, Any]]) -> float:
         if len(frames) < 2:
@@ -412,7 +538,7 @@ def draw_json_streams(json_path, criteria, cutoff: float, **kwargs) -> tuple[lis
 
 
 def collect_jsons(json_ls, src_dir, trg_dir) -> list[Path]:
-    """Copy selected SJ files into trg_dir from src_dir or absolute list entries."""
+    """ Copy selected SJ files into trg_dir from src_dir or absolute list entries."""
 
     def _load_list(jls) -> list[Path]:
         if isinstance(jls, (str, Path)):
@@ -455,7 +581,6 @@ def collect_jsons(json_ls, src_dir, trg_dir) -> list[Path]:
     return copied
 
 #* endregion *#
-
 
 #* region Stream JSON compare **************************#
 DEFAULT_SJ_NUMERIC_TOLERANCES = {'avg_abs': 0.05, 'max_abs': 0.05}
@@ -821,7 +946,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         help='output directory for converted stream JSON files')
     return parser
 
-#349 -#536(4!0,3,2)-> 373 (0,1,0) -> 336(,2,)
-#600(1,9,1)
+#349- 600(1,9,1)
+#824(3,14,4)-> add info-collection
+#983(3,31,6) -> 952(3,18,8)->950(3,15,5)
+
 if __name__ == '__main__':
     pass
