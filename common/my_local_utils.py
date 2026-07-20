@@ -23,7 +23,7 @@ def print_color(msg:str, clr=Fore.RED):
     print( f"{clr}{msg}{Style.RESET_ALL}")
 
 
-# ***** Collection casting ***** #
+#* region *** Collection casting ***** #
 def as_collection(x):
     """  If x is a collection (list/tuple/set/dict/range/numpy array/torch tensor/etc.)
     return it as-is. Otherwise, wrap it in a single-element list.
@@ -61,7 +61,23 @@ def as_collection(x):
 
 collection = as_collection
 
-# ***** General Files/ Paths sys Utils ***************************************#
+# endregion
+
+
+def _fmt(value, **kwargs):
+    """Format a number by decimal/significant digits and optional total length."""
+    if value is None:
+        return 'N/A'
+    if not isinstance(value, float):
+        return str(value)
+    d = kwargs.get('d', 3)
+    s = kwargs.get('s')
+    length = kwargs.get('l')
+    text = f'{value:.{s}g}' if s is not None else f'{value:.{d}f}'
+    return text.zfill(length) if length is not None else text
+
+
+#* region *** General Files/ Paths sys Utils ***************************************#
 # -----------------------------------------------------------------------------
 
 def get_unique_name(file_name:str|Path, n:int=3) -> Path:
@@ -212,8 +228,9 @@ def _make_unique_dir(root, base_name, **kwargs):
     clip_dir.mkdir(parents=True, exist_ok=True)
     return clip_dir, clip_name
 
+# endregion
 
-#* region ***** Compressing Utils  ****************************************************#
+#* region *** Compressing Utils  ****************************************************#
 
 def zip_dir(target_dir:Path|str, method='file', protocol='zip', rm_policy='ask', mask=None):
     """ Compress a directory either child-by-child or as one archive.
@@ -361,6 +378,7 @@ def _extract_zip_file(zip_path: str | Path, out_dir: str | Path | None = None):
     return [out_dir / name for name in names]
 
 # endregion
+
 
 # ***** JSON  Utils  *********************************************************#
 def serialize_json_data(value):

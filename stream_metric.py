@@ -1,4 +1,4 @@
-"""Timestamp-based metrics for one or more stream timeline CSV files."""
+""" Timestamp-based metrics for one or more stream timeline CSV files."""
 import math
 from bisect import bisect_left
 from statistics import median
@@ -9,7 +9,6 @@ K_MAX = 4
 ALARM_COST = 60.0
 ALARM_HALF_RATE = 4.0
 FP_WEIGHT = 0.4
-
 
 #* region Public API  ---------------------------------------------------
 # -----------------------------------------------------------------------
@@ -59,8 +58,7 @@ def get_timeline_timing(rows: list[dict], metadata: dict | None = None) -> dict:
     """ Resolve FPS, window span, and inference frequency for timeline rows."""
 
     metadata = metadata or {}
-    spans = [row['t_frm'] - row['t_start'] for row in rows
-             if row['t_frm'] > row['t_start']]
+    spans = [row['t_frm'] - row['t_start'] for row in rows  if row['t_frm'] > row['t_start']]
     if not spans:
         raise ValueError("timeline has no positive window spans")
 
@@ -92,13 +90,14 @@ def get_timeline_timing(rows: list[dict], metadata: dict | None = None) -> dict:
 
 
 def evaluate_stream(timeline: dict, pred_col=None, threshold=None, **kwargs) -> dict:
-    """Evaluate one already-loaded timeline dictionary."""
+    """ Evaluate one already-loaded timeline dictionary."""
     pred_col, threshold, params = _resolve_eval_params(pred_col, threshold, kwargs)
     return _evaluate_timeline(timeline, pred_col, threshold, params)
 
 
 def eval_multi_streams(timelines, pred_col=None, threshold=None, **kwargs) -> dict:
-    """Evaluate multiple loaded timelines and aggregate their reports."""
+    """ Evaluate multiple loaded timelines and aggregate their reports."""
+
     pred_col, threshold, params = _resolve_eval_params(pred_col, threshold, kwargs)
     stream_reports = []
     for t_line in timelines:
@@ -110,9 +109,9 @@ def eval_multi_streams(timelines, pred_col=None, threshold=None, **kwargs) -> di
 
     valid_streams = [report for report in stream_reports if report['status'] == 'pass']
     stream_events = [stream['events'] for stream in valid_streams]
-    gt_events   = sum(event['gt']   for event in stream_events)
-    full_events = sum(event['full'] for event in stream_events)
-    half_events = sum(event['half'] for event in stream_events)
+    gt_events   = sum(event['gt']    for event in stream_events)
+    full_events = sum(event['full']  for event in stream_events)
+    half_events = sum(event['half']  for event in stream_events)
     fp_events   = sum(event['false'] for event in stream_events)
     t_events    = sum(event['duration']['total'] for event in stream_events)
     t_neg = sum(stream['time']['t_neg'] for stream in valid_streams)
@@ -131,10 +130,10 @@ def eval_multi_streams(timelines, pred_col=None, threshold=None, **kwargs) -> di
         fp_rate = fp_events/(t_neg/3600.0)
         cc = 2.0**(-fp_rate/params['half_rate']) #* count_credit
         fp_scr = tn_rate*cc
-        burden = (t_fp + params['fp_cost']*fp_events)/t_neg
-        fp_burden = 1.0/(1.0 + burden)
+        fp_burden = (t_fp + params['fp_cost']*fp_events)/t_neg
+        burden_scr = 1.0/(1.0 + fp_burden)
     else:
-        tn_rate = fp_rate = cc = fp_scr = burden = fp_burden = None
+        tn_rate = fp_rate = cc = fp_scr = fp_burden = burden_scr = None
 
     if recall is None or fp_scr is None:
         total_scr = None
@@ -147,7 +146,9 @@ def eval_multi_streams(timelines, pred_col=None, threshold=None, **kwargs) -> di
     status = 'fail' if not valid_streams else 'partial' if failed_num else 'pass'
     return {'status': status,
             'prediction': {'column': pred_col, 'threshold': threshold},
-            'scores': {'recall': recall, 'fp': fp_scr,  'fp_burden': fp_burden, 'total': total_scr},
+            'scores': {'recall': recall,
+                       'fp': fp_scr, 'fp_burden': fp_burden, 'burden_scr': burden_scr,
+                       'total': total_scr},
             'time'  : {'total': sum(stream['time']['total'] for stream in valid_streams),
                        't_neg': t_neg, 't_fp': t_fp, 't_tn': t_tn},
             'events': {'gt': gt_events,
@@ -156,45 +157,44 @@ def eval_multi_streams(timelines, pred_col=None, threshold=None, **kwargs) -> di
                        'false': fp_events, 'fp_per_h': fp_rate,
                        'duration': {'total': t_events, 'longest': longest_event},
                        'avg_lag': avg_lag},
-            'components': {'tn_rate': tn_rate, 'count_credit': cc, 'burden_ratio': burden},
+            'components': {'tn_rate': tn_rate, 'count_credit': cc},
             'params' : params,
             'streams': stream_reports}
 
 
 def eval_multi_thresholds(timelines, thresholds=None, pred_cols=None, **kwargs) -> list[dict]:
     """Evaluate the same timelines at multiple thresholds or prediction columns."""
+
     def selectors(values, name):
         if values is None:
             return []
         values = ([values] if isinstance(values, str) or not hasattr(values, '__iter__')
                   else list(values))
         if not values:
-            raise ValueError(f"{name} cannot be empty")
+            raise ValueError(f"{name} can not be empty")
         values = ([str(value) for value in values] if name == 'pred_cols'
                   else [float(value) for value in values])
         return list(dict.fromkeys(values))
 
     thresholds = selectors(thresholds, 'thresholds')
-    pred_cols = selectors(pred_cols, 'pred_cols')
+    pred_cols  = selectors(pred_cols, 'pred_cols')
     if bool(thresholds) == bool(pred_cols):
         raise ValueError("provide exactly one of thresholds or pred_cols")
-    if any(not 0.0 < threshold < 1.0 for threshold in thresholds):
+    if any(not 0.0 < th < 1.0 for th in thresholds):
         raise ValueError("thresholds must be between 0 and 1")
 
     timelines = list(timelines)
     if thresholds:
-        return [eval_multi_streams(timelines, threshold=threshold, **kwargs)
-                for threshold in thresholds]
-    return [eval_multi_streams(timelines, pred_col=pred_col, **kwargs)
-            for pred_col in pred_cols]
+        return [eval_multi_streams(timelines, threshold=th, **kwargs) for th in thresholds]
+    else:
+        return [eval_multi_streams(timelines, pred_col=prd, **kwargs) for prd in pred_cols]
 
 # endregion
-
 
 #* region Helpers  ------------------------------------------------------
 # -----------------------------------------------------------------------
 def _resolve_eval_params(pred_col, threshold, kwargs):
-    """Validate prediction selection and resolve the shared metric parameters."""
+    """ Validate prediction selection and resolve the shared metric parameters."""
     if (pred_col is None) == (threshold is None):
         raise ValueError("provide exactly one of pred_col or threshold")
     if pred_col is not None:
@@ -209,7 +209,7 @@ def _resolve_eval_params(pred_col, threshold, kwargs):
 
 
 def _evaluate_timeline(timeline, pred_col, threshold, params):
-    """Calculate metrics for one validated timeline dictionary."""
+    """ Calculate metrics for one validated timeline dictionary."""
 
     rows = sorted(timeline['rows'], key=lambda row: row['t_frm'])
     required = {'t_frm', 't_start', 'gt_label', 'n_frm'}

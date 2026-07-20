@@ -10,6 +10,7 @@ import yaml
 
 from stream_metric import eval_multi_thresholds, resolve_metric_config
 from json_stream_utils import DEFAULT_STREAM_META_PATH, SJ_META_INFO
+from common.my_local_utils import _fmt
 
 
 MAIN_DIR = Path(__file__).resolve().parent
@@ -198,11 +199,10 @@ def _attach_stream_meta(result: dict, meta_path: Path | None) -> dict:
 
 def run_stream_metrics(stream_path, pred_col=None, threshold=None, **kwargs) -> dict:
     """Find, load, and evaluate one or more timeline CSV files."""
-    reports = run_multi_thresholds(
-        stream_path,
-        thresholds=None if threshold is None else [threshold],
-        pred_cols=None if pred_col is None else [pred_col],
-        **kwargs)
+    reports = run_multi_thresholds( stream_path,
+              thresholds=None if threshold is None else [threshold],
+              pred_cols=None if pred_col is None else [pred_col],
+              **kwargs)
     return reports[0]
 
 
@@ -269,9 +269,6 @@ def print_stream_metric(report: dict, **kwargs):
         m, s = divmod(m_rem, 60)
         return f'{h:02d}:{m:02d}:{s:02d}'
 
-    def fmt_seconds(value):
-        return 'N/A' if value is None else f'{float(value):.2f}'
-
     def stream_name(stream):
         source = stream.get('stream')
         if source:
@@ -294,39 +291,30 @@ def print_stream_metric(report: dict, **kwargs):
         return 'N/A' if value is None else str(value)
 
     def false_detection_rate(stream):
-        detections = stream.get('stream_meta', {}).get('person_dets')
-        if detections is None or detections <= 0:
+        dets = stream.get('stream_meta', {}).get('person_dets')
+        if dets is None or dets <= 0:
             return 'N/A'
-        return f'{stream.get("events", {}).get("false", 0) * 1000 / detections:.2f}'
+        return f'{stream.get("events", {}).get("false", 0) * 1000/dets:.2f}'
 
-    def derived_events(event_data):
-        gt = event_data.get('gt')
-        full = event_data.get('full')
-        half = event_data.get('half')
-        if not all(isinstance(value, (int, float)) for value in (gt, full, half)):
-            return 'N/A', 'N/A'
-        detections = full + half
-        return detections, gt - detections
     prediction = report.get('prediction', {})
     scores = report.get('scores', {})
     time_info = report.get('time', {})
     events = report.get('events', {})
+    multi_thresholds = bool(kwargs.get('multi_thresholds', False))
+    det = events['full'] + events['half']
+    mis = events['gt'] - det
 
     print("\n=== Stream Metric ===")
-    print(f"Status:       {report.get('status', 'N/A')}")
-    print(f"Prediction:   {prediction.get('column') or 'y_prob'}"
-          f"  threshold={prediction.get('threshold')}")
-    print(f"Recall:       {_fmt(scores.get('recall'))}")
-    print(f"FP score:     {_fmt(scores.get('fp'))}")
-    print(f"FP burden:    {_fmt(scores.get('fp_burden'))}")
-    print(f"Total score:  {_fmt(scores.get('total'))}")
-    print(f"Time:         {_fmt(time_info.get('total'))} s total, "
-          f"{_fmt(time_info.get('t_fp'))} s false positive")
-    print(f"Events:       GT={events.get('gt', 'N/A')} "
-          f"full={events.get('full', 'N/A')} "
-          f"half={events.get('half', 'N/A')} "
-          f"missed={derived_events(events)[1]} "
-          f"false={events.get('false', 'N/A')}")
+    print(f"Status:      {report.get('status', 'N/A')}")
+    print(f"Prediction:  {prediction.get('column') or 'y_prob'},  threshold={prediction.get('threshold')}")
+    print(f"Duration:    Total = {fmt_duration(time_info['total'])}, GT events = {fmt_duration(events['duration']['total'])}")
+    if not multi_thresholds:
+        print(f"Events:      GT = {events.get('gt', 'N/A')};  detected = {det};  missed = {mis};"
+              f"  false = {events.get('false', 'N/A')}")
+        print(f"Recall:      {_fmt(scores.get('recall'))}")
+        print(f"FP:          burden = {_fmt(scores.get('fp_burden'))};  score = {_fmt(scores.get('fp'))}")
+        print(f"Total score: {_fmt(scores.get('total'))}")
+
 
     if not results_table:
         return report
@@ -336,80 +324,75 @@ def print_stream_metric(report: dict, **kwargs):
     headers = ['Status', 'Stream', 'Total(s)', 'GT dur', 'Longest']
     if show_meta:
         headers += ['P dets', 'Max P/f', 'Max run']
-    headers += ['GT', 'Detected', 'Lag (s)', 'Missed', 'False',
-                f'False/{fp_unit}']
+    headers += ['GT', 'Detected', 'Lag (s)', 'Missed', 'False', f'False/{fp_unit}']
     if show_meta:
-        headers.append('False/P (1k)')
+        headers += ['False/P (1k)']
     table = []
+
     for stream in streams:
         stream_events = stream.get('events', {})
         event_duration = stream_events.get('duration', {})
-        detections, missed = derived_events(stream_events)
-        row = [
-            str(stream.get('status', 'N/A')),
-            stream_name(stream),
-            fmt_duration(stream.get('time', {}).get('total')),
-            fmt_duration(event_duration.get('total')),
-            fmt_duration(event_duration.get('longest')),
-        ]
+        if stream_events:
+            detections = stream_events['full'] + stream_events['half']
+            missed = stream_events['gt'] - detections
+        else:
+            detections = missed = 'N/A'
+        row = [stream.get('status', 'N/A'),
+               stream_name(stream),
+               fmt_duration(stream.get('time', {}).get('total')),
+               fmt_duration(event_duration.get('total')),
+               fmt_duration(event_duration.get('longest')),]
         if show_meta:
             row += [meta_value(stream, 'person_dets'),
                     meta_value(stream, 'max_dets_frame'),
                     meta_value(stream, 'consecutive_det_frames')]
-        row += [
-            str(stream_events.get('gt', 'N/A')),
-            str(detections),
-            fmt_seconds(stream_events.get('avg_lag')),
-            str(missed),
-            str(stream_events.get('false', 'N/A')),
-            false_rate(stream),
-        ]
+        row += [str(stream_events.get('gt', 'N/A')),
+                str(detections),
+                _fmt(stream_events.get('avg_lag'), d=2),
+                str(missed),
+                str(stream_events.get('false', 'N/A')),
+                false_rate(stream),]
         if show_meta:
-            row.append(false_detection_rate(stream))
+            row += [false_detection_rate(stream)]
         table.append(tuple(row))
 
     if total_row:
         event_duration = events.get('duration', {})
-        detections, missed = derived_events(events)
-        row = [
-            'Total', str(len(table)),
-            fmt_duration(time_info.get('total')),
-            fmt_duration(event_duration.get('total')),
-            fmt_duration(event_duration.get('longest')),
-        ]
+        row = ['Total', str(len(table)),
+                fmt_duration(time_info.get('total')),
+                fmt_duration(event_duration.get('total')),
+                fmt_duration(event_duration.get('longest')),]
         if show_meta:
             row += [meta_value(report, 'person_dets'),
                     meta_value(report, 'max_dets_frame'),
                     meta_value(report, 'consecutive_det_frames')]
-        row += [
-            str(events.get('gt', 'N/A')),
-            str(detections),
-            fmt_seconds(events.get('avg_lag')),
-            str(missed),
-            str(events.get('false', 'N/A')),
-            ('N/A' if events.get('fp_per_h') is None else
-             f"{(events['fp_per_h'] if fp_unit == 'h' else events['fp_per_h']/60.0):.{1 if fp_unit == 'h' else 2}f}"),
-        ]
+        row += [str(events.get('gt', 'N/A')),
+                str(det),
+                _fmt(events.get('avg_lag'), d=2),
+                str(mis),
+                str(events.get('false', 'N/A')),
+                ('N/A' if events.get('fp_per_h') is None else
+                 f"{(events['fp_per_h'] if fp_unit == 'h' else events['fp_per_h']/60.0):.{1 if fp_unit=='h' else 2}f}"),
+                ]
         if show_meta:
-            row.append('N/A' if not report.get('stream_meta', {}).get('person_dets') else
-                       f"{events.get('false', 0) * 1000 / report['stream_meta']['person_dets']:.2f}")
+            row+= ['N/A' if not report.get('stream_meta', {}).get('person_dets') else
+                       f"{events.get('false', 0)*1000/report['stream_meta']['person_dets']:.2f}"]
         table.append(tuple(row))
 
-    widths = [max(5, len(header)) for header in headers]
+    widths = [max(5, len(hd)) for hd in headers]
     for row in table:
         widths = [max(width, len(value)) for width, value in zip(widths, row)]
     alignments = ['<', '<', '>', '>', '>']
     if show_meta:
         alignments += ['^', '^', '^']
-    alignments += ['^'] * 7
+    alignments += ['^']*7
     print(' | '.join(f'{header:{align}{width}}'
                      for header, align, width in zip(headers, alignments, widths)))
     print('-+-'.join('-' * width for width in widths))
     for row in table:
         if total_row and row is table[-1]:
             print('-+-'.join('-' * width for width in widths))
-        print(' | '.join(f'{value:{align}{width}}'
-                         for value, align, width in zip(row, alignments, widths)))
+        print(' | '.join(f'{v:{a}{w}}' for v, a, w in zip(row, alignments, widths)))
     return report
 
 
@@ -443,6 +426,7 @@ def print_multi_thresholds(reports: list[dict], **kwargs):
 
     reports = list(reports)
     if kwargs.get('results_table', False):
+        kwargs['multi_thresholds'] = True
         for index, report in enumerate(reports):
             if index:
                 print()
@@ -501,19 +485,6 @@ def save_stream_metric(report: dict | list[dict], output_path) -> Path:
 # endregion
 
 
-#* region Helpers  ------------------------------------------------------
-# -----------------------------------------------------------------------
-def _fmt(value):
-    if value is None:
-        return 'N/A'
-    if isinstance(value, float):
-        return f'{value:.4f}'
-    return str(value)
-
-
-# endregion
-
-
 #* region CLI  ----------------------------------------------------------
 # -----------------------------------------------------------------------
 def main():
@@ -539,17 +510,16 @@ def main():
 
     selectors = args.threshold if args.threshold is not None else args.pred_col
     if len(selectors) == 1:
-        report = run_stream_metrics(
-            args.stream_path,
-            pred_col=args.pred_col[0] if args.pred_col is not None else None,
-            threshold=args.threshold[0] if args.threshold is not None else None,
-            config_path=args.config, meta_info=args.meta_info)
+        report = run_stream_metrics(args.stream_path,
+                            pred_col = args.pred_col[0] if args.pred_col is not None else None,
+                            threshold= args.threshold[0] if args.threshold is not None else None,
+                            config_path=args.config, meta_info=args.meta_info)
         print_stream_metric(report, results_table=args.results_table, total_row=args.total_row,
                             fp_unit=args.fp_unit, meta_info=args.meta_info)
     else:
-        report = run_multi_thresholds(
-            args.stream_path, thresholds=args.threshold, pred_cols=args.pred_col,
-            config_path=args.config, meta_info=args.meta_info)
+        report = run_multi_thresholds(args.stream_path,
+                            thresholds=args.threshold, pred_cols=args.pred_col,
+                            config_path=args.config, meta_info=args.meta_info)
         print_multi_thresholds(report, results_table=args.results_table,
                                total_row=args.total_row, fp_unit=args.fp_unit,
                                meta_info=args.meta_info)
@@ -558,7 +528,7 @@ def main():
 
 
 # endregion
-#561(,14,1)
+#561(,14,1) ->530(,13,1)
 
 if __name__ == '__main__':
     main()
