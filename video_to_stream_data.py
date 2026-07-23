@@ -1,0 +1,484 @@
+""" * The unit converts one or more videos into structured JSON annotations.
+    A YOLO detector is used to perform per-frame person detection and
+    extract bounding boxes and keypoints. Optional time-based labeling
+    can be applied at frame level using predefined intervals or default tags.
+
+    * The unit is wrapped into CLI in convert_to_json.py via process_video function.
+
+    * JSON structure:
+       {'video' : "...",                #* video/file name
+        'fps': 25.0,                    #* video fps according to metadata
+        'sampling_rate':{'target':,     #* desired/target for analyzing (Hz)
+                         'effective':   #*
+                        },
+        'detector': {...}                 #* info abot the detector used to detect BB and KP
+        'event_intervals': {...}          #*
+        'frames':[{'f': 15,               #* frame index
+                   't': 0.6,              #* time from start in seconds
+                   'individual_events': [],
+                   'group_events': [2, 3],
+                   'detection_list':[     #* list of YOLO detections (human)
+                            {'class':     #* normal,  fall ...
+                             'conf':      #* confidence of 'class'
+                             'bbox':      #* [x1, y1, x2, y2] in normalized unit
+                             'key_points': [x1, y1, c1, x2, y2, c2, ....  x17, y17, c17]
+                                          #* flatten vector of 17 key points (x,y) and it's confidence (c)
+                                     ]
+                  },]
+         `      ...
+"""
+import cv2, hashlib, json, platform, torch
+from pathlib import Path
+import ultralytics
+from ultralytics import YOLO
+from ultralytics.utils.checks import check_imgsz
+from annotations import load_event_ann, resolve_event_time
+#* import from my utils
+from common.my_local_utils import get_unique_name, print_color, zip_one_path
+
+#* Defaults and constants  -------------------------------------------------------------------
+YOLO_THRESHOLD = 0.5
+DEFAULT_SAMPLING = 5
+SPLIT_EPS = 1e-9
+
+#* Events flags
+TAG_NO_EVENT = 0
+TAG_ABNORMAL = 1
+TAG_FALL     = 2
+TAG_TENSION  = 3
+TAG_FIGHT    = 4
+SPLIT_TAGS   = {'S', 's'}
+EXCLUDE_TAGS = {'X', 'x'}
+EVENT_INTERVAL_NAMES = {TAG_ABNORMAL: 'abnormal',
+                        TAG_FALL: 'fall',
+                        TAG_TENSION: 'tension',
+                        TAG_FIGHT: 'fight'}
+
+MODELS_DIR = 'models/'
+DEFAULT_YOLO = MODELS_DIR + "yolo26x-pose.pt"
+ZIP_JSONS = True
+VIDEO_SUFFIXES = {'.mp4', '.avi', '.mkv', '.mov', '.m4v'}
+#* "yolo26x-pose.pt" / "yolo11x-pose.pt" / "yolov8s.pt"
+
+def _is_video(f:str|Path):
+    f = Path(f)
+    return  f.is_file() and f.suffix.lower() in VIDEO_SUFFIXES
+
+
+def parse_annotation_file(ann_path):
+    """ Load event annotations into converter intervals by numeric or special flag."""
+    event_intervals = {}
+    split_intervals, exclude_intervals = [], []
+    for event in load_event_ann(ann_path).get('events', []):
+        event_flag = event.get('flag')
+        interval = (resolve_event_time(event.get('start')),
+                    resolve_event_time(event.get('end')))
+        if isinstance(event_flag, str):
+            if event_flag in SPLIT_TAGS:
+                split_intervals.append(interval)
+            elif event_flag in EXCLUDE_TAGS:
+                exclude_intervals.append(interval)
+            continue
+        else:
+            event_intervals.setdefault(int(event_flag), []).append(interval)
+
+    return {'events': event_intervals, 'split': split_intervals, 'exclude': exclude_intervals}
+
+#* region --- Main function, to be used from other unit ---------------------------------------
+def process_video(input_videos: Path|str|list,
+                  output_path:  Path|str = None,
+                  sample_rate = DEFAULT_SAMPLING,
+                  yolo_thresh = YOLO_THRESHOLD,
+                  ann_path: str|Path = None,
+                  default_grp_tag = None,
+                  **kwargs):
+    """ Converts one or more videos into structured JSON annotations.
+    A YOLO detector is used to perform per-frame person detection and extract bounding boxes
+    and keypoints. Optional time-based labeling can be applied at frame level using predefined
+    intervals or default tags. Process video file/dir of files.
+    Parameters:
+    :param Path input_videos:
+                - If file       → process single video
+                - If dir        → process all files inside
+    :param Path|None output_path:
+            - None              → save next to video (same name, .json)
+            - directory         → save inside directory with video name
+            - file path         → save exactly to that file
+    Conversion parameters:
+    :param sample_rate:         → Sampling rate for JSON conversion (in Hz)
+    :param yolo_thresh:         → YOLO detection confidence threshold
+    :param default_grp_tag:     → Assign default events to all frames by default
+    :param ann_path:            → Optional annotation file or annotation directory with rows:
+                                start_time,\t  end_time,\t    event_flag
+                                Supported event flags: numeric tags, S/s (split), X/x (exclude)
+                                annotation file intervals override the default group tag
+                                If ann_path is None, search for one of:
+                                <video_stem>.txt, <video_stem>.ann, or <video_stem>
+    :param kwargs Options
+    skip_without_ann:           → If True, skip videos that have no usable annotation file.
+    ignore_split:               → If True, do not split output; mark the sampled frame nearest
+                                 each split start with stream_event: ['S'].
+    use_old_meta:               → Optional kwargs flag. If True, write the old compact detector metadata.
+    """
+
+    def find_ann_file(vid:str|Path):
+        """Find the annotation file selected for one video."""
+        if   ann_mode == 'file':
+            return ann_source
+        elif ann_mode == 'dir':
+            ann_stem = ann_source / vid.stem
+        elif ann_mode == 'auto':
+            ann_stem = vid
+        else:
+            return None
+
+        candidates = (ann_stem.with_suffix(".ann"),
+                      ann_stem.with_suffix(".txt"),
+                      ann_stem.with_suffix(""))
+        for cand in candidates:
+            if cand.is_file():
+                return cand
+        return None
+
+    def as_event_list(tags):
+        if tags is None:
+            return []
+        if isinstance(tags, (list, tuple, set)):
+            return list(tags)
+        return [tags]
+
+    def in_any_interval(t, intervals):
+        """ Return True if time_sec falls inside any valid interval.
+        Supports open intervals (None bounds) """
+        for start, stop in intervals:
+            # * (None, None) means "ignore" → skip
+            if start is None and stop is None:
+                continue
+            if start is None:
+                start = 0.0
+            if stop is None:
+                stop = video_duration_sec
+            if start <= t <= stop:
+                return True
+        return False
+
+    #* normalize arguments :
+    ann_path = kwargs.pop('ann_file', ann_path)  # backward compatible alias
+    output_path = Path(output_path) if output_path else None
+    model_path = kwargs.get('model_path', None) or DEFAULT_YOLO
+    show = kwargs.get('show', False)
+    use_legacy_meta = kwargs.get('use_legacy_meta', False)
+    skip_without_ann = kwargs.get('skip_without_ann', False)
+    ignore_split = kwargs.get('ignore_split', False)
+    zip_output = kwargs.get('zip_output', kwargs.get('zip', ZIP_JSONS))
+
+    #* load model :
+    model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
+
+    #* resolve input/output paths :
+    # vid_list = []
+    if isinstance(input_videos, (list, tuple, set,)):
+    # * ToDo: the list option is not 100% debugged
+        input_dir = None
+        vid_list = [Path(p) for p in input_videos if _is_video(p)]
+    else:
+        input_videos = Path(input_videos)
+        if input_videos.is_dir():
+            input_dir = input_videos
+            vid_list = [p for p in sorted(input_videos.iterdir()) if _is_video(p)]
+        elif input_videos.is_file():
+            input_dir = input_videos.parent
+            vid_list = [input_videos]
+        else:
+            vid_list = input_dir = None
+    if not vid_list:
+        raise FileNotFoundError(f"No relevant videos were found: {input_videos}")
+
+    if output_path is None:
+        # json_dir = input_dir if input_videos.is_dir() else input_videos.parent
+        json_dir = input_dir or "."
+        json_name = None
+    elif output_path.suffix == '.json':
+        json_dir = output_path.parent if output_path.parent.is_dir() else input_dir
+        json_name = output_path.stem
+    elif output_path.is_dir() or output_path.parent.is_dir():
+        json_dir = output_path
+        json_name = None
+    else:
+        raise FileNotFoundError(f"Bad output path: {output_path}\nSee --help for further information")
+    json_dir.mkdir(parents=True, exist_ok=True)
+
+    #* resolve annotation source once; matching files are found per video
+    if ann_path is None:
+        ann_mode, ann_source = 'auto', None
+    else:
+        ann_source = Path(ann_path)
+        if ann_source.is_file():
+            ann_mode = 'file'
+            if len(vid_list) > 1:
+                print_color(f"[WARN] Same annotation file used for all videos: {ann_source}", 'o')
+        elif ann_source.is_dir():
+            ann_mode = 'dir'
+        else:
+            ann_mode = 'none'
+
+    #* detection info for header
+    model_file = Path(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
+    checksum = hashlib.sha256()
+    with model_file.open('rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            checksum.update(chunk)
+
+
+   #* detection info for header
+    detector_info = {'model': Path(model_path).stem, 'version': model.ckpt['version']}
+    if use_legacy_meta:
+        detector_info['threshold'] =  yolo_thresh
+    else:
+        detector_info.update({'runtime_ultralytics': ultralytics.__version__,
+                               'runtime_torch': torch.__version__,
+                               'runtime_python': platform.python_version(),
+                               'runtime_cuda': torch.version.cuda,
+                               'cuda_available': torch.cuda.is_available(),
+                               'device': ('cuda' if torch.cuda.is_available() else 'cpu'),
+                               'model_sha256': checksum.hexdigest(),})
+
+    print_color(f"YOLO:\nversion - {detector_info['version']}\nthreshold = {yolo_thresh}", 'b')
+    print(f"Default group event: {default_grp_tag}\n")
+
+    # ann_intervals = parse_annotation_file(ann_path) if ann_path else None
+    for vid_path in vid_list:
+        #* open video
+        cap = cv2.VideoCapture(str(vid_path))
+        if not cap.isOpened():
+            print(f"[WARN] Cannot open video (probably corrupted): {vid_path}")
+            continue
+        #* params from metadata
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # * fallbacks for broken metadata
+        if fps <= 0:
+            fps = 25.0
+        if w != 1920:
+            h = int(w*1080/1920)
+
+        infer_img_sz = tuple(check_imgsz((h, w), stride=model.stride, min_dim=2))
+        # Todo consider applying imgsz=infer_img_sz
+        # img_sz = (h, w)
+        # if infer_img_sz != img_sz:
+        #     print_color(f"Adjusted inference size from {img_sz} to {infer_img_sz} for stride compatibility", 'o')+
+        video_duration_sec = frame_count/fps
+        print(f"*** Converting {vid_path.name},{(w, h)}p {video_duration_sec} s")
+
+        ann_file = find_ann_file(vid_path)
+        if ann_file is not None:
+            print_color(f"Using annotation file: {ann_file}", 'g')
+            video_ann = parse_annotation_file(ann_file)
+        elif skip_without_ann:
+            print_color(f" Skipping {vid_path.name}: no annotation file found", 'y')
+            continue
+        else:
+            print_color(f"[WARN] No annotation file for {vid_path.name}; using default group tags only", 'y')
+            video_ann = {'events': {}, 'split': [], 'exclude': []}
+
+        event_intervals_by_tag = dict(video_ann['events']) if video_ann is not None else {}
+        exclude_intervals = list(video_ann['exclude']) if video_ann is not None else []
+        split_intervals = list(video_ann['split']) if video_ann is not None else []
+        split_intervals = sorted(split_intervals, key=lambda interval: (0.0 if interval[0] is None else interval[0],
+                                video_duration_sec if interval[1] is None else interval[1]))
+        stream_event_times = [interval[0] for interval in split_intervals] if ignore_split else []
+        split_intervals = [] if ignore_split else split_intervals
+
+        target_sampling = sample_rate or  DEFAULT_SAMPLING
+        if target_sampling <= 0 or target_sampling > fps :
+        #* i.e    0 <= sampling_rate_Hz <= fps
+            raise ValueError(f"Invalid sampling rate: {target_sampling} Hz")
+
+        step = max(1, int(round(fps/target_sampling)))
+        real_sampling = fps/step
+        print(f"effective sampling = {real_sampling} Hz -> step = {step}")
+        print(f"Sampling setup: Video fps={fps:.3f}, Sampling rate={target_sampling:.3f} Hz,"
+              f" Step= {step} frames -> effective rate ={real_sampling:.3f} Hz")
+
+        frames, segments = [],  []
+        split_idx, frame_idx = 0, 0
+        skip_until_sec = None
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                print(f"[INFO] cv2.VideoCapture.read()  failed at frame_idx = {frame_idx+1}")
+                break
+
+            frame = cv2.resize(frame, (w, h))
+            #* frame miss
+            if frame_idx % step != 0:
+                frame_idx += 1
+                continue
+            time_sec = frame_idx/fps
+            while split_idx < len(split_intervals):
+                split_start, split_stop = split_intervals[split_idx]
+                split_start = 0.0 if split_start is None else split_start
+                split_stop = video_duration_sec if split_stop is None else split_stop
+                if time_sec <= split_start + SPLIT_EPS:
+                    break
+                if frames:
+                    segments.append(frames)
+                    frames = []
+                skip_until_sec = max(skip_until_sec, split_stop) if skip_until_sec is not None else split_stop
+                split_idx += 1
+
+            if skip_until_sec is not None:
+                if time_sec < skip_until_sec - SPLIT_EPS:
+                    frame_idx += 1
+                    continue
+                skip_until_sec = None
+
+            if in_any_interval(time_sec, exclude_intervals):
+                frame_idx += 1
+                continue
+
+            #* run model on current frame
+            try:
+                #* results = model(frame, conf=yolo_thresh, verbose=False, imgsz=infer_img_sz)[0]
+                results = model(frame, conf=yolo_thresh, verbose=False)[0]
+            except Exception as exc:
+                print(f"[ERROR] YOLO inference failed at frame_idx={frame_idx}: {exc}")
+                raise
+
+            detection_list = []
+            if results.boxes:
+                for box, kpts_norm, conf_kpts in zip(results.boxes, results.keypoints.xyn, results.keypoints.conf):
+                    cls_id = int(box.cls)
+                    conf = float(box.conf)
+                    kpts_xyc = torch.cat([kpts_norm, conf_kpts.unsqueeze(-1)], dim=-1)
+
+                    if cls_id not in [3,4]:
+                        x1, y1, x2, y2 = map(float, box.xyxyn[0])
+                        for kp_pair in kpts_xyc:
+                            cx = int(float(kp_pair[0])*w)
+                            cy = int(float(kp_pair[1])*h)
+                            cv2.circle(frame, (cx, cy), 2, (0, 255, 0), -1)
+                        detection_list.append({ 'class': cls_id, 'conf': conf, 'bbox': [x1, y1, x2, y2],
+                                                'key_points': kpts_xyc[:].flatten().tolist(),})
+                    else:
+                        continue
+
+            time_sec = frame_idx/fps
+
+            #* ---- Per-frame event logic ----
+            group_events = []
+            for event_tag, event_intervals in event_intervals_by_tag.items():
+                if in_any_interval(time_sec, event_intervals):
+                    group_events.append(event_tag)
+
+            default_tags = as_event_list(default_grp_tag)
+            group_tags = group_events if group_events else default_tags
+
+            frames.append({'f': frame_idx, 't': time_sec,
+                           'individual_events': [], 'group_events': sorted(set(group_tags), reverse=True),
+                            'detection_list': detection_list,})
+
+            while split_idx < len(split_intervals):
+                split_start, split_stop = split_intervals[split_idx]
+                split_start = 0.0 if split_start is None else split_start
+                split_stop = video_duration_sec if split_stop is None else split_stop
+                if time_sec + SPLIT_EPS < split_start:
+                    break
+                if frames:
+                    segments.append(frames)
+                    frames = []
+                skip_until_sec = max(skip_until_sec, split_stop) if skip_until_sec is not None else split_stop
+                split_idx += 1
+
+            if show:
+                cv2.imshow("head_center_debug", frame)
+                #Todo: Anna should add keypoints
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:   #* ESC to quit
+                    break
+            frame_idx += 1
+
+        if frame_idx == 0:
+            print(f"[WARN] Skipping video due to no decodable frames: {vid_path}\n unsupported codec or corrupted file")
+            cap.release()
+            cv2.destroyAllWindows()
+            continue
+
+        if ignore_split and frames:
+            for split_start in stream_event_times:
+                if split_start is None:
+                    continue
+                nearest_frame = min(frames, key=lambda item: abs(item['t'] - split_start))
+                stream_events = nearest_frame.setdefault('stream_event', [])
+                if 'S' not in stream_events:
+                    stream_events.append('S')
+
+        if frames:
+            segments.append(frames)
+        if not segments:
+            print(f"[WARN] Skipping video with no sampled frames after split/exclude filters: {vid_path}")
+            cap.release()
+            if show:
+                cv2.destroyAllWindows()
+            continue
+
+        event_intervals = {}
+
+        for tag in sorted(set(EVENT_INTERVAL_NAMES) | set(event_intervals_by_tag)):
+            tag_name = EVENT_INTERVAL_NAMES.get(tag, str(tag))
+            event_intervals[tag_name] = {'sec': list(event_intervals_by_tag.get(tag, []))}
+
+        event_intervals.update({'split': {'sec': split_intervals}, 'exclude': {'sec': exclude_intervals}})
+
+        for segment_frames in segments:
+            data = {'video': str(vid_path),'fps': fps,
+                    'sampling rate': {'target':target_sampling, 'effective':real_sampling},
+                    'step': step}
+            if not use_legacy_meta:
+                data['detection_threshold'] = yolo_thresh
+            data.update({'detector': detector_info, 'event_intervals':event_intervals, 'frames': segment_frames,})
+
+            #Todo: resolve case when video_path is dir while output_path is a file name
+            json_path = get_unique_name(json_dir/f"{json_name if json_name else vid_path.stem}.json",4)
+
+            with json_path.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            if zip_output:
+                archive_path = zip_one_path(json_path, protocol=kwargs.get('zip_protocol', 'zip'))
+                print_color(f"Archived to {archive_path}", 'b')
+                json_path.unlink()
+                save_path = archive_path
+            else:
+                save_path = json_path
+
+            print_color(f"Saved::{len(segment_frames)} frame to {save_path}\n----------------\n'",'b')
+        cap.release()
+        if show:
+            cv2.destroyAllWindows()
+
+    return True
+
+#397->360(1,4,4) -> 424
+#460(1,15,3)-> 464(2,1,)
+
+if __name__ == "__main__":
+
+    ubi_ann   = Path("data/video/UBI_FIGHTS/ann_ws_ready")
+    ubi_fight = Path("data/video/UBI_FIGHTS/videos/fight-x")
+    ubi_norm  = Path("data/video/UBI_FIGHTS/videos/normal-x")
+    ubi_tst_ls = [ "data/video/testing-streams/F_116_0_0_0_0.mp4",  #* Fights
+                   "data/video/testing-streams/F_121_1_0_0_0.mp4",
+                   "data/video/testing-streams/F_141_0_0_0_0.mp4",]
+    ubi_tst_ls +=["data/video/testing-streams/N_656_1_0_1_0.mp4",   #* Normal
+                  "data/video/testing-streams/N_765_0_0_1_0.mp4",]
+
+    fps_ = 6; grp_tag = 0
+    # output_dir = Path(f"data/json_files/UBI/{fps_}fps-v/test")
+    # process_video(ubi_tst_ls, output_dir, ann_path=ubi_ann, default_grp_tag=grp_tag,
+    #               sample_rate=fps_, zip_output=False, skip_without_ann=True, ignore_split=False)
+    output_dir = Path(f"data/json_files/UBI/{fps_}fps/normal")
+    process_video(ubi_tst_ls, output_dir, ann_path=None, default_grp_tag=grp_tag,
+                  sample_rate=fps_, zip_output=True, skip_without_ann=False)

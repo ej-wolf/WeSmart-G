@@ -1,48 +1,45 @@
 """ CLI script.    '
     *** Build (default) ****
     preprocess and extract features from given json dir.
-    1) create train/val split, or load existing split from *.txt files
+    1) create train/test split, or load existing split from *.txt files
     2) slices JSON streams into temporal clips,
     3) extract motion features per clip
     4) Saves cached features to disk (one NPZ file per split)
     5) (optional) Prints dataset statistics for inspection
 
     usage:
-    >> precompute_clips build  jsons_dir cache_dir [-h] [-cn CACHE_NAME] [-sd SPLIT_DIR]
-                        [-ns] [-r VALID_RATIO] [-rs RANDOM_SEED] [-w WINDOW] [-s STRIDE]
-                        [-e] [-p] [-l] [--no-temp-smooth] [--json-type {type_1,type_2,1,2}]
+    >> precompute_clips.py  build  jsons_dir cache_dir [-h] [-t CACHE_TAG] [-sd SPLIT_DIR]
+                            [-ns] [-r TEST_RATIO] [-rs RANDOM_SEED] [-w WINDOW] [-s STRIDE]
+                            [-e] [-p] [-l] [--no-temp-smooth] [--json-type {type_1,type_2,1,2}]
     positional arguments:
       jsons_dir                     : dir containing JSONs
       cache_dir                     : path for the cached NPZ feature files
-    options:
-      -h/ --help                    : Show help message and exit
-      -cn/--cache-name              : Name for the created npz
-      -sd/--split-dir [path]        : Path for the train/val list files
+    dataset options:
+      -cn/--cache-name              : legacy name for cache-tag
+      -sd/--split-dir [path]        : Path for the train/test list files
       -rs/--random-seed RANDOM_SEED : set the random seed (42)
       -ns/--new-split               : Force New split (default: False)
-      -r/--valid-ratio VALID_RATIO  : Validation split ratio (default: 0.2)
+      -r/--test-ratio TEST_RATIO    : Test split ratio (default: 0.2)
+
+    *** stream ***
+    preprocess and extract features from one long JSON stream into a single cache.
+    usage:
+    >> precompute_clips.py  stream json_path cache_dir [-h] [-t CACHE_TAG] [-w WINDOW]
+                            [-s STRIDE] [-e] [-p] [-l] [--no-temp-smooth] [--json-type ...}]
+    positional arguments:
+      json_path                     : path to one long JSON stream file
+      cache_dir                     : output directory for the cached NPZ feature file
+
+    *** common options for dataset (build) and stream commands : ***
+      -h/ --help                    : Show help message and exit
+      -t/ --cache-tag               : base tag for the output cache npz
       -w/ --window WINDOW           : Clip window in seconds
       -s/ --stride STRIDE           : Clip stride in seconds
       -e/ --allow-empty             : Allow empty (None) labeling
-      -p/--pure-motion              : Use only motion features, drop the static overlap block
-      -l/--legacy                   : Use only the original 18 motion features
+      -p/ --pure-motion             : Use only motion features, drop the static overlap block
+      -l/ --legacy                  : Use only the original 18 motion features
       --no-temp-smooth              : Disable temporal smoothing
-      -jt/--json-type               : Used to run old (legacy) JSON formats
-
-    ***  info ***
-    Inspect an existing cache NPZ and print dataset/video statistics.
-    usage:
-    >> precompute_clips.py info npz_path [-h] [--list] [--details] [--sort SORT]
-                                        [--sample SAMPLE] [-rs RANDOM_SEED]
-    positional arguments:
-      npz_path                      : dir containing JSONs
-    options:
-      -h/ --help                    : Show help message and exit
-      -l/ --list                    : print video names.
-      -d/ --details                 : print per-video table.
-      -sr/--sort SORT               : (str) options [duration, duration_rev] or None
-      -sm/--sample SAMPLE           : (int/float) sample size/portion for printing
-      -rs/--random-seed             : (int) seed for random sampling (default: 42)
+      --json-type                   : input JSON format for loader
 
     ***  merge ***
     merges multiple cache npz files into one
@@ -52,23 +49,41 @@
        npz_paths                    : Cache npz files for merge
     options:
        -h/--help                    :show this help message and exit
+
+    ***  info ***
+    Inspect an existing cache NPZ and print dataset/video statistics.
+    usage:
+    >> precompute_clips.py info npz_path [-h] [--list] [--details] [--mode {auto,dataset,stream}] [--sort SORT]
+                                        [--sample SAMPLE] [-rs RANDOM_SEED]
+    positional arguments:
+      npz_path                      : dir containing JSONs
+    options:
+      -h/ --help                    : Show help message and exit
+      -l/ --list                    : print video names.
+      -d/ --details                 : print per-video table.
+      -m/ --mode MODE               : inspection wording mode
+      -sr/--sort SORT               : (str) options [duration, duration_rev] or None
+      -sm/--sample SAMPLE           : (int/float) sample size/portion for printing
+      -rs/--random-seed             : (int) seed for random sampling (default: 42)
 """
 
-import random, argparse, sys, numpy as np
+import random, argparse, sys, glob, numpy as np
 from pathlib import Path
 #* ---- local imports  ----
-from json_utils import load_json_data
-from common.my_local_utils import print_color
+from json_utils import load_json_data, list_json_sources
+from common.my_local_utils import print_color, as_collection
 from temporal_slicing_json import slice_json_stream, WINDOW_SEC, STRIDE_SEC
-from analyze_json_motion import extract_motion_features, _temporal_conv_1d, _clip_pooling
+from motion_feature_schema import (DEFAULT_POOL_MODE, DEFAULT_TOP_K_MIN, DEFAULT_TOP_K_RATIO,
+                                   DEFAULT_TEMP_KERNEL, DEFAULT_TEMP_SMOOTHING,
+                                   FEATURE_SCHEMA_KEY, SOURCE_CACHES_KEY, TEMPORAL_SCHEMA_KEY,
+                                   assert_feature_schema_match, build_cache_record, get_clip_features_vec, pack_json_value,
+                                   build_feature_schema, load_cache_contract, load_cache_contract_compact, build_temporal_schema,
+                                   MOTION_FPS_MAX, MOTION_FPS_MIN, MOTION_FPS_REF)
 
 
 #* Defaults (ToDo config later if needed)
-VAL_RATIO = 0.2
+TEST_RATIO = 0.2
 RANDOM_SEED = 42
-POOL_MODE = 'max'
-TEMPORAL_SMOOTHING = True
-TEMP_KERNEL = 3
 MIN_ERROR = 1e-7
 
 #* Files formats
@@ -76,148 +91,137 @@ SPLIT_LISTS = {'train': "train_videos.txt",
                'valid': "valid_videos.txt",
                'test' : "test_videos.txt"}
 VIDEO_LIST = "_videos.txt"
-# CACHE_LIST = "_feats.npz"
 DEFAULT_TYPE = 'type_2'
+TRAIN_TAG = '_train'
+TEST_TAG = '_test'
+
+
+# region API funcs
 
 def split_json_ds(dir_path:str|Path, **kwargs) -> dict[str, list[Path]]:
-    """ Split a directory of JSON videos into train / validation sets.
-    Parameters
-        dir_path : directory containing JSON files (one per video)
-    Returns
-        splits : dict {'train': list of Path objects
-                       'val'  : list of Path objects}
-    Notes
-        The split is done at the VIDEO level (not clip level).
-        Deterministic split (controlled by RANDOM_SEED)
+    """ Splits ds into train/test sets. The split is done at VIDEO level (not clip level)
+    by splitting a directory of JSON videos into train/test sets.
+
+    :param      dir_path: directory containing JSON files (one per video)
+    :return     splits : dict {'train': list of Path objects
+                               'test' : list of Path objects}
     """
 
     dir_path = Path(dir_path)
     assert dir_path.is_dir(), f"Not a directory: {dir_path}"
 
-    json_files = sorted(dir_path.glob("*.json"))
+    json_files = sorted(list_json_sources(dir_path))
     if not json_files:
-        raise RuntimeError(f"No JSON files found in {dir_path}")
+        raise RuntimeError(f"No JSON or zipped JSON files found in {dir_path}")
 
     rng = random.Random(kwargs.get('random_seed', RANDOM_SEED))
     rng.shuffle(json_files)
     # n_total = len(json_files)
-    # n_val = max(1, int(kwargs.get('val_ratio',VAL_RATIO)*len(json_files)) )
-    r = kwargs.get('val_ratio',VAL_RATIO)
-    n_val = int(max(np.ceil(r), r*len(json_files)))
+    # n_test = max(1, int(kwargs.get('test_ratio', TEST_RATIO)*len(json_files)) )
+    r = kwargs.get('test_ratio', kwargs.get('val_ratio', TEST_RATIO))
+    n_test = int(max(np.ceil(r), r*len(json_files)))
 
-    return {'train': json_files[n_val:], 'valid': json_files[:n_val],}
-
-
-def save_vid_lists(splits: dict[str, list[Path]], out_dir: str | Path):
-    """ Save annotation file lists according to split keys.
-        For each key in `splits`, a file named '<key>_videos.txt' is created
-        containing one JSON filename per line.
-    Parameters
-        splits : dict returned by split_json_ds
-        out_dir : directory where list files will be written
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for grp, paths in splits.items():
-        list_path = out_dir/f"{grp}{VIDEO_LIST}"
-        with open(list_path, 'w') as f:
-            for p in paths:
-                f.write(p.name + '\n')
-
-        print(f"Written {list_path} ({len(paths)} videos)")
+    return {'train': json_files[n_test:], 'test': json_files[:n_test],}
 
 
-# --------------------------------------------------
-# Step A: feature precomputation
-# --------------------------------------------------
+def get_split_pair(cache: str|Path) -> str | Path:
+    """ Return the sibling split cache name/path for a train or test NPZ."""
+    cache_path = Path(cache)
+    cache_text = str(cache)
 
-def precompute_features_cache(json_dir :str|Path,
-                              list_file:str|Path,
-                              out_path :str|Path,
-                              allow_empty_lbl:bool=False,
-                              **kwargs):
-    """ Precompute clip-level motion features for a dataset split.
-    Parameters
-        json_dir : directory with JSON files
-        list_file : text file listing JSON filenames (train/val)
-        out_path : output .npz file
-        allow_empty_lbl : passed to slice_json_stream (False for fully annotated)
-    """
-    json_dir = Path(json_dir)
-    list_file = Path(list_file)
-    out_path = Path(out_path).with_suffix('.npz')
+    stem = cache_path.stem
+    if stem.endswith(TRAIN_TAG):
+        pair_stem = stem[:-len(TRAIN_TAG)] + TEST_TAG
+    elif stem.endswith(TEST_TAG):
+        pair_stem = stem[:-len(TEST_TAG) ] + TRAIN_TAG
+    else:
+        return 'Unknown'
 
+    pair_name = pair_stem + cache_path.suffix
+    if cache_text == cache_path.name:
+        return pair_name
+
+    pair_path = cache_path.with_name(pair_name)
+    return pair_path if pair_path.is_file() else pair_name
+
+
+def extract_stream_features(streams, feature_schema:dict, temporal_profile:dict, **kwargs):
+    """ Build feature, label, and metadata arrays from named stream dictionaries."""
     feats, labels, meta = [], [], []
-
-    with open(list_file, 'r') as f:
-        video_names = [ln.strip() for ln in f if ln.strip()]
-
-    for vid in video_names:
-        json_path = json_dir/vid
-        # clips = slice_json_stream(json_path, allow_empty_lbl=allow_empty_lbl)
-        # print_color(f" file: {json_path.name} --  {json_path.is_file()}", 'b')
-        json_data = load_json_data(json_path, j_type=kwargs.get('json_type', DEFAULT_TYPE))
+    for stream_name, stream_data in streams:
         clips = slice_json_stream(
-            json_data,
-            window_sec=kwargs.get('window', WINDOW_SEC),
-            stride_sec=kwargs.get('stride', STRIDE_SEC),
-            allow_empty_lbl=allow_empty_lbl,
-        )
-
+            stream_data,
+            window_sec=temporal_profile['target_window'],
+            stride_sec=temporal_profile['target_stride'],
+            allow_empty_lbl=kwargs.get('allow_empty_lbl', False))
         for clip in clips:
             if clip['label'] is None:
                 continue
-            motion_seq = extract_motion_features(
-                         clip['frames'],
-                         pure_motion=kwargs.get('pure_motion', False),
-                         legacy=kwargs.get('legacy', False),
+            feats.append(get_clip_features_vec( clip['frames'],
+                         pure_motion=feature_schema['pure_motion'],
+                         legacy=feature_schema['legacy'],
+                         temp_smooth=feature_schema['temp_smooth'],
+                         temp_kernel=feature_schema['temp_kernel'],
+                         pool_mode=feature_schema['pool_mode'],
+                         top_k_ratio=feature_schema['top_k_ratio'],
+                         top_k_min=feature_schema['top_k_min'],
+                         j_version=feature_schema['extractor_version'],
+                         motion_fps_ref=feature_schema['motion_fps_ref'],
+                         motion_fps_min=feature_schema['motion_fps_min'],
+                         motion_fps_max=feature_schema['motion_fps_max'])
                          )
-
-            if kwargs.get('temp_smooth', TEMPORAL_SMOOTHING):
-                motion_seq = _temporal_conv_1d(motion_seq, TEMP_KERNEL)
-
-            clip_feat = _clip_pooling(motion_seq, mode=POOL_MODE)
-
             labels.append(int(clip['label']))
-            feats.append(clip_feat)
-            meta.append({'video': vid, 't_start': clip['t_start'], 't_end': clip['t_end'] } )
+            meta.append({'video': stream_name, 't_start': clip['t_start'],
+                         't_end': clip['t_end'], 'n_frames': len(clip['frames'])})
+    X = np.stack(feats) if feats else np.zeros((0, int(feature_schema['feature_dim'])), dtype=np.float32)
+    return X, np.asarray(labels, dtype=np.int64), np.asarray(meta, dtype=object)
 
-    feats = np.stack(feats) if feats else np.zeros((0,))
-    labels = np.asarray(labels, dtype=np.int64)
+
+def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
+    """ Precompute clip-level motion features from one or more JSON paths.
+        (This is the core implementation for both dataset-based and stream build.
+        TODO: later add optional time-based train/test slicing for one long stream.)
+    Parameters
+    json_paths : JSON path or an iterable of JSON file paths
+    out_path  : output .npz file
+    allow_empty_lbl, window, stride: arguments passed forward to slice_json_stream
+    """
+    out_path = Path(out_path).with_suffix('.npz')
+    json_paths = [Path(p) for p in as_collection(json_paths)]
+    if not json_paths:
+        raise ValueError("No JSON paths were provided")
+
+    feature_schema = build_feature_schema(
+                     pure_motion=kwargs.get('pure_motion', False),
+                     legacy=kwargs.get('legacy', False),
+                     temp_smooth=kwargs.get('temp_smooth', DEFAULT_TEMP_SMOOTHING),
+                     temp_kernel=kwargs.get('temp_kernel', DEFAULT_TEMP_KERNEL),
+                     pool_mode=kwargs.get('pool_mode', DEFAULT_POOL_MODE),
+                     top_k_ratio=kwargs.get('top_k_ratio', kwargs.get('pool_top_k_ratio', DEFAULT_TOP_K_RATIO)),
+                     top_k_min=kwargs.get('top_k_min', kwargs.get('pool_top_k_min', DEFAULT_TOP_K_MIN)),
+                     motion_fps_ref=kwargs['motion_fps_ref'] if 'motion_fps_ref' in kwargs else MOTION_FPS_REF,
+                     motion_fps_min=kwargs.get('motion_fps_min', MOTION_FPS_MIN),
+                     motion_fps_max=kwargs.get('motion_fps_max', MOTION_FPS_MAX),
+                 )
+    temporal_schema = build_temporal_schema(kwargs.get('window', WINDOW_SEC), kwargs.get('stride', STRIDE_SEC),)
+
+    streams = ((json_path.name, load_json_data(json_path, j_type=kwargs.get('json_type', DEFAULT_TYPE)))
+               for json_path in json_paths)
+    temporal_profile = {'target_window': temporal_schema['window'],
+                        'target_stride': temporal_schema['stride']}
+    feats, labels, meta = extract_stream_features(
+        streams, feature_schema, temporal_profile,
+        allow_empty_lbl=kwargs.get('allow_empty_lbl', False))
     #print_color(feats.shape)
-    np.savez_compressed(out_path, X=feats, y=labels, meta=np.asarray(meta, dtype=object),)
+    source_caches = [build_cache_record(out_path, feature_schema, temporal_schema)]
+    np.savez_compressed(out_path, X=feats, y=labels, meta=meta,
+                        **{ FEATURE_SCHEMA_KEY: pack_json_value(feature_schema),
+                            TEMPORAL_SCHEMA_KEY: pack_json_value(temporal_schema),
+                            SOURCE_CACHES_KEY: pack_json_value(source_caches),},
+                        )
 
-    print()
-    inspect_feature_file(out_path)
     print_color(f'Saved {len(labels)} clips to {out_path}', 'b')
-
-
-# --------------------------------------------------
-# Step B: dataset inspection
-# --------------------------------------------------
-
-def inspect_feature_file(npz_path: str|Path):
-    """ Inspect cached clip-level features. """
-    npz_path = Path(npz_path)
-    data = np.load(npz_path, allow_pickle=True)
-
-    X = data['X']
-    y = data['y']
-
-    n = len(y)
-    n_pos = int((y == 1).sum())
-    n_neg = int((y == 0).sum())
-
-    print("==== Cached dataset inspection ====")
-    print(f"File            : {npz_path.name}")
-    print(f"#clips          : {n}")
-    print(f"#positives      : {n_pos}")
-    print(f"#negatives      : {n_neg}")
-    print(f"Feature dim     : {X.shape[1] if X.ndim == 2 else 'N/A'}")
-
-    if n > 0:
-        print(f'Feature min/max : {X.min():.4f} / {X.max():.4f}')
+    return out_path
 
 
 def merge_cache_npz(npz_paths, out_path:str|Path):
@@ -231,6 +235,9 @@ def merge_cache_npz(npz_paths, out_path:str|Path):
     X_parts, y_parts, meta_parts = [], [], []
     has_meta_flags = []
     feat_dim = None
+    canonical_feature_schema = None
+    canonical_temporal_schema = None
+    source_caches: list[dict[str, object]] = []
 
     for p in in_paths:
         data = np.load(p, allow_pickle=True)
@@ -268,27 +275,64 @@ def merge_cache_npz(npz_paths, out_path:str|Path):
                 raise ValueError(f"meta/y length mismatch in {p}: {len(m)} vs {len(y)}")
             meta_parts.append(np.asarray(m, dtype=object))
 
+        contract = load_cache_contract(p)
+        feature_schema = dict(contract['feature_schema'])
+        if canonical_feature_schema is None:
+            canonical_feature_schema = feature_schema
+            canonical_temporal_schema = dict(contract['temporal_schema'])
+        else:
+            assert_feature_schema_match(canonical_feature_schema, feature_schema, context=str(p))
+        source_caches.extend(dict(item) for item in contract['source_caches'])
+
     X_all = np.concatenate(X_parts, axis=0)
     y_all = np.concatenate(y_parts, axis=0)
+    save_payload = {
+        'X': X_all,
+        'y': y_all,
+        FEATURE_SCHEMA_KEY: pack_json_value(canonical_feature_schema),
+        TEMPORAL_SCHEMA_KEY: pack_json_value(canonical_temporal_schema),
+        SOURCE_CACHES_KEY: pack_json_value(source_caches),
+    }
 
     if all(has_meta_flags):
         meta_all = np.concatenate(meta_parts, axis=0)
-        np.savez_compressed(out_path, X=X_all, y=y_all, meta=meta_all)
+        save_payload['meta'] = meta_all
     else:
         if any(has_meta_flags):
             print("[WARN] Not all inputs contain 'meta'; merged file will skip meta.")
-        np.savez_compressed(out_path, X=X_all, y=y_all)
+    np.savez_compressed(out_path, **save_payload)
 
     print_color(f"Merged {len(in_paths)} files -> {out_path}", 'b')
-    inspect_feature_file(out_path)
+    cache_info(out_path, mode='dataset')
     return out_path
 
 
+# Legacy simple inspector kept for reference; replaced by cache_info(mode=...).
+# def inspect_feature_file(npz_path: str|Path):
+#     """ Inspect cached clip-level features. """
+#     npz_path = Path(npz_path)
+#     data = np.load(npz_path, allow_pickle=True)
+#
+#     X , y = data['X'], data['y']
+#     n = len(y)
+#     n_pos = int((y == 1).sum())
+#     n_neg = int((y == 0).sum())
+#
+#     print("==== Cached dataset inspection ====")
+#     print(f"File            : {npz_path.name}")
+#     print(f"#clips          : {n}")
+#     print(f"#positives      : {n_pos}")
+#     print(f"#negatives      : {n_neg}")
+#     print(f"Feature dim     : {X.shape[1] if X.ndim == 2 else 'N/A'}")
+#     if n > 0:
+#         print(f'Feature min/max : {X.min():.4f} / {X.max():.4f}')
+
 def cache_info(path:str|Path, **kwargs):
     """ Summarize a cached NPZ and optionally print per-video list/details.
-    Args:
-        path: NPZ path with keys `X`, `y`, `meta`.
-    kwargs:
+
+    :param  path: NPZ path with keys X, y, meta.
+    kwargs options:
+        mode (str): auto, dataset, stream
         list (bool)    : print video names.
         details (bool): print per-video table.
         sample (int|float|None): sample size for list/details.
@@ -336,8 +380,14 @@ def cache_info(path:str|Path, **kwargs):
 
     path = Path(path)
     data = np.load(path, allow_pickle=True)
-    meta = data['meta']
+
+    cache_contract, used_legacy_contract = load_cache_contract_compact(path)
+    feature_schema = dict(cache_contract['feature_schema'])
+    temporal_schema = dict(cache_contract['temporal_schema'])
+    source_caches = list(cache_contract['source_caches'])
+    X:np.ndarray = data['X']
     y:np.ndarray = data['y']
+    meta = data['meta']
     support = [len(y)-y.sum(), y.sum()]  #* support[0]= counts of 0, sup[1]= counts of 1
     n_clips = len(meta)
 
@@ -346,9 +396,8 @@ def cache_info(path:str|Path, **kwargs):
         return {'path': str(path), 'n_videos': 0}
 
     # Build per-video aggregates from clip-level metadata.
+    clip_durations, stride_values = [],  []
     video_info = {}
-    clip_durations = []
-    stride_values = []
     valid_rows = 0
 
     for item in meta:
@@ -390,6 +439,12 @@ def cache_info(path:str|Path, **kwargs):
         print_color(f"[ERROR] Malformed meta data")
         return {'path': str(path), 'n_videos': 0, 'n_clips': 0, }
 
+    mode = kwargs.get('mode', 'auto')
+    if mode == 'auto':
+        mode = 'stream' if n_videos == 1 else 'dataset'
+    if mode not in {'dataset', 'stream'}:
+        raise ValueError("mode must be one of: auto, dataset, stream")
+
     total_video_time = sum(max(0.0, rec['max_t'] - rec['min_t']) for rec in video_info.values())
     avg_video_time  = (total_video_time/n_videos)
     total_clip_time = sum(clip_durations)
@@ -413,17 +468,60 @@ def cache_info(path:str|Path, **kwargs):
     if valid_rows < n_clips:
         print_color(f"[WARN] Malformed meta: {n_clips - valid_rows} rows skipped", 'r')
 
-    print(f"\n==== \"{path.stem}\" - Cache info ==== new !!!")
+    if mode == 'stream':
+        title = 'Stream cache info'
+        count_line = f"Number of streams: {n_videos}"
+        clip_line = f"Number of windows: {n_clips}"
+        total_line = f"Total stream time: {total_video_time:.2f} s"
+        avg_line = f"Avg. stream time : {avg_video_time:.2f} s"
+        clip_time_line = f"Total window time: {total_clip_time:.2f} s"
+        support_line = f"Window labels 1/0: {support[1]} / {support[0]}"
+        list_label = "Streams"
+        detail_name = "stream name"
+    else:
+        title = 'Dataset cache info'
+        count_line = f"Number of videos: {n_videos}"
+        clip_line = f"Number of clips : {n_clips}"
+        total_line = f"Total video time: {total_video_time:.2f} s"
+        avg_line = f"Avg. video Time : {avg_video_time:.2f} s"
+        clip_time_line = f"Total clip time : {total_clip_time:.2f} s"
+        support_line = f"GT counts 1/0   : {support[1]} / {support[0]}"
+        list_label = "Videos"
+        detail_name = "video name"
+
+    feature_lines = []
+    if used_legacy_contract:
+        temporal_msg = f"{window_msg} / {stride_msg} (inferred)"
+        feature_lines.append(f"legacy cache metadata unavailable; feature_dim={feature_schema.get('feature_dim', 'N/A')}")
+        source_msg = "N/A"
+    else:
+        temporal_msg = f"{temporal_schema.get('window', 'N/A')}s / {temporal_schema.get('stride', 'N/A')}s (saved)"
+        feature_lines.extend([# f"extractor    : {feature_schema.get('extractor', 'N/A')}",
+                              f"version      : {feature_schema.get('extractor_version', 'N/A')}",
+                              f"dim          : {feature_schema.get('feature_dim', 'N/A')}",
+                              f"pool         : {feature_schema.get('pool_mode', 'N/A')}",
+                              f"smooth       : {feature_schema.get('temp_smooth', 'N/A')}",
+                              f"kernel       : {feature_schema.get('temp_kernel', 'N/A')}",
+                              f"pure_motion  : {feature_schema.get('pure_motion', 'N/A')}",
+                              f"legacy       : {feature_schema.get('legacy', 'N/A')}",
+                            ])
+        source_msg = str(len(source_caches))
+    feature_block = "\n".join(f"             {line}" for line in feature_lines)
+    feature_range = f"{X.min():.4f} / {X.max():.4f}" if X.size else "N/A"
+
+    print(f"\n==== \"{path.stem}\" - {title} ====")
     print(f"Full path       : {path}\n"
-          f"Number of videos: {n_videos}\n"
-          f"Number of clips : {n_clips }\n"
-          f"Total video time: {total_video_time:.2f} s\n"
-          f"Avg. video Time : {avg_video_time:.2f} s\n"
-          f"Total clip time : {total_clip_time:.2f} s\n"
-          # f"Avg. clip time  : {avg_clip_time:.2f} s\n"
-          f"Window / stride : {window_msg} / {stride_msg} (inferred)\n"
-          f"GT counts 1/0   : {support[1]} / {support[0]}\n"
-          f"Features number : {data['X'].shape[1] }"
+          f"{count_line}\n"
+          f"{clip_line}\n"
+          f"{total_line}\n"
+          f"{avg_line}\n"
+          f"{clip_time_line}\n"
+          f"Window / stride : {temporal_msg}\n"
+          f"Source caches   : {source_msg}\n"
+          f"{support_line}\n"          
+          f"Features number : {X.shape[1]}\n"
+          f"Feature min/max : {feature_range}\n"
+          f"Feature extraction\n{feature_block}\n"
           )
 
     #* Resolve sample size from int/ratio conventions.
@@ -437,13 +535,13 @@ def cache_info(path:str|Path, **kwargs):
         names = _sort_names(names)
 
     if kwargs.get('list', False):
-        print("\nVideos:")
+        print(f"\n{list_label}:")
         for name in names:
             print(name)
 
     if kwargs.get('details', False):
         print("\nDetails:")
-        print(f"{'#':>3} | {'video name':40} | {'Duration (s)':^12} | {'#clips':^6} | {'Total duration(s)':>16} | {'...':>3}")
+        print(f"{'#':>3} | {detail_name:40} | {'Duration (s)':^12} | {'#clips':^6} | {'Total duration(s)':>16} | {'...':>3}")
         print("-"*124)
         for i, name in enumerate(names, start=1):
             rec = video_info[name]
@@ -451,16 +549,80 @@ def cache_info(path:str|Path, **kwargs):
             print(f"{i:>3} | {name[:40]:40} | {v_time:^12.2f} | {rec['n_clips']:^6d} | {rec['clip_time']:15.2f} | {'':>3}")
     print()
     return {'path': str(path),
+            'mode': mode,
             'n_videos': n_videos,'n_clips' : n_clips,
             'total_video_time': total_video_time,
             'avg_video_time'  : avg_video_time,
             'total_clip_time': total_clip_time,
             'window': w_mean, 'window_std': w_std,
             'stride': s_mean, 'stride_std':s_std,
+            'temporal_schema': temporal_schema,
+            'feature_schema': feature_schema,
+            'source_caches_num': len(source_caches),
             'sample_size': len(names), 'support':support}
+
+# endregion
+
+
+# region CLI
 #165
 
-def _run_build(args):
+def _resolve_input_paths(npz_inputs) -> list[Path]:
+    """ Expand merge inputs where each item may be a file, dir, or glob mask."""
+    resolved = []
+    seen = set()
+
+    for item in as_collection(npz_inputs):
+        item = Path(item)
+        item_str = str(item)
+
+        if any(ch in item_str for ch in '*?[]'):
+            matches = [Path(p) for p in glob.glob(item_str)]
+        elif item.is_dir():
+            matches = sorted(p for p in item.iterdir() if p.is_file() and p.suffix == '.npz')
+        elif item.is_file():
+            matches = [item]
+        else:
+            matches = []
+
+        if not matches:
+            print_color(f"[WARN] No NPZ files matched: {item}", 'y')
+            continue
+
+        for path in matches:
+            if path.suffix != '.npz':
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(path)
+
+    return resolved
+
+def _run_build_cache_ds(args):
+    def _load_list(list_file) -> list[Path]:
+        """ Resolve JSON filenames from a text list into full paths under json_dir."""
+        # json_dir = Path(json_dir)
+        # list_file = Path(list_file)
+        with open(Path(list_file), 'r') as f:
+            video_names = [ln.strip() for ln in f if ln.strip()]
+        return [Path(jsons_dir) / vid for vid in video_names]
+
+    def save_vid_lists(spl_sets: dict[str, list[Path]]):
+        """ Save list to file according to split keys.
+            For each key in spl_sets, a file named '<key>_videos.txt' is created, containing one JSON filename per line.
+        :param  spl_sets: dict returned by split_json_ds
+        """
+
+        for grp, paths in spl_sets.items():
+            list_path = split_dir / f"{grp}{VIDEO_LIST}"
+            with open(list_path, 'w') as f:
+                for p in paths:
+                    f.write(p.name + '\n')
+            print(f"Written {list_path} ({len(paths)} videos)")
+
+
     jsons_dir:Path = args.jsons_dir
     cache_dir:Path = args.cache_dir
     split_dir:Path = args.split_dir or jsons_dir
@@ -468,100 +630,149 @@ def _run_build(args):
     cache_dir.mkdir(parents=True, exist_ok=True)
     split_dir.mkdir(parents=True, exist_ok=True)
 
-    # train_list = split_dir/f"train{VIDEO_LIST}"
-    # valid_list = split_dir/f"valid{VIDEO_LIST}"
     train_list = split_dir/SPLIT_LISTS['train']
     valid_list = split_dir/SPLIT_LISTS['valid']
     test_list  = split_dir/SPLIT_LISTS['test']
-    #* ToDo: change valid to test
 
     # if train_list.exists() and valid_list.exists() and not args.new_split:
     if not args.new_split and train_list.exists() and (valid_list.exists() or test_list.exists()):
-        print('[INFO] Using existing train/val split files')
+        print_color('[INFO] Using existing train/test split files','b')
     else:
-        print('[INFO] Creating new train/val split')
-        print('random seed : ', args.random_seed)
-        splits = split_json_ds(jsons_dir, random_seed=args.random_seed, val_ratio=args.valid_ratio)
-        save_vid_lists(splits, split_dir)
+        print_color(f'[INFO] Creating new train/test split\nrandom seed: {args.random_seed}','g')
+        split_sets = split_json_ds(jsons_dir, random_seed=args.random_seed, test_ratio=args.test_ratio)
+        save_vid_lists(split_sets)
 
-    npz_name = args.cache_name or jsons_dir.name
-    precompute_features_cache( jsons_dir, train_list, cache_dir/f"{npz_name}_train",
-                               allow_empty_lbl=args.allow_empty,
-                               json_type=args.json_type,
-                               temp_smooth=(not args.no_temp_smooth),
-                               window=args.window,
-                               stride=args.stride,
-                               pure_motion=args.pure_motion,
-                               legacy=args.legacy,
-                               )
-    precompute_features_cache( jsons_dir, test_list, cache_dir/f"{npz_name}_test",   # f"{npz_name}_valid",
-                               allow_empty_lbl=args.allow_empty,
-                               json_type=args.json_type,
-                               temp_smooth=(not args.no_temp_smooth),
-                               window=args.window,
-                               stride=args.stride,
-                               pure_motion=args.pure_motion,
-                               legacy=args.legacy,
-                               )
+    eval_list = test_list if test_list.exists() else valid_list
+    npz_name = args.cache_tag or jsons_dir.name
+    train_cache = build_cache_from_json(_load_list(train_list), cache_dir/f"{npz_name}_train",
+                                        allow_empty_lbl=args.allow_empty,
+                                        json_type=args.json_type,
+                                        temp_smooth=(not args.no_temp_smooth),
+                                        window=args.window,
+                                        stride=args.stride,
+                                        pure_motion=args.pure_motion,
+                                        legacy=args.legacy,
+                                        pool_mode=args.pool_mode,
+                                        top_k_ratio=args.top_k_ratio,
+                                        top_k_min=args.top_k_min,
+                                        )
+    cache_info(train_cache, mode='dataset')
+    test_cache = build_cache_from_json(_load_list(eval_list), cache_dir/f"{npz_name}_test",
+                                       allow_empty_lbl=args.allow_empty,
+                                       json_type=args.json_type,
+                                       temp_smooth=(not args.no_temp_smooth),
+                                       window=args.window,
+                                       stride=args.stride,
+                                       pure_motion=args.pure_motion,
+                                       legacy=args.legacy,
+                                       pool_mode=args.pool_mode,
+                                       top_k_ratio=args.top_k_ratio,
+                                       top_k_min=args.top_k_min,
+                                       )
+    cache_info(test_cache, mode='dataset')
 
 
 def _run_info(args):
-    cache_info(args.npz_path, **vars(args))
-    # print(args)
-    # kwargs = vars(args).copy();  # kwargs.pop('cmd', None);  # cache_info(args.npz_path, **kwargs)
+    npz_inputs = _resolve_input_paths(args.npz_paths)
+    if not npz_inputs:
+        raise ValueError("No input NPZ files were resolved for info")
+
+    info_kwargs = vars(args).copy()
+    info_kwargs.pop('cmd', None)
+    info_kwargs.pop('npz_paths', None)
+
+    for npz_path in npz_inputs:
+        cache_info(npz_path, **info_kwargs)
 
 
 def _run_merge(args):
-    merge_cache_npz(args.npz_paths, args.out_path)
+    merge_inputs = _resolve_input_paths(args.npz_paths)
+    if not merge_inputs:
+        raise ValueError("No input NPZ files were resolved for merge")
+    merge_cache_npz(merge_inputs, args.out_path)
 
 
-# --------------------------------------------------
-# * CLI entry point
-# --------------------------------------------------
+def _run_stream_cache(args):
+    cache_dir = args.cache_dir
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_tag = args.cache_tag or args.json_path.stem
+    cache_path = build_cache_from_json(args.json_path, cache_dir/cache_tag,
+                                       allow_empty_lbl=args.allow_empty,
+                                       json_type=args.json_type,
+                                       temp_smooth=(not args.no_temp_smooth),
+                                       window=args.window,
+                                       stride=args.stride,
+                                       pure_motion=args.pure_motion,
+                                       legacy=args.legacy,
+                                       pool_mode=args.pool_mode,
+                                       top_k_ratio=args.top_k_ratio,
+                                       top_k_min=args.top_k_min,
+                                       )
+    cache_info(cache_path, mode='stream')
+
+
+
 def main():
     """ CLI entry point."""
+    def _add_cache_build_args(prs):
+        """Add shared cache-building options to a subparser."""
+        prs.add_argument('-w', '--window', type=float, default=WINDOW_SEC, help='clip window in seconds')
+        prs.add_argument('-s', '--stride', type=float, default=STRIDE_SEC, help='clip stride in seconds')
+        prs.add_argument('-e', '--allow-empty', action='store_true', help="allow empty (None) labels")
+        prs.add_argument('-p', '--pure-motion', action='store_true', help='use only motion features, without the static overlap block')
+        prs.add_argument('-l', '--legacy', action='store_true', help='use only the original 18 motion features')
+        prs.add_argument('-pm', '--pool-mode', default=DEFAULT_POOL_MODE,
+                         choices=['max', 'mean', 'lse', 'top_k', 'mean_max', 'mean_std_max', 'mm', 'msm'], help='clip pooling mode')
+        prs.add_argument('-kr', '--top-k-ratio', dest='top_k_ratio', type=float, default=DEFAULT_TOP_K_RATIO, help='ratio for top_k pooling')
+        prs.add_argument('-k',  '--top-k-min'  , dest='top_k_min',   type=int, default=DEFAULT_TOP_K_MIN, help='minimum pooled k for top_k')
+        prs.add_argument('--no-temp-smooth', action='store_true', help='disable temporal smoothing')
+        prs.add_argument('--json-type', default=DEFAULT_TYPE, choices=['type_1', 'type_2', '1', '2'], help='input JSON format for loader')
+
     parser = argparse.ArgumentParser('precompute_clips',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-                                     description='Build clip-feature caches from JSON files or JSON streams',
-                                     )
+                                     description='Build clip-feature caches from JSON files or JSON streams',)
+
     sub = parser.add_subparsers(dest='cmd')
+    ds_bld_p = sub.add_parser('build', help='build train/test cache files from JSON directory')
+    ds_bld_p.add_argument('jsons_dir', type=Path, help="dataset path/ dir containing JSONs")
+    ds_bld_p.add_argument('cache_dir', type=Path, help="path for the cached NPZ feature files")
+    ds_bld_p.add_argument('-t', '--cache-tag', '-cn','--cache-name',  # cn - legacy name for tag
+                                      dest= 'cache_tag', type=Path, default=None, help="base tag for output npz files")
+    ds_bld_p.add_argument('-sd', '--split-dir', type=Path, default=None, help="path for train_videos.txt/test_videos.txt")
+    ds_bld_p.add_argument('-ns', '--new-split', action='store_true', help='force new train/test split')
+    ds_bld_p.add_argument('-r',   '--test-ratio', '--valid-ratio', dest='test_ratio', type=float, default=TEST_RATIO, help='test split ratio')
+    ds_bld_p.add_argument('-rs', '--random-seed', type=int, default=RANDOM_SEED)
+    _add_cache_build_args(ds_bld_p)
 
-    build_p = sub.add_parser('build', help='build train/valid cache files from JSON directory')
-    build_p.add_argument('jsons_dir', type=Path, help="dataset path/ dir containing JSONs")
-    build_p.add_argument('cache_dir', type=Path, help="path for the cached NPZ feature files")
-    build_p.add_argument('-cn', '--cache-name', type=Path, default=None, help="base name for output npz files")
-    build_p.add_argument('-sd', '--split-dir' , type=Path, default=None, help="path for train_videos.txt/valid_videos.txt")
-    build_p.add_argument('-ns', '--new-split', action='store_true', help='force new train/valid split')
-    build_p.add_argument('-r',  '--valid-ratio', type=float, default=VAL_RATIO, help='validation split ratio')
-    build_p.add_argument('-rs', '--random-seed', type=int, default=RANDOM_SEED)
-    build_p.add_argument('-w',  '--window', type=float, default=WINDOW_SEC, help='clip window in seconds')
-    build_p.add_argument('-s',  '--stride', type=float, default=STRIDE_SEC, help='clip stride in seconds')
-    build_p.add_argument('-e',  '--allow-empty', action='store_true', help="allow empty (None) labels")
-    build_p.add_argument('-p',  '--pure-motion', action='store_true', help='use only motion features, without the static overlap block')
-    build_p.add_argument('-l',  '--legacy',  action='store_true', help='use only the original 18 motion features')
-    build_p.add_argument('--no-temp-smooth', action='store_true', help='disable temporal smoothing')
-    build_p.add_argument('--json-type', default=DEFAULT_TYPE, choices=['type_1', 'type_2', '1', '2'], help='input JSON format for loader')
+    stream_p = sub.add_parser('stream', help='build one cache npz from a single long JSON stream')
+    stream_p.add_argument('json_path', type=Path, help='path to one long JSON stream file')
+    stream_p.add_argument('cache_dir', type=Path, help='output directory for the cached NPZ feature file')
+    stream_p.add_argument('-t', '--cache-tag', type=Path, default=None, help='base tag for the output cache npz')
+    _add_cache_build_args(stream_p)
 
-    info_p = sub.add_parser('info', help='print cache statistics from npz file')
-    info_p.add_argument('npz_path', type=Path, help='path to cache npz file')
+    info_p = sub.add_parser('info', help='print cache statistics from NPZ sources')
+    info_p.add_argument('npz_paths', nargs='+', type=Path, help='NPZ sources: may be a file, directory, or glob mask')
     info_p.add_argument('-l',  '--list',    action='store_true', help='print video names')
     info_p.add_argument('-d',  '--details', action='store_true', help='print details table per video')
+    info_p.add_argument('-m',  '--mode',  type=str, choices=['auto', 'dataset', 'stream'],  default='auto', help='inspection wording mode')
     info_p.add_argument('-sm', '--sample',  type=float,help='sample size for list/details: ratio [0,1] or count (>1 integer)')
     info_p.add_argument('-sr', '--sort',    type=str, choices=['duration', 'duration_rev'], help='sorting mode for list/details')
     info_p.add_argument('-rs', '--random-seed', type=int,  help=f"Sampling random seed (default {RANDOM_SEED} )")
 
     merge_p = sub.add_parser('merge', help='merge multiple cache npz files into one')
     merge_p.add_argument('out_path', type=Path, help='output merged npz path')
-    merge_p.add_argument('npz_paths', nargs='+', type=Path, help='input cache npz files to merge')
+    merge_p.add_argument('npz_paths', nargs='+', type=Path, help='NPZ sources: may be a file, directory, or glob mask')
 
     #* if subcommand is missing, route it to `build' for Backward compatibility
-    known_cmds = {'build', 'info', 'merge'}
+    known_cmds = {'build', 'stream', 'info', 'merge'}
     if len(sys.argv) > 1 and not sys.argv[1].startswith('-') and sys.argv[1] not in known_cmds:
         sys.argv.insert(1, 'build')  #* set default
 
     args = parser.parse_args()
     if args.cmd == 'build':
-        _run_build(args)
+        _run_build_cache_ds(args)
+    elif args.cmd == 'stream':
+        _run_stream_cache(args)
     elif args.cmd == 'info':
         _run_info(args)
     elif args.cmd == 'merge':
@@ -569,10 +780,9 @@ def main():
     else:
         parser.print_help()
 
+# endregion
+#775(1,1,1)
 if __name__ == '__main__':
     pass
     main()
-    # cache_info(path="data/cache/Joint_RWFLV_test.npz")
-
-#444(,2,) -> 482(1,4,4)-
-#555(1,1,4)
+#800(1,1,) -> 777(1,1,)

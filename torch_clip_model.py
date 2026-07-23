@@ -14,21 +14,29 @@ import json
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import Dataset, DataLoader, Subset, random_split
+from torch.utils.data import Dataset, DataLoader, Subset, TensorDataset, random_split
 from torch.utils.tensorboard import SummaryWriter
 
 #* Project import
 from common.my_local_utils import print_color
-# from evaluation_tools import (analyze_clip_test, analyze_video_test, print_test_report plot_roc_curve)
-import evaluation_tools as evl
+# from evaluation_core import analyze_clip_test, analyze_video_test
+from evaluation_core import analyze_clip_test, analyze_video_test
+from evaluation_cli import print_test_report
+from stream_analysis import analyze_stream_test
+from motion_feature_schema import (
+    assert_feature_schema_match,
+    load_cache_contract_compact,
+    schema_has_na,
+    temporal_schema_compatible,
+)
 
 #* config constants ToDo: make proper config file
 DEFAULT_WORKDIR = "work_dirs/json_models"
 LOCAL_CONFIG    = "config.json"
 LOCAL_LOG       = "log.json"
 
-DEFAULT_SPLIT_RATIO = 0.85
-DEFAULT_SPLIT_SEED  = 42
+DEFAULT_VALID_RATIO = 0.85
+DEFAULT_VALID_SEED  = 42
 DEFAULT_BATCH_SIZE  = 256
 #* training parameters
 DEFAULT_LR = 1e-3
@@ -40,6 +48,8 @@ DEFAULT_SAVE_EVERY = 10
 #*
 DEFAULT_PATIENCE = 30
 DEFAULT_MIN_DELTA = 0.002
+DEFAULT_WINDOW_TOLERANCE = 0.25
+DEFAULT_STRIDE_TOLERANCE = 0.25
 
 DEFAULT_DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -118,6 +128,14 @@ def eval_one_epoch(model, loader, criterion):
     return total_loss/len(loader.dataset), preds, targets
 
 
+def _infer_hidden_dim_from_state(state: dict) -> int:
+    """Infer the hidden layer width from one saved MLP state dict."""
+    weight = state.get('net.0.weight', None)
+    if weight is None or getattr(weight, 'ndim', None) != 2:
+        raise ValueError("Could not infer hidden_dim from model state")
+    return int(weight.shape[0])
+
+
 def _labels_from_dataset(ds) -> np.ndarray:
     """ Return label array for ClipFeatureDataset or Subset(ClipFeatureDataset)."""
     if hasattr(ds, 'y'):
@@ -156,6 +174,61 @@ def _binary_auc(y_true, y_score):
     pos_ranks = ranks[y_true == 1]
     return (np.sum(pos_ranks) - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
 
+
+def _training_contract_from_cache(train_cache: str | Path, **kwargs) -> tuple[list[dict[str, object]], dict[str, object], dict[str, float]]:
+    """Load and validate the canonical feature/temporal contract for one train cache."""
+    contract, used_legacy_fallback = load_cache_contract_compact(train_cache)
+    train_caches = [dict(item) for item in contract["source_caches"]]
+    if not train_caches:
+        raise ValueError(f"{train_cache} did not provide any source cache provenance")
+
+    canonical_feature_schema = dict(contract["feature_schema"])
+    canonical_temporal_schema = dict(train_caches[0]["temporal_schema"])
+    window_tolerance = float(kwargs.get("window_tolerance", DEFAULT_WINDOW_TOLERANCE))
+    stride_tolerance = float(kwargs.get("stride_tolerance", DEFAULT_STRIDE_TOLERANCE))
+    if used_legacy_fallback:
+        print_color(
+            f"[WARN] {train_cache} is missing cache metadata; training will continue with 'N/A' contract fields.",
+            "o",
+        )
+
+    for index, cache_rec in enumerate(train_caches):
+        feature_schema = dict(cache_rec["feature_schema"])
+        temporal_schema = dict(cache_rec["temporal_schema"])
+        if schema_has_na(canonical_feature_schema) or schema_has_na(feature_schema):
+            if index > 0:
+                print_color(
+                    f"[WARN] Skipping strict feature-schema validation for {train_cache} source_caches[{index}] because metadata is incomplete.",
+                    "o",
+                )
+        else:
+            assert_feature_schema_match(canonical_feature_schema,
+                                        feature_schema,
+                                        context=f"{train_cache} source_caches[{index}]")
+        if schema_has_na(canonical_temporal_schema) or schema_has_na(temporal_schema):
+            if index > 0:
+                print_color(
+                    f"[WARN] Skipping strict temporal-schema validation for {train_cache} source_caches[{index}] because metadata is incomplete.",
+                    "o",
+                )
+        elif not temporal_schema_compatible(canonical_temporal_schema,
+                                            temporal_schema,
+                                            window_tolerance=window_tolerance,
+                                            stride_tolerance=stride_tolerance):
+            raise ValueError(
+                f"Temporal schema mismatch for {train_cache} source_caches[{index}]: "
+                f"expected target around window={canonical_temporal_schema['window']} stride={canonical_temporal_schema['stride']}, "
+                f"got window={temporal_schema['window']} stride={temporal_schema['stride']}"
+            )
+
+    temporal_profile = {
+        "target_window": canonical_temporal_schema["window"],
+        "target_stride": canonical_temporal_schema["stride"],
+        "window_tolerance": window_tolerance,
+        "stride_tolerance": stride_tolerance,
+    }
+    return train_caches, canonical_feature_schema, temporal_profile
+
 # --------------------------------------------------
 # * main/ API functions
 # --------------------------------------------------
@@ -173,7 +246,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
                              Training params, if passed they overwrite the defaults/config settings
             max_epochs, patience, min_delta :
                              E"arly-stop settings; `epochs` is kept as alias for `max_epochs`
-            split_ratio, split_seed : ratio and seed for runtime splitting (if relevant)
+            valid_ratio, valid_seed : ratio and seed for runtime train/valid split
         :return:              path for the effective work_dir
     """
 
@@ -181,7 +254,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     train_npz = Path(train_cache)
     valid_npz = Path(valid_cache) if valid_cache is not None else None
     work_dir = Path(kwargs.get('work_dir', DEFAULT_WORKDIR))
-    run_dir = work_dir/f"{datetime.now().strftime('%y%m%d-%H%M')}_{kwargs.get('tag',train_npz.stem)}"
+    run_dir = work_dir/f"{datetime.now().strftime('%y%m%d_%H-%M-%S')}_{kwargs.get('tag', train_npz.stem)}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     lr = kwargs.get('lr', DEFAULT_LR)
@@ -196,6 +269,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     if max_epochs < 1:
         raise ValueError(f"Invalid max_epochs={max_epochs}. Expected positive integer.")
     min_epochs = min(min_epochs, max_epochs)
+    train_caches, feature_schema, temporal_profile = _training_contract_from_cache(train_npz, **kwargs)
 
     # Build train/valid datasets;
     full_train_ds = ClipFeatureDataset(train_npz)
@@ -205,19 +279,22 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
         valid_used = str(valid_npz)
     else:
         #* split train cache only when valid cache is not given.
-        split_ratio = kwargs.get('split_ratio', DEFAULT_SPLIT_RATIO)
-        split_seed = kwargs.get('split_seed', DEFAULT_SPLIT_SEED)
-        if not (0.0 < split_ratio < 1.0): # or len(full_train_ds) < 2
-            raise ValueError(f" Invalid split_ratio= {split_ratio}. Expected value in (0, 1).")
+        valid_ratio = kwargs.get('valid_ratio', DEFAULT_VALID_RATIO)
+        valid_seed = kwargs.get('valid_seed', DEFAULT_VALID_SEED)
+        if not (0.0 < valid_ratio < 1.0): # or len(full_train_ds) < 2
+            raise ValueError(f" Invalid valid_ratio= {valid_ratio}. Expected value in (0, 1).")
         n_total = len(full_train_ds)
-        n_train = int( max(1, np.floor(n_total*split_ratio)) )
+        n_train = int( max(1, np.floor(n_total*valid_ratio)) )
         n_valid = n_total - n_train
-        gen = torch.Generator().manual_seed(split_seed)
+        gen = torch.Generator().manual_seed(valid_seed)
         train_ds, valid_ds = random_split(full_train_ds, [n_train, n_valid], generator=gen)
-        valid_used =  f"Runtime split: ratio{split_ratio}, seed{split_seed}"
+        valid_used =  f"Runtime valid split: ratio{valid_ratio}, seed{valid_seed}"
 
     #* Save lightweight run config for later testing/evaluation.
     run_cfg = {'train_cache': str(train_npz), 'valid_cache': valid_used, #* datasets configs
+               'train_caches': train_caches,
+               'feature_schema': feature_schema,
+               'temporal_profile': temporal_profile,
                'min_epochs': min_epochs, 'max_epochs': max_epochs,  #* epoch related configs
                'save_every': save_every,
                'patience': patience, 'min_delta': min_delta,  #* early stop condition
@@ -276,7 +353,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
             tb_writer.add_scalar('auc/valid', val_auc, epoch)
 
         if save_every and epoch % save_every == 0:
-            torch.save(model.state_dict(), run_dir/f"model_ep{epoch:03d}.pt")
+            torch.save(model.state_dict(), run_dir/f"checkpoint_ep-{epoch:03d}.pt")
 
         auc_str = f"{val_auc:.4f}" if val_auc is not None else "N/A"
         print(f"Epoch {epoch:03d} | train loss: {train_loss:.4f} | val loss: {val_loss:.4f} | val auc: {auc_str}")
@@ -302,40 +379,40 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     return run_dir    # return model, train_log
 
 
-# def run_testing(test_cache:str|Path, test_model: str | Path, **kwargs):
-def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, stream_mode=False, **kwargs):
-    """     Run model inference on a cache NPZ and save predictions NPZ file.
-        NPZ file stores raw per-clip predictions. Model setting are loaded from config.json (file
-        Default format uses `cache_index` as clip identifier.
-        Stream mode uses (`video_name`, `time_stamp`) as identifiers.
+def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_mode=False, **kwargs):
+    """Run model inference on a cache NPZ and save raw prediction arrays.
+        By default, the saved NPZ uses one unified format that includes any available
+        grouping/timing metadata needed for clip/video/stream analysis.
+        `pure_clips=True` saves one minimal clip-only payload for batch throughput.
         parameters:
         :param test_cache : path to test cache NPZ.
         :param test_model : path to `model.pt`
-        :param vid_info   : if True save clip metadata fields (`meta_video`, `meta_t_start`, `meta_t_end`).
-        :param stream_mode: if True save `video_name` and `time_stamp` instead of `cache_index`.
-        :param kwargs     : batch_size, threshold, out_dir, out_name
+        :param vid_info   : legacy no-op flag kept for compatibility.
+        :param video_mode : legacy no-op flag kept for compatibility.
+        :param kwargs     : batch_size, out_dir, out_name, pure_clips
         :return           : Dict with saved `path` and in-memory prediction arrays.
     """
     model_path = Path(test_model)
     test_npz = Path(test_cache)
 
     batch_size = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
-    threshold = float(kwargs.get('threshold', 0.5))
-
-    # Rebuild model shape from the training config saved with the checkpoint.
-    cfg_path = model_path.parent/LOCAL_CONFIG
-    if not cfg_path.is_file():
-        # raise FileNotFoundError(f"{LOCAL_CONFIG} is missing")
-        print_color(f"{LOCAL_CONFIG} is missing",'o')
-        return None
-    try:
-        with cfg_path.open('r') as f:
-            cfg = json.load(f)
-        hidden_dim = int(cfg['hidden_dim'])
-    except Exception as e:
-        raise ValueError(f"Invalid hidden_dim value in run_config.json: {cfg.get('hidden_dim')}") from e
 
     state = torch.load(model_path, map_location=DEFAULT_DEVICE)
+    # Rebuild model shape from the training config saved with the checkpoint.
+    cfg_path = model_path.parent/LOCAL_CONFIG
+    cfg = {}
+    hidden_dim = None
+    if cfg_path.is_file():
+        try:
+            with cfg_path.open('r') as f:
+                cfg = json.load(f)
+            hidden_dim = int(cfg['hidden_dim'])
+        except Exception as e:
+            raise ValueError(f"Invalid hidden_dim value in run_config.json: {cfg.get('hidden_dim')}") from e
+    else:
+        print_color(f"{LOCAL_CONFIG} is missing, inferring hidden_dim from model state", 'o')
+        hidden_dim = _infer_hidden_dim_from_state(state)
+
     test_ds = ClipFeatureDataset(test_npz)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
@@ -355,10 +432,8 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, stream
 
     y_prob = np.concatenate(probs_all, axis=0)
     y_true = np.concatenate(y_true_all, axis=0)
-    y_pred = (y_prob >= threshold).astype(np.int64)
 
     y_true = y_true.astype(np.int64)
-    y_pred = y_pred.astype(np.int64)
 
     # Save raw per-clip predictions.
     # out_name = kwargs.get('out_name', f"{model_path.stem}_{test_npz.stem}-test.npz")
@@ -367,38 +442,96 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, stream
     out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
 
     save_payload = {'model_path': str(model_path), 'test_cache': str(test_npz),
-                    'y_true': y_true, 'y_pred': y_pred, 'y_prob': y_prob}
+                    'y_true': y_true, 'y_prob': y_prob,
+                    'cache_index': np.arange(len(y_true), dtype=np.int64)}
+    pure_clips = bool(kwargs.get('pure_clips', False))
 
-    if stream_mode or vid_info:
-        test_data = np.load(test_npz, allow_pickle=True)
-        if 'meta' not in test_data.files:
-            raise KeyError(f"{test_npz} does not contain 'meta', cannot add stream/video info")
+    test_data = np.load(test_npz, allow_pickle=True)
+    has_meta = 'meta' in test_data.files
+    if has_meta and not pure_clips:
         meta = test_data['meta']
         if len(meta) != len(y_true):
             raise ValueError(f"meta length mismatch: {len(meta)} vs {len(y_true)} predictions")
         meta_video = np.asarray([Path(item['video']).stem for item in meta], dtype=str)
         meta_t_start = np.asarray([item['t_start'] for item in meta], dtype=np.float32)
         meta_t_end = np.asarray([item['t_end'] for item in meta], dtype=np.float32)
+        meta_n_frames = np.asarray([int(item.get('n_frames', -1)) if isinstance(item, dict) else -1
+                                    for item in meta], dtype=np.int64)
 
-        if stream_mode:
-            save_payload['video_name'] = meta_video
-            save_payload['time_stamp'] = meta_t_end
-        else:
-            save_payload['cache_index'] = np.arange(len(y_true), dtype=np.int64)
-
-        if vid_info:
-            save_payload['meta_video'] = meta_video
-            save_payload['meta_t_start'] = meta_t_start
-            save_payload['meta_t_end'] = meta_t_end
-    else:
-        save_payload['cache_index'] = np.arange(len(y_true), dtype=np.int64)
+        save_payload['meta_video'] = meta_video
+        save_payload['meta_t_start'] = meta_t_start
+        save_payload['meta_t_end'] = meta_t_end
+        save_payload['meta_n_frames'] = meta_n_frames
+        save_payload['video_name'] = meta_video
+        save_payload['time_stamp'] = meta_t_end
 
     np.savez_compressed(out_path, **save_payload)
 
     print(f"\n=== Testing run complete ===\n"
-          f"  Tested model : {test_model}\n"
-          f"  Tested set   : {test_cache}\n"
-          f"  Predictions saved to: {out_path}\n")
+          f"\tTested model : {test_model}\n"
+          f"\tTested set   : {test_cache}\n"
+          f"\tPredictions npz: {out_path.name}\n")
+    return {'path': str(out_path), **save_payload}
+
+
+def run_stream_testing(test_model:str|Path, X:np.ndarray, y:np.ndarray, meta:np.ndarray,
+                       stream_name:str, **kwargs):
+    """Run model inference directly on extracted stream features."""
+    model_path = Path(test_model)
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y, dtype=np.int64)
+    if X.ndim != 2 or not len(X):
+        raise ValueError(f"No stream feature rows available for {stream_name}")
+    if len(X) != len(y) or len(meta) != len(y):
+        raise ValueError("Stream X/y/meta size mismatch")
+
+    state = torch.load(model_path, map_location=DEFAULT_DEVICE)
+    cfg_path = model_path.parent/LOCAL_CONFIG
+    if cfg_path.is_file():
+        with cfg_path.open('r', encoding='utf-8') as f:
+            hidden_dim = int(json.load(f)['hidden_dim'])
+    else:
+        hidden_dim = _infer_hidden_dim_from_state(state)
+
+    model = ClipMLP(X.shape[1], hidden_dim=hidden_dim).to(DEFAULT_DEVICE)
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    loader = DataLoader(
+        TensorDataset(torch.from_numpy(X), torch.from_numpy(y).float()),
+        batch_size=kwargs.get('batch_size', DEFAULT_BATCH_SIZE), shuffle=False)
+
+    probs = []
+    with torch.no_grad():
+        for batch_x, _ in loader:
+            probs.append(torch.sigmoid(model(batch_x.to(DEFAULT_DEVICE))).cpu().numpy())
+    y_prob = np.concatenate(probs, axis=0)
+
+    meta_video = np.asarray([Path(item['video']).stem for item in meta], dtype=str)
+    meta_t_start = np.asarray([item['t_start'] for item in meta], dtype=np.float32)
+    meta_t_end = np.asarray([item['t_end'] for item in meta], dtype=np.float32)
+    meta_n_frames = np.asarray([int(item.get('n_frames', -1)) for item in meta], dtype=np.int64)
+    save_payload = {
+        'model_path': str(model_path),
+        'test_cache': stream_name,
+        'y_true': y,
+        'y_prob': y_prob,
+        'cache_index': np.arange(len(y), dtype=np.int64),
+        'meta_video': meta_video,
+        'meta_t_start': meta_t_start,
+        'meta_t_end': meta_t_end,
+        'meta_n_frames': meta_n_frames,
+        'video_name': meta_video,
+        'time_stamp': meta_t_end,
+    }
+    out_name = kwargs.get('output_tag', f"{model_path.stem}_{Path(stream_name).stem}-tst.npz")
+    out_path = Path(kwargs.get('out_dir', model_path.parent))/str(out_name)
+    out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
+    np.savez_compressed(out_path, **save_payload)
+
+    print(f"\n=== Stream testing run complete ===\n"
+          f"\tTested model : {model_path}\n"
+          f"\tTested stream: {stream_name}\n"
+          f"\tPredictions npz: {out_path.name}\n")
     return {'path': str(out_path), **save_payload}
 
 # --------------------------------------------------
@@ -411,37 +544,43 @@ def test_test(test_cache:str|Path, test_model:str|Path, **kwargs):
     # res = run_testing(test_cache, test_model, **kwargs)
     res = run_testing(test_model, test_cache, **kwargs)
     if res is None: return
-    if not kwargs.get('vid_info',False):
-        report = evl.analyze_clip_test(res['path'], show_roc=kwargs.get('show', False))
-    else: #* vid_info == Ture
-        report = evl.analyze_video_test(res['path'], show_roc=kwargs.get('show', False))
-    evl.print_test_report(report)
+    eval_mode = kwargs.get('eval_mode', None)
+    if eval_mode is None:
+        eval_mode = 'video' if kwargs.get('video_mode', False) else 'clip'
+
+    if eval_mode == 'clip':
+        report = analyze_clip_test(res['path'], show_roc=kwargs.get('show', False))
+    elif eval_mode == 'video':
+        report = analyze_video_test(res['path'], show_roc=kwargs.get('show', False))
+    else:
+        report = analyze_stream_test(res['path'], show_roc=kwargs.get('show', False))
+    print_test_report(report)
 
 #*
 def train_rwd_n_rlvs():
     """ Example script: train/test on RWF and RLVS caches separately."""
     d = Path("data/cache/")
     #* train on RWF data
-    output_path = run_training(d/"RWF_train.npz", tag="TMS-18f_RW", split_ratio=0.85, split_seed=21)
+    output_path = run_training(d/"RWF_train.npz", tag="TMS-18f_RW", valid_ratio=0.85, valid_seed=21)
     #* Test on RWF test-set
     res = run_testing(d/'RWF_test.npz', output_path/'model.pt')
     if res is not None:
-        report = evl.analyze_clip_test(res['path'], show_roc=True, print=True)
+        report = analyze_clip_test(res['path'], show_roc=True, print=True)
     #* Test on RLVS train-set
     res = run_testing(d/'RLVS_train.npz', output_path/'model.pt')
     if res is not None:
-        report = evl.analyze_clip_test(res['path'], show_roc=True)
+        report = analyze_clip_test(res['path'], show_roc=True)
 
     #* train on RLVS data
-    output_path = run_training(d/"RLVS_train.npz", tag="TMS-18f_RLVS", split_ratio=0.85, split_seed=21)
+    output_path = run_training(d/"RLVS_train.npz", tag="TMS-18f_RLVS", valid_ratio=0.85, valid_seed=21)
     #* Test on RLVS test-set
     res = run_testing(d/'RLVS_test.npz', output_path/'model.pt')
     if res is not None:
-        report = evl.analyze_clip_test(res['path'], show_roc=True, print=True)
+        report = analyze_clip_test(res['path'], show_roc=True, print=True)
     # * Test on RLVS train-set
     res = run_testing(d/'RWF_train.npz', output_path/'model.pt')
     if res is not None:
-        report = evl.analyze_clip_test(res['path'], show_roc=True)
+        report = analyze_clip_test(res['path'], show_roc=True)
 
 
 def train_joint():
@@ -460,18 +599,18 @@ def train_joint():
     # cache_info(tr_1)
     # cache_info(tr_2)
     cache_info(tr_j)
-    output_path = run_training(tr_j, tag="TMS-18f_Jn", split_ratio=0.85, split_seed=42)
+    output_path = run_training(tr_j, tag="TMS-18f_Jn", valid_ratio=0.85, valid_seed=42)
     #* Test on RWF test-set
     res = run_testing(tst_j, output_path/'model.pt')
     if res is not None:
-        report = evl.analyze_clip_test(res['path'], show_roc=True, print=True)
+        report = analyze_clip_test(res['path'], show_roc=True, print=True)
 
 
 if __name__ == '__main__':
     pass
     # Example:
     # model, hist = run_training('data/cache/RWF_train.npz', 'data/cache/RWF_valid.npz')
-    # model, hist = run_training('data/cache/RWF_train.npz', split_ratio=0.85, split_seed=42)
+    # model, hist = run_training('data/cache/RWF_train.npz', valid_ratio=0.85, valid_seed=42)
 
     # train_rwd_n_rlvs()
     # train_joint()

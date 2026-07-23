@@ -4,13 +4,16 @@ from colorama import Fore
 
 #* Local imports
 from common.my_local_utils import print_color
-from json_utils import  load_json_data
+from json_utils import  load_json_data, list_json_sources, resolve_json_source
 
 # --------------------------------------------------
 # * Unit-level defaults (ToDo: later to be loaded from config)
 # * Option (i): 1s window, 0.5s stride
 WINDOW_SEC = 1.0   #* clip duration in seconds
 STRIDE_SEC = 0.5   #* stride between clips in seconds
+#* optimized values:
+# WINDOW_SEC = 3.0
+# STRIDE_SEC = 1.5
 MIN_EVENTS = 2     #* minimum number of non-zero group_events to mark clip positive
 
 # --------------------------------------------------
@@ -74,7 +77,6 @@ def slice_json_stream(# json_path:str|Path,
                 label = 1
             else:
                 label = None if allow_empty_lbl else 0
-
             clips.append({'frames':clip_frames, 'label':label, 't_start':t_first, 't_end':t_last})
 
         t += stride_sec
@@ -175,8 +177,9 @@ def print_events(events:dict):
         print('\t ', i, f": from\t {e['begin']:3.1f} to {e['end']:6.1f} sec")
 
 def inspect_dir(j_dir:Path):
-    for j in j_dir.glob("*.json"):
-        print(f"== File ==========================\n{j.name:s} - {j.stat().st_size:,}")
+    for j in list_json_sources(j_dir):
+        src = resolve_json_source(j)
+        print(f"== File ==========================\n{j.name:s} - {src.stat().st_size:,}")
         sjs = slice_json_stream(load_json_data(j), allow_empty_lbl=False)
         # inspect_clips(slice_json_stream(sjs, allow_empty_lbl=False))
         inspect_clips(sjs)
