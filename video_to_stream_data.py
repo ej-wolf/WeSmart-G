@@ -68,8 +68,7 @@ def _is_video(f:str|Path):
 def parse_annotation_file(ann_path):
     """ Load event annotations into converter intervals by numeric or special flag."""
     event_intervals = {}
-    split_intervals = []
-    exclude_intervals = []
+    split_intervals, exclude_intervals = [], []
     for event in load_event_ann(ann_path).get('events', []):
         event_flag = event.get('flag')
         interval = (resolve_event_time(event.get('start')),
@@ -80,12 +79,12 @@ def parse_annotation_file(ann_path):
             elif event_flag in EXCLUDE_TAGS:
                 exclude_intervals.append(interval)
             continue
-
-        event_intervals.setdefault(int(event_flag), []).append(interval)
+        else:
+            event_intervals.setdefault(int(event_flag), []).append(interval)
 
     return {'events': event_intervals, 'split': split_intervals, 'exclude': exclude_intervals}
 
-#*  --- Main function, to be used from other unit ---------------------------------------
+#* region --- Main function, to be used from other unit ---------------------------------------
 def process_video(input_videos: Path|str|list,
                   output_path:  Path|str = None,
                   sample_rate = DEFAULT_SAMPLING,
@@ -121,17 +120,18 @@ def process_video(input_videos: Path|str|list,
                                  each split start with stream_event: ['S'].
     use_old_meta:               → Optional kwargs flag. If True, write the old compact detector metadata.
     """
-    #* local sub-function (helpers)
-    def find_ann_file(vid_path):
+
+    def find_ann_file(vid:str|Path):
         """Find the annotation file selected for one video."""
         if   ann_mode == 'file':
             return ann_source
         elif ann_mode == 'dir':
-            ann_stem = ann_source/vid_path.stem
+            ann_stem = ann_source / vid.stem
         elif ann_mode == 'auto':
-            ann_stem = vid_path
+            ann_stem = vid
         else:
             return None
+
         candidates = (ann_stem.with_suffix(".ann"),
                       ann_stem.with_suffix(".txt"),
                       ann_stem.with_suffix(""))
@@ -176,7 +176,7 @@ def process_video(input_videos: Path|str|list,
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
 
     #* resolve input/output paths :
-    vid_list = []
+    # vid_list = []
     if isinstance(input_videos, (list, tuple, set,)):
     # * ToDo: the list option is not 100% debugged
         input_dir = None
@@ -189,6 +189,8 @@ def process_video(input_videos: Path|str|list,
         elif input_videos.is_file():
             input_dir = input_videos.parent
             vid_list = [input_videos]
+        else:
+            vid_list = input_dir = None
     if not vid_list:
         raise FileNotFoundError(f"No relevant videos were found: {input_videos}")
 
@@ -303,7 +305,6 @@ def process_video(input_videos: Path|str|list,
         frames, segments = [],  []
         split_idx, frame_idx = 0, 0
         skip_until_sec = None
-        # dTHRESH = 0.5
         while True:
             ret, frame = cap.read()
             if not ret or frame is None:
@@ -376,8 +377,7 @@ def process_video(input_videos: Path|str|list,
             group_tags = group_events if group_events else default_tags
 
             frames.append({'f': frame_idx, 't': time_sec,
-                           'individual_events': [],
-                            'group_events': sorted(set(group_tags), reverse=True),
+                           'individual_events': [], 'group_events': sorted(set(group_tags), reverse=True),
                             'detection_list': detection_list,})
 
             while split_idx < len(split_intervals):
@@ -401,8 +401,7 @@ def process_video(input_videos: Path|str|list,
             frame_idx += 1
 
         if frame_idx == 0:
-            print(f"[WARN] Skipping video with no decodable frames: {vid_path} "
-                  f"(unsupported codec/container or corrupted file)")
+            print(f"[WARN] Skipping video due to no decodable frames: {vid_path}\n unsupported codec or corrupted file")
             cap.release()
             cv2.destroyAllWindows()
             continue
@@ -426,9 +425,6 @@ def process_video(input_videos: Path|str|list,
             continue
 
         event_intervals = {}
-        # event_intervals = {'tension': {'raw': tension_intervals, 'sec': tension_intervals_sec},
-        #                    'fight': {'raw': fight_intervals,   'sec': fight_intervals_sec},
-        #                    'fall': {'raw': fall_intervals,    'sec': fall_intervals_sec}, },
 
         for tag in sorted(set(EVENT_INTERVAL_NAMES) | set(event_intervals_by_tag)):
             tag_name = EVENT_INTERVAL_NAMES.get(tag, str(tag))
@@ -466,26 +462,23 @@ def process_video(input_videos: Path|str|list,
     return True
 
 #397->360(1,4,4) -> 424
-#460(1,15,3)
+#460(1,15,3)-> 464(2,1,)
 
 if __name__ == "__main__":
-
-    # video_path = Path("/mnt/local-data/Projects/Wesmart/Video-datasets/draft_set/tst_conv")
-    # draft_path = Path("/mnt/local-data/Python/Projects/weSmart/data/json_files/tst_conv/draft_dir")
-    # process_video(video_path, output_path = draft_path/'tst-03', default_grp_tag= 0)
 
     ubi_ann   = Path("data/video/UBI_FIGHTS/ann_ws_ready")
     ubi_fight = Path("data/video/UBI_FIGHTS/videos/fight-x")
     ubi_norm  = Path("data/video/UBI_FIGHTS/videos/normal-x")
-    ubi_tst_ls = [ "data/video/testing-streams/F_116_0_0_0_0.mp4",
+    ubi_tst_ls = [ "data/video/testing-streams/F_116_0_0_0_0.mp4",  #* Fights
                    "data/video/testing-streams/F_121_1_0_0_0.mp4",
                    "data/video/testing-streams/F_141_0_0_0_0.mp4",]
+    ubi_tst_ls +=["data/video/testing-streams/N_656_1_0_1_0.mp4",   #* Normal
+                  "data/video/testing-streams/N_765_0_0_1_0.mp4",]
 
-    # output_dir = Path("data/json_files/UBI/3fps/normal")
-    fps = 6; grp_tag = 0
-    output_dir = Path(f"data/json_files/UBI/{fps}fps-v/test")
-    process_video(ubi_tst_ls, output_dir, ann_path=ubi_ann, default_grp_tag=grp_tag,
-                  sample_rate=fps, zip_output=False, skip_without_ann=True, ignore_split=False)
-    output_dir = Path(f"data/json_files/UBI/{fps}fps/normal-x")
-    # process_video(ubi_norm, json_dir, ann_path=None, default_grp_tag=grp_tag,
-    #               sample_rate=fps, zip_output=True, skip_without_ann=False)
+    fps_ = 6; grp_tag = 0
+    # output_dir = Path(f"data/json_files/UBI/{fps_}fps-v/test")
+    # process_video(ubi_tst_ls, output_dir, ann_path=ubi_ann, default_grp_tag=grp_tag,
+    #               sample_rate=fps_, zip_output=False, skip_without_ann=True, ignore_split=False)
+    output_dir = Path(f"data/json_files/UBI/{fps_}fps/normal")
+    process_video(ubi_tst_ls, output_dir, ann_path=None, default_grp_tag=grp_tag,
+                  sample_rate=fps_, zip_output=True, skip_without_ann=False)

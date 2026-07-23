@@ -323,8 +323,8 @@ def evaluate_raw_test(raw_path, mode, out_dir, threshold=DEFAULT_EVAL_THRESHOLD,
     if   mode == 'stream':
         return analyze_stream_test(raw_path, output_name=output_name,
                                    details_name=f"{get_exporting_name(model_path, test_cache, 'events')}.json",
-                                   events_json=kwargs.get('events_json', True),
-                                   plotting=kwargs.get('plotting', 'save'), **common)
+                                   events_json= kwargs.get('events_json', True),
+                                   plotting= kwargs.get('plotting', 'save'), **common)
     elif mode == 'video':
         return analyze_video_test(raw_path, output_name=output_name, **common)
     elif mode == 'clip':
@@ -712,8 +712,8 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             return loaded, 'streams'
 
         paths = []
-        for item in items:
-            path = Path(item)
+        for i in items:
+            path = Path(i)
             if path.is_dir():
                 paths.extend(list_json_sources(path))
             else:
@@ -726,12 +726,12 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             except Exception as exc:
                 print_color(f"[WARN] Skipping stream {path}: {type(exc).__name__}: {exc}", 'o')
         if len(items) == 1 and Path(items[0]).is_dir():
-            source_name = Path(items[0]).name
+            src_name = Path(items[0]).name
         elif len(paths) == 1:
-            source_name = paths[0].stem
+            src_name = paths[0].stem
         else:
-            source_name = 'streams'
-        return loaded, source_name
+            src_name = 'streams'
+        return loaded, src_name
 
     def _model_refs(refs) -> list[Path]:
         out = []
@@ -836,9 +836,9 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
 
         ds_npz = []
         if test_pair:
-            pair = _find_test_pair()
-            if pair is not None:
-                ds_npz.append(pair)
+            tst_pair = _find_test_pair()
+            if tst_pair is not None:
+                ds_npz.append(tst_pair)
         # if test_pair is not None and not test_pair.is_file():
         #     print_color(f"[WARN] Missing paired test cache for {run_dir.name}: {test_pair}", 'o')
         for tst_npz in resolve_npz_inputs(ds_tests, npz_dir):
@@ -1093,9 +1093,9 @@ def build_window_study(): # 80 -> 65
 
 #733(,20,4)-> 755(,23,6)
 #build_caches 966(1,26,7)/ log 985(1,33,4)- build-rf 968(1,31,4)-cleanup : 926
-#tst/trn-refactor 850(1,26,2)-> 872->
-#sumallres-rfc 947(5,22,4)
-#tst_mdl-rfc 1096(4,28,11)
+#tst/trn-refactor 850(1,26,2)->
+#sumallres-rfc 947(5,22,4) #tst_mdl-rfc 1096(4,28,11)
+#tst_mdl-rfc 1099(4,31,13)
 
 
 #_______________________________________________________________________#
@@ -1123,27 +1123,33 @@ def cache_builder():
                       {'cache_dir': cache_dir, 'split_ratio': 0.2, 'random_seed': 42})
 
     # *  Test test_models
-def test_runner():
+def test_runner(test_streams, **kwargs):
 
-    tmp_strm_test = ["/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/weSmart_demo.json",
-                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/Russian_Road_Rage- Micky_Mouse_&_Sponge_Bob.json",
-                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/F_60_1_2_0_0.json",
-                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/F_121_1_0_0_0.zip",
-                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_529_0_1_1_0.zip",
-                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_390_0_0_1_0.zip",
-                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_383_0_0_1_0.zip",
-                     "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_115_0_0_1_0.zip"]
+    strm_test_subset = ["/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/weSmart_demo.json",
+                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/Russian_Road_Rage- Micky_Mouse_&_Sponge_Bob.json",
+                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/F_60_1_2_0_0.json",
+                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/F_121_1_0_0_0.zip",
+                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_529_0_1_1_0.zip",
+                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_390_0_0_1_0.zip",
+                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_383_0_0_1_0.zip",
+                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_115_0_0_1_0.zip"]
+
+    strm_test_set  = [p for ptn in ("*.zip", "*.json") for p in test_streams.rglob(ptn)]
 
     # mdl_dir  = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/w30-15_models/w30-15-tst")
     # op_dir = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/sanity-testing/testing"
-    mdl_dir = Path("work_dirs/models")
-    out_dir = Path("work_dirs/testing")
-    tst_ds =  None# Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/ds")
+    mdl_dir = Path(kwargs.get('mdl_dir', "work_dirs/models" ))   # Path("work_dirs/models")
+    out_dir = Path(kwargs.get('out_dir', "work_dirs/testing"))   # Path("work_dirs/testing")
+    tst_ds =  None  # Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/ds")
+
     # tst_strm = None #Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/strm")
-    tst_strm = tmp_strm_test # Path("data/json_files/testing")
+    tst_strm = strm_test_set # Path("data/json_files/testing")
+    print(f"\n--- Testing list: ({len(tst_strm)} streams in total) ---:")
+    for f in tst_strm: print(f.stem)
+
     threshold = [0.5, 0.6]
     test_models(mdl_dir, out_dir=out_dir, summary= out_dir, threshold=threshold,
-                ds_tests= tst_ds, stm_tests=tst_strm, test_pair=True)
+                ds_tests= tst_ds, stm_tests=tst_strm, test_pair=True, plotting=None)
 
 # * endregion
 
@@ -1151,7 +1157,7 @@ if __name__ == "__main__":
     pass
 
     # cache_builder()
-    test_runner()
+    test_runner(Path("data/json_files/testing"))
 
     #* region Train models
     cache_dir = Path("data/cache/Joint_sets")

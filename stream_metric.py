@@ -104,7 +104,9 @@ def eval_multi_streams(timelines, pred_col=None, threshold=None, **kwargs) -> di
         try:
             stream_reports.append(_evaluate_timeline(t_line, pred_col, threshold, params))
         except Exception as error:
-            stream_reports.append({'file' : str(t_line.get('path', 'N/A')), 'status': 'fail',
+            metadata = t_line.get('metadata', {})
+            stream_reports.append({'timeline': metadata.get('timeline', 'N/A'),
+                                   'stream': metadata.get('source'), 'status': 'fail',
                                    'error': f"{type(error).__name__}: {error}"})
 
     valid_streams = [report for report in stream_reports if report['status'] == 'pass']
@@ -163,7 +165,7 @@ def eval_multi_streams(timelines, pred_col=None, threshold=None, **kwargs) -> di
 
 
 def eval_multi_thresholds(timelines, thresholds=None, pred_cols=None, **kwargs) -> list[dict]:
-    """Evaluate the same timelines at multiple thresholds or prediction columns."""
+    """ Evaluate the same timelines at multiple thresholds or prediction columns."""
 
     def selectors(values, name):
         if values is None:
@@ -225,66 +227,69 @@ def _evaluate_timeline(timeline, pred_col, threshold, params):
     diffs = [right - left for left, right in zip(times, times[1:])]
     if any(diff <= 0 for diff in diffs):
         raise ValueError("timeline t_frm values must be unique and increasing")
+
     timing = get_timeline_timing(rows, timeline['metadata'])
     last_step = median(diffs) if diffs else 1.0/timing['frq_i']
-    durations = diffs + [last_step]
-
-    gt = [row['gt_label'] for row in rows]
-    pred = ([row[pred_col] for row in rows] if pred_col is not None
-            else [int(row['y_prob'] >= threshold) for row in rows])
-    if any(value not in {0, 1} for value in gt):
+    tl_step = diffs + [last_step]
+    tl_gt = [r['gt_label'] for r in rows]
+    tl_prd = ([r[pred_col] for r in rows] if pred_col is not None
+                                        else [int(row['y_prob'] >= threshold) for row in rows])
+    if any(value not in {0, 1} for value in tl_gt):
         raise ValueError("gt_label values must be binary 0/1")
-    if any(value not in {0, 1} for value in pred):
+    if any(value not in {0, 1} for value in tl_prd):
         raise ValueError("prediction values must be binary 0/1")
 
-    gt_events = _build_events(gt, times, durations, params['event_gap'])
-    pred_events = _build_events(pred, times, durations, params['event_gap'])
-    gt_event_durations = [event['end'] - event['start'] for event in gt_events]
-    k_frames = min(params['k_max'], max(params['k_min'],
-                   math.floor(timing['window_span']*timing['fps']/2.0)))
-    timeline_end = times[-1] + durations[-1]
+    gt_events = _build_events(tl_gt, times, tl_step, params['event_gap'])
+    pred_events = _build_events(tl_prd, times, tl_step, params['event_gap'])
+    gt_event_dur = [event['end'] - event['start'] for event in gt_events]
+    k_frames = min(params['k_max'], max(params['k_min'], math.floor(timing['window_span']*timing['fps']/2.0)))
+    timeline_end = times[-1] + tl_step[-1]
 
     lags = []
     full_count = half_count = 0
     for gt_event in gt_events:
         nominal_boundary = gt_event['start'] + k_frames/timing['fps']
-        boundary_idx = bisect_left(times, nominal_boundary)
+        boundary_idx  = bisect_left(times, nominal_boundary)
         full_boundary = times[boundary_idx] if boundary_idx < len(times) else timeline_end
         miss_boundary = max(gt_event['start'] + timing['window_span'], full_boundary)
         credit = 0.0
         overlapping_starts = [pred_event['start'] for pred_event in pred_events
-                              if _events_overlap(gt_event, pred_event)]
-        for pred_event in pred_events:
-            if not _events_overlap(gt_event, pred_event):
+                                                  if _events_overlap(gt_event, pred_event)]
+        for prd in pred_events:
+            if not _events_overlap(gt_event, prd):
                 continue
-            if pred_event['start'] <= full_boundary:
+            if prd['start'] <= full_boundary:
                 credit = 1.0
                 break
-            if pred_event['start'] <= miss_boundary:
+            if prd['start'] <= miss_boundary:
                 credit = max(credit, 0.5)
         full_count += credit == 1.0
         half_count += credit == 0.5
         if credit > 0 and overlapping_starts:
             lags.append(min(overlapping_starts) - gt_event['start'])
 
-    fp_events = sum(not any(_events_overlap(pred_event, gt_event) for gt_event in gt_events)
-                    for pred_event in pred_events)
-    total_time = sum(durations)
-    t_negative = sum(duration for duration, label in zip(durations, gt) if label == 0)
-    t_fp = sum(duration for duration, gt_value, pred_value in zip(durations, gt, pred)
-               if gt_value == 0 and pred_value == 1)
+    fp_events = sum(not any(_events_overlap(prd, gt) for gt in gt_events)
+                                                     for prd in pred_events)
+    total_time = sum(tl_step)
+    t_negative = sum(step for step, lbl in zip(tl_step, tl_gt) if lbl == 0)
+    t_fp = sum(step for step, gt, prd in zip(tl_step, tl_gt, tl_prd)  if gt==0 and prd==1)
     t_tn = t_negative - t_fp
     fp_rate = fp_events/(t_negative/3600.0) if t_negative else None
-    return {'file': str(timeline['path']),
-            'stream': timeline['metadata'].get('source'),
-            'status': 'pass', 'timing': timing,
-            'time': {'total': total_time, 't_neg': t_negative, 't_fp': t_fp, 't_tn': t_tn},
+    recall = (full_count + 0.5*half_count)/len(gt_events) if  gt_events else None
+    fp_burden = (t_fp + params['fp_cost']*fp_events)/t_negative if t_negative else None
+
+    return {'timeline':timeline['metadata']['timeline'],
+            'stream':  timeline['metadata']['source'],
+            'status': 'pass',
+            'timing': timing,
+            'scores': {'recall': recall, 'fp_burden': fp_burden},
+            'time'  : {'total': total_time, 't_neg': t_negative, 't_fp': t_fp, 't_tn': t_tn},
             'events': {'gt': len(gt_events), 'predicted': len(pred_events),
                        'full': full_count, 'half': half_count,
                        'false': fp_events, 'fp_per_h': fp_rate,
-                       'duration': {'total': sum(gt_event_durations),
-                                    'longest': max(gt_event_durations, default=0.0)},
-                       'avg_lag': sum(lags)/len(lags) if lags else None}}
+                       'duration': {'total': sum(gt_event_dur), 'longest': max(gt_event_dur, default=0.0)},
+                       'avg_lag': sum(lags)/len(lags) if lags else None}
+            }
 
 
 def _build_events(mask, times, durations, max_gap):

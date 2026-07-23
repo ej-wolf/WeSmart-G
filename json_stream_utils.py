@@ -51,7 +51,13 @@ FPS_TOLERANCES = 0.2
 SJ_INFO_REPORT  = 'stream_json_info.json'
 SJ_INFO_SUMMARY = 'stream_json_info.csv'
 SJ_META_INFO = 'stream_meta_info.json'
-DEFAULT_STREAM_META_PATH = Path.cwd() /'work_dirs'/SJ_META_INFO
+DEFAULT_STREAM_META = Path.cwd() / 'work_dirs' / SJ_META_INFO
+
+
+def stream_stem(path: str | Path) -> str:
+    """Return the dot-free canonical identity of a stream-related file."""
+    return Path(path).name.split('.', 1)[0]
+
 
 def _frame_delta_stats(frames: list[dict[str, Any]]) -> tuple[list[float], float]:
     times = [float(frame.get('t', 0.0)) for frame in frames]
@@ -289,7 +295,8 @@ def collect_stream_meta(sj_path, op_path=None) -> dict[str, Any]:
             sj_files = [resolve_json_source(sj_path)]
 
     records, existing_ids = [], set()
-    output_path = Path(op_path) if op_path is not None else DEFAULT_STREAM_META_PATH
+    records_changed = False
+    output_path = Path(op_path) if op_path is not None else DEFAULT_STREAM_META
     output_path = (output_path / SJ_META_INFO
                    if output_path.is_dir() or output_path.suffix == '' else output_path)
     if output_path.is_file():
@@ -303,10 +310,19 @@ def collect_stream_meta(sj_path, op_path=None) -> dict[str, Any]:
                 continue
             record = dict(record)
             record.pop('key', None)
-            records.append(record)
-            if record.get('stem') is not None:
-                existing_ids.add(_entry_id(record['stem'], record.get('fps'),
-                                           record.get('yolo_threshold')))
+            if record.get('stem') is None:
+                records.append(record)
+                continue
+            canonical_stem = stream_stem(record['stem'])
+            records_changed = records_changed or canonical_stem != record['stem']
+            record['stem'] = canonical_stem
+            entry_id = _entry_id(record['stem'], record.get('fps'),
+                                 record.get('yolo_threshold'))
+            if entry_id not in existing_ids:
+                records.append(record)
+                existing_ids.add(entry_id)
+            else:
+                records_changed = True
 
     added, skipped, bad_files = [], [], []
     for path in sj_files:
@@ -316,7 +332,7 @@ def collect_stream_meta(sj_path, op_path=None) -> dict[str, Any]:
             if not isinstance(frames, list):
                 raise ValueError('missing frames list')
 
-            stem = path.name[:-len('.json.zip')] if path.name.lower().endswith('.json.zip') else path.stem
+            stem = stream_stem(path)
             fps = _effective_fps(data)
             ylth = data.get('detection_threshold')
             if ylth is None:
@@ -357,7 +373,7 @@ def collect_stream_meta(sj_path, op_path=None) -> dict[str, Any]:
             bad_files.append({'file': str(path),
                               'error': f'{type(error).__name__}: {error}'})
 
-    if output_path is not None and added:
+    if output_path is not None and (added or records_changed):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {'version': 1, 'streams': records}
         with output_path.open('w', encoding='utf-8') as file:
