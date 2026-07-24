@@ -27,13 +27,14 @@ def print_color(msg:str, clr=Fore.RED):
 def as_collection(x):
     """  If x is a collection (list/tuple/set/dict/range/numpy array/torch tensor/etc.)
     return it as-is. Otherwise, wrap it in a single-element list.
-    (*) Strings/bytes are treated as scalars (wrapped).
+    (*) String/byte and dict are treated as scalars (wrapped).
     (*) Multi-dim numpy / torch arrays are returned as-is (no special handling).
+    (*) 23/7/26 update: dict treatment was switched from collection to scalar
     """
     from collections.abc import Iterable
 
-    if isinstance(x, (str, bytes, bytearray)):
-        return [x]    #* treat strings/bytes as scalars, not collections
+    if isinstance(x, (str, bytes, bytearray, dict)):
+        return [x]    #* treat strings/bytes/dicts as scalars, not collections
 
     #* optional numpy/torch support without hard dependency
     np_types = ()
@@ -50,7 +51,7 @@ def as_collection(x):
         pass
 
     # * common concrete collection types
-    collection_types = (list, tuple, set, frozenset, range, dict) + np_types + torch_types
+    collection_types = (list, tuple, set, frozenset, range) + np_types + torch_types
     if isinstance(x, collection_types):
         return x
     #* other iterables (e.g. generators); treat as collections and return as-is

@@ -20,9 +20,9 @@ from torch.utils.tensorboard import SummaryWriter
 #* Project import
 from common.my_local_utils import print_color
 # from evaluation_core import analyze_clip_test, analyze_video_test
-from evaluation_core import analyze_clip_test, analyze_video_test
-from evaluation_cli import print_test_report
-from stream_analysis import analyze_stream_test
+from evaluation_core import DEFAULT_EVAL_THRESHOLD, analyze_clip_test, analyze_video_test
+from analysis_utils import print_test_report
+from analysis_api import analyze_raw_results
 from motion_feature_schema import (
     assert_feature_schema_match,
     load_cache_contract_compact,
@@ -553,7 +553,9 @@ def test_test(test_cache:str|Path, test_model:str|Path, **kwargs):
     elif eval_mode == 'video':
         report = analyze_video_test(res['path'], show_roc=kwargs.get('show', False))
     else:
-        report = analyze_stream_test(res['path'], show_roc=kwargs.get('show', False))
+        result = analyze_raw_results(res['path'], mode='stream',
+                                     thresholds=[kwargs.get('threshold', DEFAULT_EVAL_THRESHOLD)])
+        report = result['metric']
     print_test_report(report)
 
 #*

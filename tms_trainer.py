@@ -26,7 +26,7 @@
     usage:
     >> tms_trainer.py test test_model test_cache [-h] [-bs BATCH_SIZE] [-od OUT_DIR]
                          [-t OUTPUT_TAG] [-ec | -ev | -es] [--pure-clips]
-                         [-td THRESHOLD] [-nj] [-ns] [--no-roc-csv] [--no-print]
+                         [-td THRESHOLD] [-ns] [--no-roc-csv] [--no-print]
     * positional arguments:
       test_model                    : model checkpoint path
       test_cache                    : test cache npz path
@@ -37,7 +37,6 @@
       -ev/--eval-video              : run video evaluation after saving raw predictions
       -es/--eval-stream             : run stream evaluation after saving raw predictions
       -td/--threshold               : evaluation threshold
-      -nj/--no-events-json          : do not save stream events json file
       -ns/--no-show-roc             : do not display ROC figure
       --no-roc-csv                  : do not save ROC CSV file
       --no-print                    : do not print test report
@@ -51,8 +50,8 @@ from pathlib import Path
 import argparse
 from common.my_local_utils import print_color
 from torch_clip_model import run_training, run_testing
-from evaluation_core import analyze_clip_test, analyze_video_test
-from stream_analysis import analyze_stream_test
+from evaluation_core import DEFAULT_EVAL_THRESHOLD, analyze_clip_test, analyze_video_test
+from analysis_api import analyze_raw_results
 
 
 def _kwargs_from_args(args, names):
@@ -124,12 +123,14 @@ def _run_test(args):
         return
 
     eval_kw = {'print': args.report, 'show_roc': args.show_roc,
-               'roc_csv': args.roc_csv, 'events_json': args.events_json,
-               'threshold': args.threshold}
+               'roc_csv': args.roc_csv, 'threshold': args.threshold}
 
     # TODO: Remove the legacy flag compatibility, once the new CLI is fully adopted.
     if   eval_target == 'stream':
-        analyze_stream_test(res['path'], **eval_kw)
+        analyze_raw_results(res['path'], mode='stream',
+                            thresholds=[args.threshold if args.threshold is not None
+                                        else DEFAULT_EVAL_THRESHOLD],
+                            print_results=args.report)
     elif eval_target == 'video':
         analyze_video_test(res['path'], **eval_kw)
     else:
@@ -168,7 +169,6 @@ def main():
     test_p.add_argument('-es', '--eval-stream',action='store_true', help='run stream evaluation after saving raw predictions')
     test_p.add_argument('--pure-clips', action='store_true', help='save minimal clip-only raw NPZ (skip evaluation)')
     test_p.add_argument('-td', '--threshold', type=float, default=None, help='Evaluation threshold')
-    test_p.add_argument('-nj', '--no-events-json', dest='events_json', action='store_false', help='Do not save stream events JSON file')
     test_p.add_argument('-ns', '--no-show-roc', dest='show_roc', action='store_false', help='Do not display ROC figure')
     test_p.add_argument('--no-roc-csv', dest='roc_csv', action='store_false', help='Do not save ROC CSV file')
     test_p.add_argument('--no-print',   dest='report' ,  action='store_false', help='Do not print test report')
@@ -176,7 +176,7 @@ def main():
     test_p.add_argument('--evaluate', action='store_true', help='legacy flag; use --eval-clip/video/stream instead')
     test_p.add_argument('-vm', '--video-mode',  dest='video_mode', action='store_true',  help='legacy flag; use --eval-clip/video/stream instead')
     test_p.add_argument('-sm', '--stream-mode', dest='stream_mode', action='store_true', help='legacy flag; use --eval-clip/video/stream instead')
-    test_p.set_defaults(report=True, show_roc=False, roc_csv=True, events_json=True,
+    test_p.set_defaults(report=True, show_roc=False, roc_csv=True,
                         video_mode=False, stream_mode=False, evaluate=False,
                         eval_clip=False, eval_video=False, eval_stream=False, pure_clips=False)
     test_p.set_defaults(fn=_run_test)

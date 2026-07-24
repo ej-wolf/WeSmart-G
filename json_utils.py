@@ -82,7 +82,7 @@ def load_json_data(file:str|Path, j_type='type_1'):
     def _type_1_detections(frame: dict[str, Any]) -> list[dict[str, Any]]:
         detections = []
         for bb in frame.get('bbs_list_of_keypoints', []):
-            detections.append({'class': bb[0], 'conf': bb[1], 'bbox': bb[2:6],  'key_pts': bb[6]})
+            detections.append({'clss': bb[0], 'conf': bb[1], 'bbox': bb[2:6],  'key_pts': bb[6]})
         return detections
 
     def _type_2_detections(frame: dict[str, Any]) -> list[dict[str, Any]]:
