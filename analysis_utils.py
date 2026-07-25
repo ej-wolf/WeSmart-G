@@ -13,24 +13,6 @@ from common.my_local_utils import _fmt, as_collection, get_unique_name
 
 #* region Public API  ---------------------------------------------------
 # -----------------------------------------------------------------------
-def fmt_timestamp(val):
-    """Format seconds as s.dd, mm:ss.dd, or hh:mm:ss."""
-    sign = '-' if float(val) < 0 else ''
-    val = abs(float(val))
-    if val < 120:
-        trunc = math.trunc(val*100)/100
-        return f'{sign}{trunc:.2f}'
-    if val < 3600:
-        mm = int(val // 60)
-        ss = math.trunc((val - mm*60)*100)/100
-        return f'{sign}{mm:02d}:{ss:05.2f}'
-    total_sec = int(val)
-    hh = total_sec // 3600
-    mm = (total_sec % 3600) // 60
-    ss = total_sec % 60
-    return f'{sign}{hh:02d}:{mm:02d}:{ss:02d}'
-
-
 def build_timelines(y_true, y_prob, streams, t_start, t_end, n_frames=None) -> list[dict]:
     """Build ordered stream timelines from normalized per-window arrays."""
     y_true = np.asarray(y_true, dtype=np.int64)
@@ -216,7 +198,8 @@ def save_timeline_csv(timeline: dict, output_path, pred_cols=None) -> Path:
         writer = csv.writer(file)
         for key in ('source', 'win_span', 'fps', 'infer_t', 'frq_i'):
             if key in metadata:
-                val = fmt_timestamp(metadata[key]) if key in {'win_span', 'infer_t'} else metadata[key]
+                val = (_fmt_duration(metadata[key]) if key in {'win_span', 'infer_t'} else
+                       round(metadata[key], 9) if isinstance(metadata[key], Real) else metadata[key])
                 writer.writerow(['infer_frq' if key == 'frq_i' else key, val])
         writer.writerow(['other data', ''])
         table = csv.DictWriter(file, fieldnames=fields)

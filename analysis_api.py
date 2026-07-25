@@ -1,4 +1,5 @@
 """Public workflows for prediction, timeline, and metric analysis."""
+import json
 from pathlib import Path
 import yaml
 
@@ -157,6 +158,10 @@ def analyze_raw_results(test_results, mode='stream', **kwargs):
     pred_cols = kwargs.pop('pred_cols', None)
     timeline_dir = kwargs.pop('timeline_dir', None)
     window_metrics = bool(kwargs.pop('window_metrics', False))
+    output_path = kwargs.pop('output_path', None)
+    print_results = bool(kwargs.pop('print_results', False))
+    print_kwargs = kwargs.pop('print_kwargs', {})
+    plotting = kwargs.pop('plotting', False)
     timelines = timelines_from_results(test_results)
 
     timeline_files = []
@@ -172,8 +177,48 @@ def analyze_raw_results(test_results, mode='stream', **kwargs):
             path = timeline_dir/f"{timeline['metadata']['timeline']}.csv"
             timeline_files.append(save_timeline_csv(timeline, path, columns))
 
+    if plotting and timeline_files:
+        from visual_util import plot_timeline
+        plot_root = Path(timeline_dir)
+        for threshold in thresholds or []:
+            col_name = f"y_prd-{int(round(float(threshold)*100))}"
+            plot_dir = plot_root/f"th-{int(round(float(threshold)*100))}"
+            for timeline_path in timeline_files:
+                plot_timeline(timeline_path, pred_column=col_name, threshold=float(threshold),
+                              save_to=plot_dir/Path(timeline_path).with_suffix('.png').name,
+                              show=False)
+
     stream_report = analyze_timelines(timelines, thresholds=thresholds,
-                                      pred_cols=pred_cols, **kwargs)
+                                      pred_cols=pred_cols, print_results=False,
+                                      **kwargs)
+
+    if output_path is not None:
+        reports = stream_report if isinstance(stream_report, list) else [stream_report]
+        output_path = Path(output_path)
+        for report in reports:
+            threshold_value = report.get('prediction', {}).get('threshold')
+            if threshold_value is None:
+                report_dir = output_path.parent
+            else:
+                report_dir = output_path.parent/f"th-{int(round(float(threshold_value)*100))}"
+            report_dir.mkdir(parents=True, exist_ok=True)
+            report_path = report_dir/output_path.name
+            events_path = report_dir/output_path.name.replace('_reports.json', '_events.json')
+            with report_path.open('w', encoding='utf-8') as file:
+                json.dump(report, file, indent=2)
+            events = {'analysis_mode': 'stream_metric',
+                      'prediction': report.get('prediction', {}),
+                      'params': report.get('params', {}),
+                      'streams': report.get('streams', [])}
+            with events_path.open('w', encoding='utf-8') as file:
+                json.dump(events, file, indent=2)
+
+    if print_results:
+        if isinstance(stream_report, list):
+            print_threshold_comparison(stream_report, **print_kwargs)
+        else:
+            print_metric_report(stream_report, **print_kwargs)
+
     window_report = None
     if window_metrics:
         selected = list(thresholds or [])
