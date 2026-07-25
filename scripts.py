@@ -22,7 +22,7 @@ from precompute_clips import (build_cache_from_json, extract_stream_features, me
 from tms_trainer import run_training, run_testing
 from torch_clip_model import run_stream_testing
 from evaluation_core import analyze_clip_test, analyze_video_test, support_pair, DEFAULT_EVAL_THRESHOLD
-from stream_analysis import analyze_stream_test
+from analysis_api import analyze_raw_results
 from common.my_local_utils import as_collection, get_unique_name, print_color
 from json_utils import list_json_sources, load_json_raw
 from motion_feature_schema import load_cache_contract_compact
@@ -252,7 +252,7 @@ def merge_caches(cache_path, output_path=None):
 
 #* endregion *#
 
-def resolve_npz_inputs(inputs, base_dir: Path | None = None) -> list[Path]:
+def resolve_npz_inputs(inputs, base_dir:Path|None = None) -> list[Path]:
     """ Resolve files, dirs, or masks into one ordered unique NPZ list."""
     resolved = []
     seen = set()
@@ -321,10 +321,12 @@ def evaluate_raw_test(raw_path, mode, out_dir, threshold=DEFAULT_EVAL_THRESHOLD,
               'print': kwargs.get('print_report', False),}
 
     if   mode == 'stream':
-        return analyze_stream_test(raw_path, output_name=output_name,
-                                   details_name=f"{get_exporting_name(model_path, test_cache, 'events')}.json",
-                                   events_json= kwargs.get('events_json', True),
-                                   plotting= kwargs.get('plotting', 'save'), **common)
+        return analyze_raw_results(
+            raw_path, mode='stream', thresholds=[threshold],
+            timeline_dir=out_dir,
+            output_path=out_dir/f"{output_name}.json",
+            print_results=kwargs.get('print_report', False),
+            plotting=kwargs.get('plotting', False))
     elif mode == 'video':
         return analyze_video_test(raw_path, output_name=output_name, **common)
     elif mode == 'clip':
@@ -461,6 +463,8 @@ def sum_all_results(res_dir: str | Path, **kwargs):  # 107 -250
         """Convert one summary json file into one flat table row."""
         with summary_path.open("r") as fh:
             summary = json.load(fh)
+        if 'streams' in summary and 'testing_set' not in summary:
+            return {}
 
         # Summary files come from clip/video/stream paths, so the table normalizes them
         # onto one shared row schema before sorting and printing.
@@ -519,7 +523,7 @@ def sum_all_results(res_dir: str | Path, **kwargs):  # 107 -250
     if not summary_paths:
         raise FileNotFoundError(f"No summary/report JSON files found in {res_dir}")
 
-    table = [_row_from_summary(p) for p in summary_paths]
+    table = [row for row in (_row_from_summary(p) for p in summary_paths) if row]
     _sort_table(table)
     table = _drop_na_columns(table)
 
@@ -1123,33 +1127,37 @@ def cache_builder():
                       {'cache_dir': cache_dir, 'split_ratio': 0.2, 'random_seed': 42})
 
     # *  Test test_models
-def test_runner(test_streams, **kwargs):
 
-    strm_test_subset = ["/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/weSmart_demo.json",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/Russian_Road_Rage- Micky_Mouse_&_Sponge_Bob.json",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/F_60_1_2_0_0.json",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/F_121_1_0_0_0.zip",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_529_0_1_1_0.zip",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_390_0_0_1_0.zip",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_383_0_0_1_0.zip",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_115_0_0_1_0.zip"]
 
-    strm_test_set  = [p for ptn in ("*.zip", "*.json") for p in test_streams.rglob(ptn)]
+DEFAULT_MDL_DIR = "work_dirs/models"
+DEFAULT_TST_DIR = "work_dirs/testing"
+STREAM_TEST_DIR = "data/json_files/testing"
 
-    # mdl_dir  = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/w30-15_models/w30-15-tst")
-    # op_dir = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/sanity-testing/testing"
-    mdl_dir = Path(kwargs.get('mdl_dir', "work_dirs/models" ))   # Path("work_dirs/models")
-    out_dir = Path(kwargs.get('out_dir', "work_dirs/testing"))   # Path("work_dirs/testing")
+STREAM_SUB_TST = ["data/json_files/testing/weSmart_demo.json",
+                  "data/json_files/testing/Russian_Road_Rage- Micky_Mouse_&_Sponge_Bob.json",
+                  "data/json_files/testing/F_60_1_2_0_0.json",
+                  "data/json_files/testing/F_121_1_0_0_0.zip",
+                  "data/json_files/testing/N_529_0_1_1_0.zip",
+                  "data/json_files/testing/N_390_0_0_1_0.zip",
+                  "data/json_files/testing/N_383_0_0_1_0.zip",
+                  "data/json_files/testing/N_115_0_0_1_0.zip"]
+
+def test_runner(tst_strm, **kwargs):
+
+    tst_strm  = [p for ptn in ("*.zip", "*.json") for p in Path(tst_strm).rglob(ptn)]
+
+    mdl_dir = Path(kwargs.get('mdl_dir', DEFAULT_MDL_DIR) )
+    out_dir = Path(kwargs.get('out_dir', DEFAULT_TST_DIR) )
     tst_ds =  None  # Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/ds")
-
+    plot = True
     # tst_strm = None #Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/strm")
-    tst_strm = strm_test_set # Path("data/json_files/testing")
+    # tst_strm = strm_test_set # Path("data/json_files/testing")
     print(f"\n--- Testing list: ({len(tst_strm)} streams in total) ---:")
     for f in tst_strm: print(f.stem)
 
     threshold = [0.5, 0.6]
     test_models(mdl_dir, out_dir=out_dir, summary= out_dir, threshold=threshold,
-                ds_tests= tst_ds, stm_tests=tst_strm, test_pair=True, plotting=None)
+                ds_tests= tst_ds, stm_tests=tst_strm, test_pair=True, plotting=plot)
 
 # * endregion
 
@@ -1157,7 +1165,9 @@ if __name__ == "__main__":
     pass
 
     # cache_builder()
-    test_runner(Path("data/json_files/testing"))
+    test_runner( Path(STREAM_TEST_DIR),
+                 mdl_dir=DEFAULT_MDL_DIR,
+                 out_dir=DEFAULT_TST_DIR)
 
     #* region Train models
     cache_dir = Path("data/cache/Joint_sets")
