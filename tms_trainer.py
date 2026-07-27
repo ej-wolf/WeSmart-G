@@ -51,9 +51,8 @@ from pathlib import Path
 import argparse
 from common.my_local_utils import print_color
 from torch_clip_model import run_training, run_testing
-from evaluation_core import analyze_clip_test, analyze_video_test
-from stream_analysis import analyze_stream_test
-
+# from stream_analysis import analyze_stream_test
+from analysis_api import analyze_raw_results
 
 def _kwargs_from_args(args, names):
     """ Collect non-None argument values from argparse namespace."""
@@ -76,7 +75,7 @@ def _run_train(args):
 
 def _run_test(args):
     """ Run testing command."""
-    def _warn(text):
+    def _warn(text): #* ToDo: move warn to common utils
         print_color(f"[WARN] {text}", 'r')
 
     new_eval_target = None
@@ -89,6 +88,7 @@ def _run_test(args):
     elif args.eval_clip:
         new_eval_target = 'clip'
 
+    #* ToDo: take care of this legacy issues
     legacy_eval_requested = False
     legacy_eval_target = None
     if args.evaluate or args.video_mode or args.stream_mode:
@@ -120,20 +120,16 @@ def _run_test(args):
             _warn("--pure-clips disables immediate evaluation; eval flags were ignored")
         return
 
-    if eval_target is None:
+    eval_kw = {'threshold': args.threshold, 'print_results': args.report, }
+    if  eval_target in {'clip', 'video'}:
+        eval_kw.update({ 'show_roc': args.show_roc, 'roc_csv': args.roc_csv,})
+    elif eval_target == 'stream':
+        eval_kw['output_path']=  Path(args.out_dir or Path(res['path']).parent)/'stream_reports.json'
+    else:
+        _warn(f"Unrecognized evalution mode: {eval_target}")
         return
 
-    eval_kw = {'print': args.report, 'show_roc': args.show_roc,
-               'roc_csv': args.roc_csv, 'events_json': args.events_json,
-               'threshold': args.threshold}
-
-    # TODO: Remove the legacy flag compatibility, once the new CLI is fully adopted.
-    if   eval_target == 'stream':
-        analyze_stream_test(res['path'], **eval_kw)
-    elif eval_target == 'video':
-        analyze_video_test(res['path'], **eval_kw)
-    else:
-        analyze_clip_test(res['path'], **eval_kw)
+    analyze_raw_results(res['path'], eval_target, **eval_kw)
 
 
 def main():
@@ -167,7 +163,7 @@ def main():
     test_p.add_argument('-ev', '--eval-video', action='store_true', help='run video evaluation after saving raw predictions')
     test_p.add_argument('-es', '--eval-stream',action='store_true', help='run stream evaluation after saving raw predictions')
     test_p.add_argument('--pure-clips', action='store_true', help='save minimal clip-only raw NPZ (skip evaluation)')
-    test_p.add_argument('-td', '--threshold', type=float, default=None, help='Evaluation threshold')
+    test_p.add_argument('-th', '--threshold', type=float, default=None, help='Evaluation threshold')
     test_p.add_argument('-nj', '--no-events-json', dest='events_json', action='store_false', help='Do not save stream events JSON file')
     test_p.add_argument('-ns', '--no-show-roc', dest='show_roc', action='store_false', help='Do not display ROC figure')
     test_p.add_argument('--no-roc-csv', dest='roc_csv', action='store_false', help='Do not save ROC CSV file')
@@ -184,6 +180,7 @@ def main():
     args = parser.parse_args()
     args.fn(args)
 
+#190()
 
 if __name__ == '__main__':
     main()

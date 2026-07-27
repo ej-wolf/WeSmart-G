@@ -17,13 +17,13 @@ from pathlib import Path
 import numpy as np
 import torch
 #* Imports from local project
+from common.my_local_utils import as_collection, get_unique_name, print_color
 from precompute_clips import (build_cache_from_json, extract_stream_features, merge_cache_npz, get_split_pair,
                               WINDOW_SEC, STRIDE_SEC, RANDOM_SEED, split_json_ds, MOTION_FPS_REF)
 from tms_trainer import run_training, run_testing
 from torch_clip_model import run_stream_testing
 from evaluation_core import analyze_clip_test, analyze_video_test, support_pair, DEFAULT_EVAL_THRESHOLD
 from analysis_api import analyze_raw_results
-from common.my_local_utils import as_collection, get_unique_name, print_color
 from json_utils import list_json_sources, load_json_raw
 from motion_feature_schema import load_cache_contract_compact
 from project_utils import get_exporting_name, resolve_best_pt_model, strip_split_suffix, strip_timestamp_prefix
@@ -322,7 +322,7 @@ def evaluate_raw_test(raw_path, mode, out_dir, threshold=DEFAULT_EVAL_THRESHOLD,
 
     if   mode == 'stream':
         return analyze_raw_results(
-            raw_path, mode='stream', thresholds=[threshold],
+            raw_path, mode='stream', threshold=threshold,
             timeline_dir=out_dir,
             output_path=out_dir/f"{output_name}.json",
             print_results=kwargs.get('print_report', False),
@@ -1149,7 +1149,7 @@ def test_runner(tst_strm, **kwargs):
     mdl_dir = Path(kwargs.get('mdl_dir', DEFAULT_MDL_DIR) )
     out_dir = Path(kwargs.get('out_dir', DEFAULT_TST_DIR) )
     tst_ds =  None  # Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/ds")
-    plot = True
+    tl_chart = False
     # tst_strm = None #Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/strm")
     # tst_strm = strm_test_set # Path("data/json_files/testing")
     print(f"\n--- Testing list: ({len(tst_strm)} streams in total) ---:")
@@ -1157,7 +1157,7 @@ def test_runner(tst_strm, **kwargs):
 
     threshold = [0.5, 0.6]
     test_models(mdl_dir, out_dir=out_dir, summary= out_dir, threshold=threshold,
-                ds_tests= tst_ds, stm_tests=tst_strm, test_pair=True, plotting=plot)
+                ds_tests= tst_ds, stm_tests=tst_strm, test_pair=True, plotting=tl_chart)
 
 # * endregion
 

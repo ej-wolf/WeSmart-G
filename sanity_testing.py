@@ -20,7 +20,7 @@ import torch
 from common.my_local_utils import as_collection, print_color
 from precompute_clips import RANDOM_SEED
 from project_utils import get_exporting_name, strip_split_suffix, strip_timestamp_prefix
-from stream_metric_tools import load_timeline_csv
+from analysis_utils import load_timeline_csv
 from scripts import train_models, test_models, infer_eval_threshold, evaluate_raw_test
 from torch_clip_model import run_training
 

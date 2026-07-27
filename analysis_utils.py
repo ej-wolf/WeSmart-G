@@ -594,9 +594,14 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
 
     show_meta = any(report.get('stream_meta', {}).get('person_dets') is not None
                     for report in reports)
-    headers = ['Prediction', 'Recall', 'FP score', 'FP burden', 'Score', 'Detected', 'Missed', 'False', f'False/{fp_unit}']
+    selector_type = ('Column' if any(report.get('prediction', {}).get('column') is not None
+                                     for report in reports)
+                     else 'Threshold')
+    headers = ['Prediction', 'GT', 'Detected', 'Missed', 'False',
+               'Recall', 'Lag(s)', 'FP score', 'FP burden', f'FP/{fp_unit}']
     if show_meta:
-        headers.append('False/P (1k)')
+        headers.append('FP/kP')
+    headers.append('Score')
 
     table = []
     for report in reports:
@@ -609,22 +614,66 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
                                  else f"th={prediction['threshold']:g}"))
         detected = events.get('full', 0) + events.get('half', 0)
         missed = events.get('gt', 0) - detected
-        row = [prediction_name,
+        row = [prediction_name, str(events.get('gt', 'N/A')),
+               values['detected'], str(missed), values['false'],
                _fmt(scores.get('recall')),
+               values['lag'],
                _fmt(scores.get('fp')),
                _fmt(scores.get('fp_burden')),
-               _fmt(scores.get('total')),
-               values['detected'], str(missed), values['false'], values['fp_rate']]
+               values['fp_rate']]
         if show_meta:
             detections = report.get('stream_meta', {}).get('person_dets')
             fp_per_dets = (None if not detections else
                            events.get('false', 0)*1000/detections)
             row.append(_fmt(fp_per_dets))
+        row.append(_fmt(scores.get('total')))
         table.append(row)
 
-    print("\n=== Multi-Threshold Summary ===")
-    alignments = ['<'] + ['>']*(len(headers) - 1)
-    _print_table(headers, table, alignments)
+    def summary_tag():
+        tags = []
+        for report in reports:
+            for stream in report.get('streams', []):
+                timeline = str(stream.get('timeline', ''))
+                source = str(stream.get('stream') or '')
+                name = timeline.removeprefix('timeline_')
+                if source and name.endswith(f"_{source}"):
+                    tags.append(name[:-(len(source) + 1)])
+        tags = list(dict.fromkeys(tag for tag in tags if tag))
+        return tags[0] if len(tags) == 1 else None
+
+    def print_grouped_summary(headers, rows):
+        alignments = ['<'] + ['^']*(len(headers) - 1)
+        widths = [max(5, len(header), *(len(str(row[idx])) for row in rows))
+                  for idx, header in enumerate(headers)]
+        widths[0] = max(widths[0], len(selector_type))
+
+        def fmt_row(items):
+            cells = [f"{str(item):{alignments[idx]}{widths[idx]}}" for idx, item in enumerate(items)]
+            return (f" {cells[0]} ┃ "
+                    f"{' | '.join(cells[1:5])} ┃ "
+                    f"{' | '.join(cells[5:])}")
+
+        events_w = sum(widths[1:5]) + 3*(4 - 1)
+        metrics_w = sum(widths[5:]) + 3*(len(widths[5:]) - 1)
+        first_w = widths[0]
+        group_row = (f" {'Prediction':<{first_w}} ┃ "
+                     f"{'Events':^{events_w}} ┃ "
+                     f"{'Metrics':^{metrics_w}}")
+        header_row = fmt_row([selector_type] + headers[1:])
+        sep_cells = ['-'*width for width in widths]
+        sep_row = (f" {sep_cells[0]} ┃ "
+                   f"{'-+-'.join(sep_cells[1:5])} ┃ "
+                   f"{'-+-'.join(sep_cells[5:])}")
+
+        print(group_row)
+        print(header_row)
+        print(sep_row)
+        for row in rows:
+            print(fmt_row(row))
+
+    tag = summary_tag()
+    print(f"\n=== Threshold Summary{' for ' + tag if tag else ''} ===")
+    print_grouped_summary(headers, table)
     return reports
 
 

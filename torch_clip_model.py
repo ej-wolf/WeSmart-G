@@ -7,7 +7,6 @@
     - run_training(...) trains and saves model/config/log/TensorBoard files.
     - run_testing(...) runs inference and saves raw predictions to NPZ.
 """
-
 from pathlib import Path
 from datetime import datetime
 import json
@@ -22,13 +21,8 @@ from common.my_local_utils import print_color
 # from evaluation_core import analyze_clip_test, analyze_video_test
 from evaluation_core import analyze_clip_test, analyze_video_test
 from evaluation_cli import print_test_report
-from stream_analysis import analyze_stream_test
-from motion_feature_schema import (
-    assert_feature_schema_match,
-    load_cache_contract_compact,
-    schema_has_na,
-    temporal_schema_compatible,
-)
+from motion_feature_schema import ( schema_has_na,  assert_feature_schema_match,
+                                    load_cache_contract_compact, temporal_schema_compatible,)
 
 #* config constants ToDo: make proper config file
 DEFAULT_WORKDIR = "work_dirs/json_models"
@@ -53,9 +47,9 @@ DEFAULT_STRIDE_TOLERANCE = 0.25
 
 DEFAULT_DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# --------------------------------------------------
-#* Dataset
-# --------------------------------------------------
+
+#* region  Dataset ------------------------------------
+# -----------------------------------------------------
 class ClipFeatureDataset(Dataset):
     def __init__(self, npz_path: str | Path):
         npz_path = Path(npz_path)
@@ -68,12 +62,13 @@ class ClipFeatureDataset(Dataset):
         return len(self.y)
 
     def __getitem__(self, idx):
-        return (torch.from_numpy(self.X[idx]),
-                torch.tensor(self.y[idx], dtype=torch.float32),)
+        return torch.from_numpy(self.X[idx]), torch.tensor(self.y[idx], dtype=torch.float32)
 
-# --------------------------------------------------
-# * Minimal classifier
-# --------------------------------------------------
+
+#* endregion
+
+#* region Minimal classifier -------------------------
+#* ---------------------------------------------------
 
 class ClipMLP(nn.Module):
     def __init__(self, in_dim:int, hidden_dim:int=64):
@@ -81,10 +76,14 @@ class ClipMLP(nn.Module):
         self.net = nn.Sequential(nn.Linear(in_dim, hidden_dim),
                                  nn.ReLU(inplace=True),
                                  nn.Linear(hidden_dim, 1),)
+
     def forward(self, x):
         return self.net(x).squeeze(1)
 
-# * Local helpers  --------------------------------------------------
+#* endregion *#
+
+
+#* region Local helpers  -----------------------------
 
 def train_one_epoch(model, loader, optimizer, criterion):
     model.train()
@@ -229,8 +228,9 @@ def _training_contract_from_cache(train_cache: str | Path, **kwargs) -> tuple[li
     }
     return train_caches, canonical_feature_schema, temporal_profile
 
-# --------------------------------------------------
-# * main/ API functions
+#* endregion
+
+#* region  main/ API functions
 # --------------------------------------------------
 
 def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs):
@@ -311,8 +311,9 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     #* Positive class weight for BCE (neg/pos) to reduce imbalance bias.
     pos_weight = None
     train_y = _labels_from_dataset(train_ds)
-    n_pos = (train_y == 1).sum()
-    n_neg = (train_y == 0).sum()
+    n_pos = np.sum(train_y == 1)  # = (train_y == 1).sum()
+    n_neg = np.sum(train_y == 0)  # = (train_y == 0).sum()
+   
     if n_pos > 0:
         pos_weight = torch.tensor(n_neg/max(n_pos, 1), device=DEFAULT_DEVICE)
 
@@ -379,7 +380,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     return run_dir    # return model, train_log
 
 
-def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_mode=False, **kwargs):
+def run_testing(test_model:str|Path, test_cache:str|Path,  **kwargs):
     """Run model inference on a cache NPZ and save raw prediction arrays.
         By default, the saved NPZ uses one unified format that includes any available
         grouping/timing metadata needed for clip/video/stream analysis.
@@ -387,8 +388,6 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_
         parameters:
         :param test_cache : path to test cache NPZ.
         :param test_model : path to `model.pt`
-        :param vid_info   : legacy no-op flag kept for compatibility.
-        :param video_mode : legacy no-op flag kept for compatibility.
         :param kwargs     : batch_size, out_dir, out_name, pure_clips
         :return           : Dict with saved `path` and in-memory prediction arrays.
     """
@@ -474,8 +473,8 @@ def run_testing(test_model:str|Path, test_cache:str|Path, vid_info=False, video_
     return {'path': str(out_path), **save_payload}
 
 
-def run_stream_testing(test_model:str|Path, X:np.ndarray, y:np.ndarray, meta:np.ndarray,
-                       stream_name:str, **kwargs):
+def run_stream_testing(test_model:str|Path, X:np.ndarray, y:np.ndarray,
+                       meta:np.ndarray, stream_name:str, **kwargs):
     """Run model inference directly on extracted stream features."""
     model_path = Path(test_model)
     X = np.asarray(X, dtype=np.float32)
@@ -496,9 +495,9 @@ def run_stream_testing(test_model:str|Path, X:np.ndarray, y:np.ndarray, meta:np.
     model = ClipMLP(X.shape[1], hidden_dim=hidden_dim).to(DEFAULT_DEVICE)
     model.load_state_dict(state, strict=True)
     model.eval()
-    loader = DataLoader(
-        TensorDataset(torch.from_numpy(X), torch.from_numpy(y).float()),
-        batch_size=kwargs.get('batch_size', DEFAULT_BATCH_SIZE), shuffle=False)
+    loader = DataLoader(TensorDataset(torch.from_numpy(X), torch.from_numpy(y).float()),
+                        batch_size=kwargs.get('batch_size', DEFAULT_BATCH_SIZE),
+                        shuffle=False)
 
     probs = []
     with torch.no_grad():
@@ -510,19 +509,18 @@ def run_stream_testing(test_model:str|Path, X:np.ndarray, y:np.ndarray, meta:np.
     meta_t_start = np.asarray([item['t_start'] for item in meta], dtype=np.float32)
     meta_t_end = np.asarray([item['t_end'] for item in meta], dtype=np.float32)
     meta_n_frames = np.asarray([int(item.get('n_frames', -1)) for item in meta], dtype=np.int64)
-    save_payload = {
-        'model_path': str(model_path),
-        'test_cache': stream_name,
-        'y_true': y,
-        'y_prob': y_prob,
-        'cache_index': np.arange(len(y), dtype=np.int64),
-        'meta_video': meta_video,
-        'meta_t_start': meta_t_start,
-        'meta_t_end': meta_t_end,
-        'meta_n_frames': meta_n_frames,
-        'video_name': meta_video,
-        'time_stamp': meta_t_end,
-    }
+    save_payload = {'model_path': str(model_path),
+                    'test_cache': stream_name,
+                    'y_true': y,
+                    'y_prob': y_prob,
+                    'cache_index': np.arange(len(y), dtype=np.int64),
+                    'meta_video': meta_video,
+                    'meta_t_start': meta_t_start,
+                    'meta_t_end'  : meta_t_end,
+                    'meta_n_frames': meta_n_frames,
+                    'video_name': meta_video,
+                    'time_stamp': meta_t_end,
+                    }
     out_name = kwargs.get('output_tag', f"{model_path.stem}_{Path(stream_name).stem}-tst.npz")
     out_path = Path(kwargs.get('out_dir', model_path.parent))/str(out_name)
     out_path = out_path.with_suffix('.npz') if out_path.suffix.lower() != '.npz' else out_path
@@ -534,90 +532,38 @@ def run_stream_testing(test_model:str|Path, X:np.ndarray, y:np.ndarray, meta:np.
           f"\tPredictions npz: {out_path.name}\n")
     return {'path': str(out_path), **save_payload}
 
-# --------------------------------------------------
+#* endregion
+
+
 #* Training scripts and unit testing
-# --------------------------------------------------
+#* --------------------------------------------------
 
 def test_test(test_cache:str|Path, test_model:str|Path, **kwargs):
     """ Small helper that tests the testing tools"""
-    #* return run_testing(test_cache, tst_model, **kwargs)
-    # res = run_testing(test_cache, test_model, **kwargs)
+
     res = run_testing(test_model, test_cache, **kwargs)
     if res is None: return
-    eval_mode = kwargs.get('eval_mode', None)
-    if eval_mode is None:
-        eval_mode = 'video' if kwargs.get('video_mode', False) else 'clip'
 
+    eval_mode = kwargs.get('eval_mode', None)
     if eval_mode == 'clip':
         report = analyze_clip_test(res['path'], show_roc=kwargs.get('show', False))
     elif eval_mode == 'video':
         report = analyze_video_test(res['path'], show_roc=kwargs.get('show', False))
+    elif eval_mode == 'stream':
+        # report = analyze_stream_test(res['path'], show_roc=kwargs.get('show', False))
+        print_color("Basic Stream Analyze is not supported anymore. look into eval metrics")
+        return
     else:
-        report = analyze_stream_test(res['path'], show_roc=kwargs.get('show', False))
+        return
     print_test_report(report)
 
-#*
-def train_rwd_n_rlvs():
-    """ Example script: train/test on RWF and RLVS caches separately."""
-    d = Path("data/cache/")
-    #* train on RWF data
-    output_path = run_training(d/"RWF_train.npz", tag="TMS-18f_RW", valid_ratio=0.85, valid_seed=21)
-    #* Test on RWF test-set
-    res = run_testing(d/'RWF_test.npz', output_path/'model.pt')
-    if res is not None:
-        report = analyze_clip_test(res['path'], show_roc=True, print=True)
-    #* Test on RLVS train-set
-    res = run_testing(d/'RLVS_train.npz', output_path/'model.pt')
-    if res is not None:
-        report = analyze_clip_test(res['path'], show_roc=True)
-
-    #* train on RLVS data
-    output_path = run_training(d/"RLVS_train.npz", tag="TMS-18f_RLVS", valid_ratio=0.85, valid_seed=21)
-    #* Test on RLVS test-set
-    res = run_testing(d/'RLVS_test.npz', output_path/'model.pt')
-    if res is not None:
-        report = analyze_clip_test(res['path'], show_roc=True, print=True)
-    # * Test on RLVS train-set
-    res = run_testing(d/'RWF_train.npz', output_path/'model.pt')
-    if res is not None:
-        report = analyze_clip_test(res['path'], show_roc=True)
-
-
-def train_joint():
-    """Example script: merge RWF+RLVS caches, then train/test a joint model."""
-    from  precompute_clips import merge_cache_npz, cache_info
-    d = Path("data/cache/")
-    #* train on RWF data
-    tr_1, tst_1 = d/"RWF_train.npz",  d/"RWF_test.npz"
-    tr_2, tst_2 = d/"RLVS_train.npz", d/"RLVS_test.npz"
-    tr_j, tst_j = d/"Joint_RWFLV_train.npz", d/"Joint_RWFLV_test.npz"
-
-    print(f"all data sets exists {tr_j.is_file() and tst_1.is_file() and tr_2.is_file() and tst_2.is_file()}")
-
-    merge_cache_npz([tr_1 , tr_2 ], tr_j)
-    merge_cache_npz([tst_1, tst_2], tst_j)
-    # cache_info(tr_1)
-    # cache_info(tr_2)
-    cache_info(tr_j)
-    output_path = run_training(tr_j, tag="TMS-18f_Jn", valid_ratio=0.85, valid_seed=42)
-    #* Test on RWF test-set
-    res = run_testing(tst_j, output_path/'model.pt')
-    if res is not None:
-        report = analyze_clip_test(res['path'], show_roc=True, print=True)
-
+#*606(7,1,3)-620 -> 560(4,,0)
 
 if __name__ == '__main__':
     pass
-    # Example:
-    # model, hist = run_training('data/cache/RWF_train.npz', 'data/cache/RWF_valid.npz')
-    # model, hist = run_training('data/cache/RWF_train.npz', valid_ratio=0.85, valid_seed=42)
 
-    # train_rwd_n_rlvs()
-    # train_joint()
     tst_mdl = "work_dirs/json_models/260331-0233_J-RWFLV-25ft/best_model.085.pt"
-    tst_mdl = "work_dirs/json_models/draft/260331-0233_J-RWFLV-25ft/best_model.085.pt"
+    # tst_mdl = "work_dirs/json_models/draft/260331-0233_J-RWFLV-25ft/best_model.085.pt"
     tst_ch =  "data/cache/J_RWFLV_25ft_test.npz"
 
-    test_test(test_model=tst_mdl, test_cache=tst_ch, out_name='tvt_J25ft-4v',vid_info=True)
-
-# 318(2,4,2)-> 300(2,,)
+    test_test(test_model=tst_mdl, test_cache=tst_ch, out_name='tvt_J25ft-4v')

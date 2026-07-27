@@ -800,7 +800,7 @@ def analyze_video_predictions(test_res: Path | str | dict, **kwargs):
     return summary
 
 
-def analyze_video_test(test_res: Path | str | dict, **kwargs):
+def analyze_video_test(test_res:Path|str|dict, **kwargs):
     """ Run clip/video score analysis and threshold-dependent clip/video prediction analysis."""
     _, res_path = resolve_input(test_res)
     tst_name = res_path.stem if res_path is not None else 'video_test'

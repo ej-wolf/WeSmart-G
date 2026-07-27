@@ -2,9 +2,9 @@
 import argparse
 from pathlib import Path
 
+from analysis_api import analyze_timelines
+from analysis_utils import save_metric_report, print_metric_report, print_threshold_comparison
 from json_stream_utils import DEFAULT_STREAM_META
-from stream_metric_tools import (print_multi_thresholds, print_stream_metric,
-                                 run_multi_thresholds, run_stream_metrics, save_stream_metric)
 
 
 def main():
@@ -39,36 +39,30 @@ def main():
     if table_mode == 'auto' and selectors is not None:
         table_mode = 'thrs_cmp' if len(selectors) > 1 else 'standard'
 
-    if selectors is not None and len(selectors) == 1 and table_mode != 'thrs_cmp':
-        report = run_stream_metrics(args.stream_path,
-                                    pred_col=args.pred_cols[0] if args.pred_cols is not None else None,
-                                    threshold=args.threshold[0] if args.threshold is not None else None,
-                                    config_path=args.config, meta_info=args.meta_info)
-        print_stream_metric(report, results_table=table_mode == 'standard',
-                            total_row=args.total_row, fp_unit=args.fp_unit,
-                            meta_info=args.meta_info)
-    else:
-        try:
-            report = run_multi_thresholds( args.stream_path,
-                                           thresholds=args.threshold, pred_cols=args.pred_cols,
-                                           config_path=args.config, meta_info=args.meta_info)
-        except ValueError as error:
-            if selectors is None:
-                metric.error(str(error))
-            raise
-        if table_mode == 'auto':
-            table_mode = 'thrs_cmp' if len(report) > 1 else 'standard'
-        if len(report) == 1 and table_mode != 'thrs_cmp':
-            report = report[0]
-            print_stream_metric(report, results_table=table_mode == 'standard',
-                                total_row=args.total_row, fp_unit=args.fp_unit,
-                                meta_info=args.meta_info)
-        else:
-            print_multi_thresholds(report, results_table=table_mode,
-                                   total_row=args.total_row, fp_unit=args.fp_unit,
+    try:
+        report = analyze_timelines(args.stream_path,
+                                   thresholds=args.threshold,
+                                   pred_cols=args.pred_cols,
+                                   config_path=args.config,
                                    meta_info=args.meta_info)
+    except ValueError as error:
+        if selectors is None:
+            metric.error(str(error))
+        raise
+
+    if table_mode == 'auto':
+        table_mode = 'thrs_cmp' if isinstance(report, list) and len(report) > 1 else 'standard'
+
+    print_kwargs = {'results_table': table_mode,
+                    'total_row': args.total_row,
+                    'fp_unit': args.fp_unit,
+                    'meta_info': args.meta_info}
+    if isinstance(report, list):
+        print_threshold_comparison(report, **print_kwargs)
+    else:
+        print_metric_report(report, **print_kwargs)
     if args.output is not None:
-        print(f"Saved: {save_stream_metric(report, args.output)}")
+        print(f"Saved: {save_metric_report(report, args.output)}")
 
 if __name__ == '__main__':
     main()

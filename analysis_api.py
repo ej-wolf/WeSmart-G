@@ -9,6 +9,8 @@ from analysis_utils import (AUTO_META, attach_stream_meta, build_timelines,
                             print_threshold_comparison,
                             resolve_stream_meta_path,
                             save_metric_report, save_timeline_csv)
+from common.my_local_utils import as_collection
+from evaluation_core import DEFAULT_EVAL_THRESHOLD, analyze_clip_test, analyze_video_test, resolve_input
 from project_utils import get_test_title_lines
 from stream_metric import eval_multi_thresholds, get_timeline_timing, resolve_metric_config
 
@@ -20,8 +22,6 @@ DEFAULT_METRIC_CONFIG = Path(__file__).resolve().parent/"configs/metrics/metric_
 # -----------------------------------------------------------------------
 def timelines_from_results(test_results) -> list[dict]:
     """Load raw prediction results and build one ordered timeline per stream."""
-    from evaluation_core import resolve_input
-
     raw, _ = resolve_input(test_results)
     required = ('y_true', 'y_prob', 'meta_video', 'meta_t_start', 'meta_t_end')
     missing = [key for key in required if key not in raw or raw[key] is None]
@@ -72,12 +72,13 @@ def resolve_metric_params(config_path=None, values=None) -> dict:
 
 
 def analyze_timelines(timeline_input, thresholds=None, pred_cols=None, **kwargs):
-    """Evaluate loaded or stored timelines at one or more operating points."""
-    config_path = kwargs.pop('config_path', None)
+    """ Evaluate loaded or stored timelines at one or more operating points."""
+
+    config_path   = kwargs.pop('config_path', None)
     metric_values = kwargs.pop('metric_params', None)
-    meta_info = kwargs.pop('meta_info', AUTO_META)
+    meta_info   = kwargs.pop('meta_info', AUTO_META)
     output_path = kwargs.pop('output_path', None)
-    print_results = bool(kwargs.pop('print_results', False))
+    print_res   = bool(kwargs.pop('print_results', False))
     print_kwargs = kwargs.pop('print_kwargs', {})
 
     timelines, load_errors, timeline_files = load_timelines(timeline_input)
@@ -107,7 +108,7 @@ def analyze_timelines(timeline_input, thresholds=None, pred_cols=None, **kwargs)
 
     if output_path is not None:
         save_metric_report(result, output_path)
-    if print_results:
+    if print_res:
         if isinstance(result, list):
             print_threshold_comparison(result, **print_kwargs)
         else:
@@ -117,40 +118,31 @@ def analyze_timelines(timeline_input, thresholds=None, pred_cols=None, **kwargs)
 
 def analyze_raw_results(test_results, mode='stream', **kwargs):
     """Analyze raw prediction results at clip, video, or stream level."""
-    from evaluation_core import analyze_clip_test, analyze_video_test
 
     mode = str(mode).strip().lower()
-    thresholds = kwargs.pop('thresholds', None)
     threshold = kwargs.pop('threshold', None)
-    if thresholds is None and threshold is not None:
-        thresholds = [threshold]
-    elif thresholds is not None and not hasattr(thresholds, '__iter__'):
-        thresholds = [thresholds]
-    elif thresholds is not None:
-        thresholds = list(thresholds)
+    th_ls = [] if threshold is None else [float(value) for value in as_collection(threshold)]
 
     if mode in {'clip', 'video'}:
         output_path = kwargs.pop('output_path', None)
-        print_results = kwargs.pop('print_results', None)
+        print_res = kwargs.pop('print_results', None)
         for key in ('config_path', 'metric_params', 'meta_info', 'print_kwargs',
                     'pred_cols', 'timeline_dir', 'window_metrics'):
             kwargs.pop(key, None)
         if output_path is not None:
             kwargs['out_path'] = output_path
-        if print_results is not None:
-            kwargs['print'] = print_results
+        if print_res is not None:
+            kwargs['print'] = print_res
 
     if mode == 'clip':
-        if not thresholds:
+        if not th_ls:
             return analyze_clip_test(test_results, **kwargs)
-        reports = [analyze_clip_test(test_results, threshold=float(value), **kwargs)
-                   for value in thresholds]
+        reports = [analyze_clip_test(test_results, threshold=value, **kwargs) for value in th_ls]
         return reports[0] if len(reports) == 1 else reports
     if mode == 'video':
-        if not thresholds:
+        if not th_ls:
             return analyze_video_test(test_results, **kwargs)
-        reports = [analyze_video_test(test_results, threshold=float(value), **kwargs)
-                   for value in thresholds]
+        reports = [analyze_video_test(test_results, threshold=value, **kwargs) for value in th_ls]
         return reports[0] if len(reports) == 1 else reports
     if mode != 'stream':
         raise ValueError("analysis mode must be 'clip', 'video', or 'stream'")
@@ -159,9 +151,11 @@ def analyze_raw_results(test_results, mode='stream', **kwargs):
     timeline_dir = kwargs.pop('timeline_dir', None)
     window_metrics = bool(kwargs.pop('window_metrics', False))
     output_path = kwargs.pop('output_path', None)
-    print_results = bool(kwargs.pop('print_results', False))
+    print_res = bool(kwargs.pop('print_results', False))
     print_kwargs = kwargs.pop('print_kwargs', {})
     plotting = kwargs.pop('plotting', False)
+    if not th_ls and pred_cols is None:
+        th_ls = [DEFAULT_EVAL_THRESHOLD]
     timelines = timelines_from_results(test_results)
 
     timeline_files = []
@@ -170,9 +164,9 @@ def analyze_raw_results(test_results, mode='stream', **kwargs):
         timeline_dir.mkdir(parents=True, exist_ok=True)
         for timeline in timelines:
             columns = {}
-            for threshold in thresholds or []:
-                name = f"y_prd-{int(round(float(threshold)*100))}"
-                columns[name] = [int(row['y_prob'] >= float(threshold))
+            for th in th_ls:
+                name = f"y_prd-{int(round(th*100))}"
+                columns[name] = [int(row['y_prob'] >= th)
                                  for row in timeline['rows']]
             path = timeline_dir/f"{timeline['metadata']['timeline']}.csv"
             timeline_files.append(save_timeline_csv(timeline, path, columns))
@@ -180,17 +174,16 @@ def analyze_raw_results(test_results, mode='stream', **kwargs):
     if plotting and timeline_files:
         from visual_util import plot_timeline
         plot_root = Path(timeline_dir)
-        for threshold in thresholds or []:
-            col_name = f"y_prd-{int(round(float(threshold)*100))}"
-            plot_dir = plot_root/f"th-{int(round(float(threshold)*100))}"
+        for th in th_ls:
+            col_name = f"y_prd-{int(round(th*100))}"
+            plot_dir = plot_root/f"th-{int(round(th*100))}"
             for timeline_path in timeline_files:
-                plot_timeline(timeline_path, pred_column=col_name, threshold=float(threshold),
+                plot_timeline(timeline_path, pred_column=col_name, threshold=th,
                               save_to=plot_dir/Path(timeline_path).with_suffix('.png').name,
                               show=False)
 
-    stream_report = analyze_timelines(timelines, thresholds=thresholds,
-                                      pred_cols=pred_cols, print_results=False,
-                                      **kwargs)
+    stream_report = analyze_timelines(timelines, thresholds=th_ls, pred_cols=pred_cols,
+                                      print_results=False, **kwargs)
 
     if output_path is not None:
         reports = stream_report if isinstance(stream_report, list) else [stream_report]
@@ -213,7 +206,7 @@ def analyze_raw_results(test_results, mode='stream', **kwargs):
             with events_path.open('w', encoding='utf-8') as file:
                 json.dump(events, file, indent=2)
 
-    if print_results:
+    if print_res:
         if isinstance(stream_report, list):
             print_threshold_comparison(stream_report, **print_kwargs)
         else:
@@ -221,11 +214,7 @@ def analyze_raw_results(test_results, mode='stream', **kwargs):
 
     window_report = None
     if window_metrics:
-        selected = list(thresholds or [])
-        if not selected:
-            raise ValueError("window_metrics requires at least one threshold")
-        window_report = [analyze_clip_test(test_results, threshold=float(threshold))
-                         for threshold in selected]
+        window_report = [analyze_clip_test(test_results, threshold=th) for th in th_ls]
         if len(window_report) == 1:
             window_report = window_report[0]
 
@@ -262,3 +251,4 @@ def plot_timeline(timeline_path, **kwargs):
     return render_timeline(timeline_path, **kwargs)
 
 # endregion
+#264(5,3,)
