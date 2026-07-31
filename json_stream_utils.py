@@ -1,16 +1,18 @@
 """Stream JSON utilities for inspection, comparison, and pair conversion."""
 from __future__ import annotations
 import argparse
+import io
 import json, csv
 import os
 import random
 import shutil
+import zipfile
 from pathlib import Path
 from typing import Any
 import numpy as np
 #* project import
 from common.my_local_utils import print_color, get_unique_name
-from json_utils import list_json_sources, load_json_raw, resolve_json_source
+from json_utils import list_json_sources, load_json_raw, resolve_json_source, save_json_raw
 
 JSON_SUFFIX = '.json'
 CSV_SUFFIX = '.csv'
@@ -25,7 +27,6 @@ TAG_FIGHT = 4
 SJ_EVENT_BUCKETS = {'empty': None, 'norm': TAG_NO_EVENT, 'abnormal': TAG_ABNORMAL,
                     'tension': TAG_TENSION, 'fight': TAG_FIGHT}
 SJ_DRAW_RANDOM_SEED = 66
-
 
 
 def _bbox_iou(box_1, box_2) -> float:
@@ -798,6 +799,7 @@ def _cmp_ann(data_1: dict[str, Any], data_2: dict[str, Any]) -> dict[str, Any]:
 
 #* region Convert (npz, json) pair to stream JSON  ***************#
 MINIMAL_DETECTOR = {'model': 'npz_import', 'version':None, 'source':'out_alex_pair'}
+STREAM_JSON_PROGRESS_STEP = 2000
 
 def _scalar(value: Any):
     """Convert numpy scalar-like values into plain Python values."""
@@ -818,6 +820,27 @@ def _step_value(meta: dict[str, Any]) -> int | None:
     if fps and rate:
         return int(round(fps / rate))
     return None
+
+
+def _event_intervals(event_intervals: dict[str, Any] | None) -> dict[str, dict[str, list]]:
+    out = {}
+    for key, payload in (event_intervals or {}).items():
+        sec_intervals = payload.get('sec', []) if isinstance(payload, dict) else payload
+        out[str(key)] = {'sec': list(sec_intervals or [])}
+    return out
+
+
+def _stream_json_base(meta: dict[str, Any], npz_data) -> dict[str, Any]:
+    timing = meta.get('timing', {}) or {}
+    target_rate = timing.get('sampling_rates_hz')
+    if target_rate is None:
+        target_rate = timing.get('sampling_rate_hz')
+    return {'video': meta.get('video') or _scalar(npz_data['video']),
+            'fps': meta.get('fps') if meta.get('fps') is not None else _scalar(npz_data['fps']),
+            'sampling rate': {'target': target_rate, 'effective': timing.get('effective_fps')},
+            'step': _step_value(meta),
+            'detector': dict(MINIMAL_DETECTOR),
+            'event_intervals': _event_intervals(meta.get('event_intervals'))}
 
 
 def _warn_mismatch(name: str, left: Any, right: Any):
@@ -864,33 +887,117 @@ def _validate_pair(meta: dict[str, Any], npz_data, stem: str):
                    _scalar(npz_data['frame_height']) if 'frame_height' in npz_data.files else None)
 
 
-def _frame_detections(npz_data, frame_idx: int) -> list[dict[str, Any]]:
-    person_count = int(npz_data['person_counts'][frame_idx])
+def _frame_detections(classes, confidences, bboxes, keypoints, person_count: int, frame_idx: int) -> list[dict[str, Any]]:
+    if person_count <= 0:
+        return []
+    cls_ls = classes[frame_idx, :person_count].tolist()
+    conf_ls = confidences[frame_idx, :person_count].tolist()
+    bbox_ls = bboxes[frame_idx, :person_count].tolist()
+    kp_ls = keypoints[frame_idx, :person_count].tolist()
     dets = []
     for det_idx in range(person_count):
-        dets.append({'class': int(npz_data['classes'][frame_idx, det_idx]),
-                     'conf': float(npz_data['confidences'][frame_idx, det_idx]),
-                     'bbox': npz_data['bboxes'][frame_idx, det_idx].tolist(),
-                     'key_points': npz_data['keypoints'][frame_idx, det_idx].tolist()})
+        dets.append({'class': int(cls_ls[det_idx]),
+                     'conf': float(conf_ls[det_idx]),
+                     'bbox': bbox_ls[det_idx],
+                     'key_points': kp_ls[det_idx]})
     return dets
 
 
 def _build_frames(npz_data) -> list[dict[str, Any]]:
+    frame_indices = npz_data['frame_indices']
+    frame_times = npz_data['frame_times_sec']
+    group_events_arr = npz_data['group_events']
+    group_counts = npz_data['group_event_counts']
+    person_counts = npz_data['person_counts']
+    classes = npz_data['classes']
+    confidences = npz_data['confidences']
+    bboxes = npz_data['bboxes']
+    keypoints = npz_data['keypoints']
+
     frames = []
-    for row_idx, frame_no in enumerate(npz_data['frame_indices']):
-        event_count = int(npz_data['group_event_counts'][row_idx])
-        group_events = npz_data['group_events'][row_idx]
+    for row_idx, frame_no in enumerate(frame_indices):
+        event_count = int(group_counts[row_idx])
+        group_events = group_events_arr[row_idx]
         group_tags = [int(v) for v in group_events[:event_count] if v != 0]
+        person_count = int(person_counts[row_idx])
         frames.append({'f': int(frame_no),
-                       't': float(npz_data['frame_times_sec'][row_idx]),
+                       't': float(frame_times[row_idx]),
                        'individual_events': [],
                        'group_events': sorted(set(group_tags), reverse=True),
-                       'detection_list': _frame_detections(npz_data, row_idx)})
+                       'detection_list': _frame_detections(classes, confidences, bboxes, keypoints,
+                                                           person_count, row_idx)})
     return frames
 
 
+def save_pair_stream_json(npz_path, json_path, out_path, **kwargs) -> Path:
+    """Convert and save one json+npz pair as standard Stream JSON without building all frames in memory."""
+    json_path, npz_path, out_path = Path(json_path), Path(npz_path), Path(out_path)
+    if str(out_path).endswith(f'{JSON_SUFFIX}.gz') or out_path.suffix.lower() == '.gz':
+        raise ValueError("Saving gzip Stream JSON is disabled; use .json.zip or .json")
+    progress = kwargs.get('progress', True)
+    progress_step = int(kwargs.get('progress_step', STREAM_JSON_PROGRESS_STEP))
+
+    def write_json_body(file):
+        file.write('{')
+        for idx, (key, value) in enumerate(base.items()):
+            if idx:
+                file.write(',')
+            json.dump(key, file, ensure_ascii=False, separators=(',', ':'))
+            file.write(':')
+            json.dump(value, file, ensure_ascii=False, separators=(',', ':'))
+        file.write(',"frames":[')
+        for row_idx, frame_no in enumerate(frame_indices):
+            if row_idx:
+                file.write(',')
+            event_count = int(group_counts[row_idx])
+            group_tags = [int(v) for v in group_events[row_idx, :event_count] if v != 0]
+            person_count = int(person_counts[row_idx])
+            frame = {'f': int(frame_no),
+                     't': float(frame_times[row_idx]),
+                     'individual_events': [],
+                     'group_events': sorted(set(group_tags), reverse=True),
+                     'detection_list': _frame_detections(classes, confidences, bboxes, keypoints,
+                                                         person_count, row_idx)}
+            json.dump(frame, file, ensure_ascii=False, separators=(',', ':'))
+            if progress and progress_step > 0 and (row_idx + 1) % progress_step == 0:
+                print(f"  converted {row_idx + 1}/{len(frame_indices)} frames")
+        file.write(']}')
+
+    with json_path.open('r', encoding='utf-8') as f:
+        meta = json.load(f)
+    npz_data = np.load(npz_path, allow_pickle=True)
+    try:
+        _validate_pair(meta, npz_data, json_path.stem)
+        base = _stream_json_base(meta, npz_data)
+        frame_indices = npz_data['frame_indices']
+        frame_times = npz_data['frame_times_sec']
+        group_events = npz_data['group_events']
+        group_counts = npz_data['group_event_counts']
+        person_counts = npz_data['person_counts']
+        classes = npz_data['classes']
+        confidences = npz_data['confidences']
+        bboxes = npz_data['bboxes']
+        keypoints = npz_data['keypoints']
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if str(out_path).endswith(f'{JSON_SUFFIX}.zip') or out_path.suffix.lower() == '.zip':
+            json_name = (out_path.name[:-4] if str(out_path).endswith(f'{JSON_SUFFIX}.zip')
+                         else out_path.with_suffix(JSON_SUFFIX).name)
+            with zipfile.ZipFile(out_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                with zf.open(json_name, 'w') as raw:
+                    with io.TextIOWrapper(raw, encoding='utf-8') as file:
+                        write_json_body(file)
+        else:
+            with out_path.open('w', encoding='utf-8') as file:
+                write_json_body(file)
+    finally:
+        npz_data.close()
+
+    return out_path
+
+
 def pair_to_stream_json(npz_path, json_path, out_path=None, **kwargs) -> dict[str, Any]:
-    """Convert one HMC pair into one stream-JSON dict and optionally save it."""
+    """ Convert one HMC pair into one stream-JSON dict and optionally save it."""
     json_path, npz_path = Path(json_path), Path(npz_path)
 
     with json_path.open('r', encoding='utf-8') as f:
@@ -899,38 +1006,23 @@ def pair_to_stream_json(npz_path, json_path, out_path=None, **kwargs) -> dict[st
     stem = json_path.stem
     try:
         _validate_pair(meta, npz_data, stem)
-
-        def _evn_intervals(event_intervals: dict[str, Any] | None) -> dict[str, dict[str, list]]:
-            out = {}
-            for key, payload in (event_intervals or {}).items():
-                sec_intervals = payload.get('sec', []) if isinstance(payload, dict) else payload
-                out[str(key)] = {'sec': list(sec_intervals or [])}
-            return out
-
-        timing = meta.get('timing', {}) or {}
-        target_rate = timing.get('sampling_rates_hz')
-        if target_rate is None:
-            target_rate = timing.get('sampling_rate_hz')
-        data = {'video': meta.get('video') or _scalar(npz_data['video']),
-                'fps': meta.get('fps') if meta.get('fps') is not None else _scalar(npz_data['fps']),
-                'sampling rate': {'target': target_rate,
-                                  'effective': timing.get('effective_fps')},
-                'step': _step_value(meta),
-                'detector': dict(MINIMAL_DETECTOR),
-                'event_intervals': _evn_intervals(meta.get('event_intervals')),
-                'frames': _build_frames(npz_data)}
+        data = _stream_json_base(meta, npz_data)
+        data['frames'] = _build_frames(npz_data)
     finally:
         npz_data.close()
 
     dst = None
     if out_path is not None:
         out_path = Path(out_path)
-        dst = out_path if out_path.suffix.lower() == JSON_SUFFIX else out_path / f"{stem}.json"
-
+        if str(out_path).endswith(f'{JSON_SUFFIX}.gz') or out_path.suffix.lower() == '.gz':
+            raise ValueError("Saving gzip Stream JSON is disabled; use .json.zip or .json")
+        dst = (out_path if out_path.suffix.lower() in {JSON_SUFFIX, '.zip'}
+               or str(out_path).endswith(f'{JSON_SUFFIX}.zip')
+                        else out_path / f"{stem}.json")
     if dst is not None:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        with dst.open('w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        compression = ('zip' if str(dst).endswith(f'{JSON_SUFFIX}.zip') or dst.suffix.lower() == '.zip'
+                       else 'none')
+        save_json_raw(data, dst, compression=compression)
 
     return data
 
@@ -948,7 +1040,7 @@ def convert_pair_dir(pair_dir, out_dir=None, **kwargs) -> list[Path]:
     out_paths = []
     for stem in stems:
         dst = out_dir / f'{stem}.json'
-        pair_to_stream_json(npz_stems[stem], json_stems[stem], out_path=dst, **kwargs)
+        save_pair_stream_json(npz_stems[stem], json_stems[stem], out_path=dst, **kwargs)
         out_paths.append(dst)
     return out_paths
 

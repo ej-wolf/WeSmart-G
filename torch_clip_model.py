@@ -469,7 +469,7 @@ def run_testing(test_model:str|Path, test_cache:str|Path,  **kwargs):
     print(f"\n=== Testing run complete ===\n"
           f"\tTested model : {test_model}\n"
           f"\tTested set   : {test_cache}\n"
-          f"\tPredictions npz: {out_path.name}\n")
+          f"\tPredictions  : {out_path.name}\n")
     return {'path': str(out_path), **save_payload}
 
 
@@ -529,7 +529,7 @@ def run_stream_testing(test_model:str|Path, X:np.ndarray, y:np.ndarray,
     print(f"\n=== Stream testing run complete ===\n"
           f"\tTested model : {model_path}\n"
           f"\tTested stream: {stream_name}\n"
-          f"\tPredictions npz: {out_path.name}\n")
+          f"\tPredictions  : {out_path.name}\n")
     return {'path': str(out_path), **save_payload}
 
 #* endregion

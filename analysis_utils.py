@@ -2,6 +2,7 @@
 import re
 import csv, json
 import math
+from statistics import median
 from numbers import Integral, Real
 from pathlib import Path
 import numpy as np
@@ -13,13 +14,15 @@ from common.my_local_utils import _fmt, as_collection, get_unique_name
 
 #* region Public API  ---------------------------------------------------
 # -----------------------------------------------------------------------
+
 def build_timelines(y_true, y_prob, streams, t_start, t_end, n_frames=None) -> list[dict]:
     """Build ordered stream timelines from normalized per-window arrays."""
+    streams = np.asarray(streams)
     y_true = np.asarray(y_true, dtype=np.int64)
     y_prob = np.asarray(y_prob, dtype=np.float64)
-    streams = np.asarray(streams)
     t_start = np.asarray(t_start, dtype=np.float64)
     t_end = np.asarray(t_end, dtype=np.float64)
+
     if n_frames is None:
         n_frames = np.full(len(y_true), -1, dtype=np.int64)
     else:
@@ -147,6 +150,79 @@ def load_timelines(timeline_input) -> tuple[list[dict], list[dict], list[Path]]:
     return timelines, errors, paths
 
 
+def convert_tcn_format(csv_path, out_dir=None) -> list[Path]:
+    """Convert one TCN multi-stream prediction CSV into compatible timeline CSVs."""
+
+    required = {'json_name', 'window_index', 'window_start_frame', 'window_end_frame',
+                'window_start_time_sec', 'window_end_time_sec', 'target',
+                'prob_raw', 'pred_raw'}
+
+    def number(row, key, kind=float):
+        return kind(float(row[key]))
+
+    csv_path = Path(csv_path)
+    out_dir = Path(out_dir) if out_dir is not None else csv_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    with csv_path.open('r', encoding='utf-8-sig', newline='') as file:
+        reader = csv.DictReader(file)
+        missing = required.difference(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"TCN CSV is missing columns: {sorted(missing)}")
+        groups = {}
+        for row in reader:
+            groups.setdefault(row['json_name'], []).append(row)
+
+    out_files = []
+    fields = ['win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob', 'y_pred']
+    for json_name, rows_in in sorted(groups.items()):
+        rows_in = sorted(rows_in, key=lambda row: number(row, 'window_index', int))
+        rows = []
+        for row in rows_in:
+            t_start = number(row, 'window_start_time_sec')
+            t_end = number(row, 'window_end_time_sec')
+            rows.append({'win_idx': number(row, 'window_index', int) - 1,
+                         't_frm': t_end,
+                         't_start': t_start,
+                         'n_frm': number(row, 'window_end_frame', int) - number(row, 'window_start_frame', int),
+                         'gt_label': number(row, 'target', int),
+                         'y_prob': number(row, 'prob_raw'),
+                         'y_pred': number(row, 'pred_raw', int)})
+
+        spans = [row['t_frm'] - row['t_start'] for row in rows if row['t_frm'] > row['t_start']]
+        times = [row['t_frm'] for row in rows]
+        diffs = [right - left for left, right in zip(times, times[1:]) if right > left]
+        frame_spans = [(row['n_frm'], row['t_frm'] - row['t_start']) for row in rows
+                       if row['n_frm'] > 0 and row['t_frm'] > row['t_start']]
+        metadata = {'source': stream_stem(json_name),
+                    'win_span': median(spans) if spans else None,
+                    'fps': (sum(count for count, _ in frame_spans)/sum(span for _, span in frame_spans)
+                            if frame_spans else None),
+                    'infer_t': median(diffs) if diffs else None}
+        if metadata['infer_t']:
+            metadata['frq_i'] = 1.0/metadata['infer_t']
+        if 'threshold_raw' in rows_in[0]:
+            thresholds = {row.get('threshold_raw', '') for row in rows_in}
+            if len(thresholds) == 1:
+                metadata['threshold'] = number(rows_in[0], 'threshold_raw')
+        metadata = {key: val for key, val in metadata.items() if val is not None}
+
+        out_path = out_dir/f"timeline_{stream_stem(json_name)}.csv"
+        with out_path.open('w', newline='', encoding='utf-8') as file:
+            writer = csv.writer(file)
+            for key in ('source', 'threshold', 'win_span', 'fps', 'infer_t', 'frq_i'):
+                if key in metadata:
+                    val = (f"{float(metadata[key]):.2f}" if key in {'win_span', 'infer_t'} else
+                           round(metadata[key], 9) if isinstance(metadata[key], Real) else metadata[key])
+                    writer.writerow(['infer_frq' if key == 'frq_i' else key, val])
+            writer.writerow(['other data', ''])
+            table = csv.DictWriter(file, fieldnames=fields)
+            table.writeheader()
+            table.writerows(rows)
+        out_files.append(out_path)
+    return out_files
+
+
 def save_timeline_csv(timeline: dict, output_path, pred_cols=None) -> Path:
     """ Save one loaded timeline dictionary and optional binary prediction columns."""
 
@@ -196,9 +272,9 @@ def save_timeline_csv(timeline: dict, output_path, pred_cols=None) -> Path:
 
     with output_path.open('w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
-        for key in ('source', 'win_span', 'fps', 'infer_t', 'frq_i'):
+        for key in ('source', 'threshold', 'win_span', 'fps', 'infer_t', 'frq_i'):
             if key in metadata:
-                val = (_fmt_duration(metadata[key]) if key in {'win_span', 'infer_t'} else
+                val = (f"{float(metadata[key]):.2f}" if key in {'win_span', 'infer_t'} else
                        round(metadata[key], 9) if isinstance(metadata[key], Real) else metadata[key])
                 writer.writerow(['infer_frq' if key == 'frq_i' else key, val])
         writer.writerow(['other data', ''])
@@ -280,7 +356,7 @@ def save_metric_report(report: dict | list[dict], output_path) -> Path:
                              'yolo_threshold': meta.get('yolo_threshold', ''),
                              'yolo_dets': meta.get('person_dets', ''),
                              'max_dets_frm': meta.get('max_dets_frame', ''),
-                             'consc_det_frms': meta.get('consecutive_det_frames', ''),
+                             'consc_det_frms': meta.get('consc_det_frms', ''),
                              't_total': time_info.get('total', ''),
                              'gt_events': events.get('gt', ''),
                              'gt_duration': duration.get('total', ''),
@@ -368,7 +444,7 @@ def _fmt_duration(value):
     if value is None:
         return 'N/A'
     if value <= 60.0:
-        return f'{value:.2f}'
+        return f'{value:.2f} s'
 
     tenths = round(value*10.0)
     if tenths < 36000:
@@ -391,32 +467,30 @@ def _stream_name(stream):
 
 
 def _metric_values(data, fp_unit, lag_digits=2):
-    events = data.get('events', {})
-    duration = events.get('duration', {})
-    scores = data.get('scores', {})
     meta = data.get('stream_meta', {})
-    detected = (events.get('full', 0) + events.get('half', 0)
-                if events else 'N/A')
-    fp_rate = events.get('fp_per_h')
+    events = data.get('events', {})
+    scores = data.get('scores', {})
+    duration = events.get('duration', {})
+    detected = events.get('full', 0) + events.get('half', 0) if events else 'N/A'
+    fp_rate  = events.get('fp_per_h')
     if fp_rate is not None:
         fp_rate = fp_rate if fp_unit == 'h' else fp_rate/60.0
         fp_rate = f'{fp_rate:.{1 if fp_unit == "h" else 2}f}'
-    person_dets = meta.get('person_dets')
-    fp_per_det = ('N/A' if person_dets is None or person_dets <= 0 else
-                  f'{events.get("false", 0)*1000/person_dets:.2f}')
-    return {'stream': _stream_name(data),
-            'total': _fmt_duration(data.get('time', {}).get('total')),
-            'gt_dur': _fmt_duration(duration.get('total')),
+    yolo_dets = meta.get('person_dets')
+    fp_per_det = ('N/A' if yolo_dets is None or yolo_dets <= 0 else
+                  f'{events.get("false", 0)*1000/yolo_dets:.2f}')
+    return {'stream' : _stream_name(data),
+            'total'  : _fmt_duration(data.get('time', {}).get('total')),
+            'gt_dur' : _fmt_duration(duration.get('total')),
             'longest': _fmt_duration(duration.get('longest')),
-            'p_dets': 'N/A' if person_dets is None else str(person_dets),
-            'max_p': 'N/A' if meta.get('max_dets_frame') is None else str(meta['max_dets_frame']),
-            'max_run': ('N/A' if meta.get('consecutive_det_frames') is None else
-                        str(meta['consecutive_det_frames'])),
+            'p_dets' : 'N/A' if yolo_dets is None else str(yolo_dets),
+            'max_p'  : 'N/A' if meta.get('max_dets_frame') is None else str(meta['max_dets_frame']),
+            'max_run': 'N/A' if meta.get('consc_det_frms') is None else str(meta['consc_det_frms']),
             'gt': str(events.get('gt', 'N/A')),
             'detected': str(detected),
-            'false': str(events.get('false', 'N/A')),
+            'false' : str(events.get('false', 'N/A')),
             'recall': _fmt(scores.get('recall'), d=2),
-            'lag': _fmt(events.get('avg_lag'), d=lag_digits),
+            'lag':   _fmt(events.get('avg_lag'), d=lag_digits),
             'fp_burden': _fmt(scores.get('fp_burden'), d=2),
             'fp_rate': 'N/A' if fp_rate is None else fp_rate,
             'fp_per_det': fp_per_det}
@@ -486,24 +560,22 @@ def print_metric_report(report: dict, **kwargs):
     for stream in passed_streams:
         values = _metric_values(stream, fp_unit)
         row = [values['stream'], values['total'], values['gt_dur'], values['longest']]
-        if show_meta:
-            row += [values['p_dets'], values['max_p'], values['max_run']]
+        row += [values['p_dets'], values['max_p'], values['max_run']] if show_meta else []
         row += [values['gt'], values['detected'], values['false'], values['recall'],
                 values['lag'], values['fp_burden'], values['fp_rate']]
-        if show_meta:
-            row += [values['fp_per_det']]
-        table.append(tuple(row))
+        row += [values['fp_per_det']] if show_meta else []
+        table += [row]
+        # table.append(tuple(row))
 
     if total_row:
         values = _metric_values(report, fp_unit)
         row = [f'Total [{len(table)}]', values['total'], values['gt_dur'], values['longest']]
-        if show_meta:
-            row += [values['p_dets'], values['max_p'], values['max_run']]
+        row += [values['p_dets'], values['max_p'], values['max_run']]  if show_meta else []
         row += [values['gt'], values['detected'], values['false'], values['recall'],
                 values['lag'], values['fp_burden'], values['fp_rate']]
-        if show_meta:
-            row += [values['fp_per_det']]
-        table.append(tuple(row))
+        row += [values['fp_per_det']]   if show_meta else []
+        table += [row]
+        # table.append(tuple(row))
 
     alignments = ['<', '>', '>', '>']
     if show_meta:
@@ -515,20 +587,19 @@ def print_metric_report(report: dict, **kwargs):
 
 
 def print_threshold_comparison(reports: list[dict], **kwargs):
-    """Print multi-threshold summaries using the selected table layout."""
-    fp_unit = 'min' if kwargs.get('fp_unit', 'h') in {'min', 'minute'} else 'h'
+    """ Print multi-threshold summaries using the selected table layout."""
 
     def print_thrs_cmp():
         selector_header = ('Prediction' if any(rep.get('prediction', {}).get('column') for rep in reports)
                                         else 'Threshold')
         grouped, stream_order = {}, []
         for rep_i, rep in enumerate(reports):
-            for stream in rep.get('streams', []):
-                key = str(stream.get('timeline', 'N/A'))
+            for stm_i in rep.get('streams', []):
+                key = str(stm_i.get('timeline', 'N/A'))
                 if key not in grouped:
                     grouped[key] = {}
                     stream_order.append(key)
-                grouped[key][rep_i] = stream
+                grouped[key][rep_i] = stm_i
 
         passed_keys = [key for key in stream_order if len(grouped[key]) == len(reports)
                                                    and  all(stream.get('status') == 'pass' for stream in grouped[key].values())]
@@ -553,13 +624,13 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
                                next(iter(by_report.values())))
             base_values = _metric_values(base_stream, fp_unit, lag_digits=1)
             for rep_i, rep in enumerate(reports):
-                stream = by_report.get(rep_i)
+                stm_i = by_report.get(rep_i)
                 pred = rep.get('prediction', {})
                 selector = (str(pred.get('column')) if selector_header == 'Prediction'
                                                     else ('N/A' if pred.get('threshold') is None
                                                                 else f"{pred['threshold']:.2f}"))
                 first = rep_i == 0
-                val = _metric_values(stream, fp_unit, lag_digits=1)
+                val = _metric_values(stm_i, fp_unit, lag_digits=1)
                 row = [base_values['stream'] if first else '', selector,
                        base_values['total'] if first else '',
                        base_values['gt_dur'] if first else '']
@@ -576,6 +647,8 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
         print(f"Status:     pass [{len(passed_keys)}]   failed [{failed_count}]")
         alignments = ['<'] + ['^']*(len(headers) - 1)
         _print_table(headers, tbl, alignments, separators)
+
+    fp_unit = 'min' if kwargs.get('fp_unit', 'h') in {'min', 'minute'} else 'h'
 
     reports = list(reports)
     table_mode = kwargs.get('results_table', False)
@@ -594,9 +667,8 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
 
     show_meta = any(report.get('stream_meta', {}).get('person_dets') is not None
                     for report in reports)
-    selector_type = ('Column' if any(report.get('prediction', {}).get('column') is not None
-                                     for report in reports)
-                     else 'Threshold')
+    selector_type = ('Column' if any(r.get('prediction',{}).get('column') is not None for r in reports)
+                              else 'Threshold')
     headers = ['Prediction', 'GT', 'Detected', 'Missed', 'False',
                'Recall', 'Lag(s)', 'FP score', 'FP burden', f'FP/{fp_unit}']
     if show_meta:
@@ -610,48 +682,45 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
         scores = report.get('scores', {})
         events = report.get('events', {})
         prediction_name = (str(prediction['column']) if prediction.get('column') is not None
-                           else ('N/A' if prediction.get('threshold') is None
-                                 else f"th={prediction['threshold']:g}"))
+                                                     else ('N/A' if prediction.get('threshold') is None
+                                                                 else f"th={prediction['threshold']:g}"))
         detected = events.get('full', 0) + events.get('half', 0)
         missed = events.get('gt', 0) - detected
         row = [prediction_name, str(events.get('gt', 'N/A')),
                values['detected'], str(missed), values['false'],
-               _fmt(scores.get('recall')),
-               values['lag'],
-               _fmt(scores.get('fp')),
-               _fmt(scores.get('fp_burden')),
+               _fmt(scores.get('recall')), values['lag'],
+               _fmt(scores.get('fp')), _fmt(scores.get('fp_burden')),
                values['fp_rate']]
         if show_meta:
-            detections = report.get('stream_meta', {}).get('person_dets')
-            fp_per_dets = (None if not detections else
-                           events.get('false', 0)*1000/detections)
+            dets = report.get('stream_meta', {}).get('person_dets')
+            fp_per_dets = None if not dets else events.get('false', 0)*1000/dets
             row.append(_fmt(fp_per_dets))
         row.append(_fmt(scores.get('total')))
         table.append(row)
 
     def summary_tag():
         tags = []
-        for report in reports:
-            for stream in report.get('streams', []):
-                timeline = str(stream.get('timeline', ''))
-                source = str(stream.get('stream') or '')
-                name = timeline.removeprefix('timeline_')
-                if source and name.endswith(f"_{source}"):
-                    tags.append(name[:-(len(source) + 1)])
-        tags = list(dict.fromkeys(tag for tag in tags if tag))
+        for r in reports:
+            for s in r.get('streams', []):
+                tl  = str(s.get('timeline', ''))
+                src  = str(s.get('stream') or '')
+                name = tl.removeprefix('timeline_')
+                if src and name.endswith(f"_{src}"):
+                    tags.append(name[:-(len(src) + 1)])
+        tags = list(dict.fromkeys(t for t in tags if t))
         return tags[0] if len(tags) == 1 else None
 
-    def print_grouped_summary(headers, rows):
-        alignments = ['<'] + ['^']*(len(headers) - 1)
-        widths = [max(5, len(header), *(len(str(row[idx])) for row in rows))
-                  for idx, header in enumerate(headers)]
-        widths[0] = max(widths[0], len(selector_type))
-
+    def print_grouped_summary(hdr, rows):
         def fmt_row(items):
             cells = [f"{str(item):{alignments[idx]}{widths[idx]}}" for idx, item in enumerate(items)]
             return (f" {cells[0]} ┃ "
                     f"{' | '.join(cells[1:5])} ┃ "
                     f"{' | '.join(cells[5:])}")
+
+        alignments = ['<'] + ['^']*(len(hdr) - 1)
+        widths = [max(5, len(header), *(len(str(row[idx])) for row in rows))
+                  for idx, header in enumerate(hdr)]
+        widths[0] = max(widths[0], len(selector_type))
 
         events_w = sum(widths[1:5]) + 3*(4 - 1)
         metrics_w = sum(widths[5:]) + 3*(len(widths[5:]) - 1)
@@ -659,7 +728,7 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
         group_row = (f" {'Prediction':<{first_w}} ┃ "
                      f"{'Events':^{events_w}} ┃ "
                      f"{'Metrics':^{metrics_w}}")
-        header_row = fmt_row([selector_type] + headers[1:])
+        header_row = fmt_row([selector_type] + hdr[1:])
         sep_cells = ['-'*width for width in widths]
         sep_row = (f" {sep_cells[0]} ┃ "
                    f"{'-+-'.join(sep_cells[1:5])} ┃ "
@@ -668,8 +737,8 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
         print(group_row)
         print(header_row)
         print(sep_row)
-        for row in rows:
-            print(fmt_row(row))
+        for r in rows:
+            print(fmt_row(r))
 
     tag = summary_tag()
     print(f"\n=== Threshold Summary{' for ' + tag if tag else ''} ===")
@@ -826,8 +895,8 @@ def attach_stream_meta(result: dict, meta_path: Path | None) -> dict:
                                   'matched': len(matched),
                                   'person_dets': sum(int(item.get('person_dets', 0)) for item in matched),
                                   'max_dets_frame': max(int(item.get('max_dets_frame', 0)) for item in matched),
-                                  'consecutive_det_frames': max( int(item.get('consecutive_det_frames',
-                                                                 item.get('max_consecutive_det_frames', 0)))
+                                  'consc_det_frms': max( int(item.get('consc_det_frms',
+                                                                 item.get('max_consc_det_frms', 0)))
                                                                  for item in matched),
                                   }
     else:
@@ -836,7 +905,7 @@ def attach_stream_meta(result: dict, meta_path: Path | None) -> dict:
 
 # endregion
 
-#sm-tools 636(,9,2) -> sm-tools
-#767(1,10,2)
+#sm-tools 636(,9,2) -> sm-tools 767(1,10,2)
+#837(1,17,2) ; #912(2,15,2)
 
 if __name__ == '__main__': pass

@@ -27,14 +27,15 @@
                   },]
          `      ...
 """
-import cv2, hashlib, json, platform, torch
+import cv2, hashlib, platform, torch
 from pathlib import Path
 import ultralytics
 from ultralytics import YOLO
 from ultralytics.utils.checks import check_imgsz
 from annotations import load_event_ann, resolve_event_time
 #* import from my utils
-from common.my_local_utils import get_unique_name, print_color, zip_one_path
+from common.my_local_utils import get_unique_name, print_color
+from json_utils import save_json_raw
 
 #* Defaults and constants  -------------------------------------------------------------------
 YOLO_THRESHOLD = 0.5
@@ -171,6 +172,7 @@ def process_video(input_videos: Path|str|list,
     skip_without_ann = kwargs.get('skip_without_ann', False)
     ignore_split = kwargs.get('ignore_split', False)
     zip_output = kwargs.get('zip_output', kwargs.get('zip', ZIP_JSONS))
+    json_compression = kwargs.get('json_compression', kwargs.get('compression', 'zip' if zip_output else 'none'))
 
     #* load model :
     model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
@@ -442,17 +444,7 @@ def process_video(input_videos: Path|str|list,
 
             #Todo: resolve case when video_path is dir while output_path is a file name
             json_path = get_unique_name(json_dir/f"{json_name if json_name else vid_path.stem}.json",4)
-
-            with json_path.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
-            if zip_output:
-                archive_path = zip_one_path(json_path, protocol=kwargs.get('zip_protocol', 'zip'))
-                print_color(f"Archived to {archive_path}", 'b')
-                json_path.unlink()
-                save_path = archive_path
-            else:
-                save_path = json_path
+            save_path = save_json_raw(data, json_path, compression=json_compression)
 
             print_color(f"Saved::{len(segment_frames)} frame to {save_path}\n----------------\n'",'b')
         cap.release()

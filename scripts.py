@@ -17,16 +17,18 @@ from pathlib import Path
 import numpy as np
 import torch
 #* Imports from local project
-from common.my_local_utils import as_collection, get_unique_name, print_color
+from common.my_local_utils import as_collection, get_unique_name, list_file_list, print_color
 from precompute_clips import (build_cache_from_json, extract_stream_features, merge_cache_npz, get_split_pair,
                               WINDOW_SEC, STRIDE_SEC, RANDOM_SEED, split_json_ds, MOTION_FPS_REF)
 from tms_trainer import run_training, run_testing
 from torch_clip_model import run_stream_testing
 from evaluation_core import analyze_clip_test, analyze_video_test, support_pair, DEFAULT_EVAL_THRESHOLD
 from analysis_api import analyze_raw_results
-from json_utils import list_json_sources, load_json_raw
+from json_utils import STREAM_FILE_TYPES, list_json_sources, resolve_json_files,  load_json_raw
 from motion_feature_schema import load_cache_contract_compact
-from project_utils import get_exporting_name, resolve_best_pt_model, strip_split_suffix, strip_timestamp_prefix
+from project_utils import (get_exporting_name, resolve_best_pt_model, strip_split_suffix,
+                           strip_timestamp_prefix, get_test_title_lines)
+
 
 #* general configuration
 RWF_DIR  = Path("data/json_files/RWF-2000/ds")
@@ -303,7 +305,6 @@ def infer_eval_threshold(run_dir: Path, default=DEFAULT_EVAL_THRESHOLD) -> float
 
 def evaluate_raw_test(raw_path, mode, out_dir, threshold=DEFAULT_EVAL_THRESHOLD, **kwargs):
     """Evaluate one raw test NPZ as clip, video, or stream output."""
-
     raw_path, out_dir  = Path(raw_path), Path(out_dir)
 
     with np.load(raw_path, allow_pickle=True) as data:
@@ -311,6 +312,16 @@ def evaluate_raw_test(raw_path, mode, out_dir, threshold=DEFAULT_EVAL_THRESHOLD,
         test_cache = data['test_cache'].item() if isinstance(data['test_cache'], np.ndarray) else data['test_cache']
 
     output_name = get_exporting_name(model_path, test_cache, 'summary', unit=mode)
+    if   mode == 'stream':
+        return analyze_raw_results(
+            raw_path, mode='stream', threshold=threshold,
+            timeline_dir=out_dir,
+            output_path=out_dir/f"{output_name}.json",
+            print_results=kwargs.get('print_report', False),
+            plotting=kwargs.get('plotting', False),
+            build_failures=kwargs.get('build_failures'))
+
+    threshold = float(threshold)
     common = {'out_path': out_dir,
               'threshold': threshold,
               'threshold_dir': Path(f"th-{int(round(threshold * 100.0))}"),
@@ -320,14 +331,7 @@ def evaluate_raw_test(raw_path, mode, out_dir, threshold=DEFAULT_EVAL_THRESHOLD,
               'print_policy': kwargs.get('print_policy', 'summary'),
               'print': kwargs.get('print_report', False),}
 
-    if   mode == 'stream':
-        return analyze_raw_results(
-            raw_path, mode='stream', threshold=threshold,
-            timeline_dir=out_dir,
-            output_path=out_dir/f"{output_name}.json",
-            print_results=kwargs.get('print_report', False),
-            plotting=kwargs.get('plotting', False))
-    elif mode == 'video':
+    if mode == 'video':
         return analyze_video_test(raw_path, output_name=output_name, **common)
     elif mode == 'clip':
         return analyze_clip_test(raw_path, output_name=output_name, **common)
@@ -655,9 +659,24 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
                               summary=<path> stores the aggregate summary
     """
 
+    def config_value(value):
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): config_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [config_value(item) for item in value]
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    rerun_kwargs = {key: value for key, value in kwargs.items() if key != 'out_dir'}
+
     npz_dir = kwargs.pop('npz_dir', None)
     out_dir = kwargs.pop('out_dir', None)
     evaluate = kwargs.pop('evaluate', True)
+    print_reports = kwargs.pop('print_reports', None)
+    print_report_old = kwargs.pop('print_report', None)
     infer_threshold = kwargs.pop('infer_threshold', False)
     thresholds = kwargs.pop('threshold', None)
     summary = kwargs.pop('summary', False)
@@ -665,6 +684,15 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
     ds_eval = kwargs.pop('ds_eval_mode', 'clip')
     stream_schema = kwargs.pop('stream_schema', None)
     npz_dir = Path(npz_dir) if npz_dir is not None else None
+    if print_reports is None:
+        print_reports = 'eval' if print_report_old is not False else 'none'
+    print_reports = str(print_reports).strip().lower()
+    if print_reports == 'evaluation':
+        print_reports = 'eval'
+    if print_reports not in {'eval', 'stream', 'all', 'none'}:
+        raise ValueError("print_reports must be 'eval', 'evaluation', 'stream', 'all', or 'none'")
+    print_eval_report = print_reports in {'eval', 'all'}
+    print_stream_report = print_reports in {'stream', 'all'}
 
     feature_fields = {'extractor', 'extractor_version', 'feature_dim', 'pure_motion', 'legacy',
                       'temp_smooth', 'temp_kernel', 'pool_mode', 'top_k_ratio', 'top_k_min',
@@ -750,6 +778,33 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
                 out.append(ref)
         return out
 
+    def _print_eval_group(reports, output_name):
+        if not reports:
+            return
+        report = reports[0]
+        model_tag, test_tag = get_test_title_lines(report.get('model_path'), report.get('test_cache'))
+        print(f"\n==== Evaluation for {model_tag} ===")
+        print(f"== Test data: {test_tag}")
+        print(f"== Test type: {report.get('analysis_mode', 'N/A')}")
+        print("== outputs:")
+        roc_plot = report.get('roc_plot')
+        roc_csv = report.get('roc_csv')
+        if roc_plot not in {None, 'N/A'}:
+            print_color(f"\tROC image : {roc_plot}", 'b')
+        if roc_csv not in {None, 'N/A'}:
+            print_color(f"\tROC table : {roc_csv}", 'b')
+        for report_i in reports:
+            th = report_i.get('analysis_config', {}).get('threshold')
+            out_dir_i = Path(report_i.get('output_dir', '.'))
+            th_dir = report_i.get('threshold_dir')
+            path = out_dir_i/(th_dir or '')/f"{output_name}.json"
+            try:
+                path = path.relative_to(Path.cwd())
+            except ValueError:
+                pass
+            print(f"== Threshold: {th} summary:")
+            print_color(f"\t{path}", 'b')
+
     def _run_raw_test(model_path:Path, tst_npz:Path, out_dir:Path, mode:str, thres:list[float]):
         raw_tag = get_exporting_name(model_path, tst_npz, 'raw', unit=mode)
         run_kwargs = {'video_mode': True}
@@ -757,8 +812,15 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             run_kwargs['batch_size'] = kwargs['batch_size']
         res = run_testing(model_path, tst_npz, out_dir=out_dir, output_tag=raw_tag, **run_kwargs)
         if evaluate:
+            output_name = get_exporting_name(model_path, tst_npz, 'summary', unit=mode)
+            reports = []
             for th in thres:
-                evaluate_raw_test(res['path'], mode, out_dir, th, **kwargs)
+                eval_kwargs = dict(kwargs)
+                eval_kwargs['print_report'] = False
+                eval_kwargs['print_policy'] = 'none'
+                reports.append(evaluate_raw_test(res['path'], mode, out_dir, th, **eval_kwargs))
+            if print_eval_report:
+                _print_eval_group(reports, output_name)
 
     def _run_stream_test(model_path:Path, s098treams, source_name:str, schema, out_dir:Path,
                          thres:list[float]):
@@ -769,13 +831,18 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             raise ValueError(
                 f"feature_dim mismatch: schema={ftr_schema['feature_dim']}, model={input_dim}")
         feature_parts = []
+        build_failures = []
         for name, data in streams:
             try:
                 part = extract_stream_features([(name, data)], ftr_schema, tmp_schema)
                 if len(part[1]):
                     feature_parts.append(part)
+                else:
+                    build_failures.append({'stream': name, 'reason': 'short duration', 'error': None})
             except Exception as exc:
-                print_color(f"[WARN] Skipping stream {name}: {type(exc).__name__}: {exc}", 'o')
+                build_failures.append({'stream': name,
+                                       'reason': 'other errors',
+                                       'error': f"{type(exc).__name__}: {exc}"})
         if not feature_parts:
             raise ValueError("no valid stream windows were produced")
         X = np.concatenate([part[0] for part in feature_parts])
@@ -790,8 +857,10 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             run_kwargs['batch_size'] = kwargs['batch_size']
         res = run_stream_testing(model_path, X, y, meta, source_name, **run_kwargs)
         if evaluate:
-            for value in thres:
-                evaluate_raw_test(res['path'], 'stream', out_dir, value, **kwargs)
+            evaluate_raw_test(res['path'], 'stream', out_dir, thres,
+                              build_failures=build_failures,
+                              print_report=print_stream_report,
+                              **kwargs)
 
     def _find_test_pair() -> Path|None: #23
         config_path = run_dir/'config.json'
@@ -884,6 +953,17 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             sum_all_results(summary_dir, save_json=True)
         except Exception as exc:
             print(f"[WARN] sum_all_results failed for {summary_dir}: {type(exc).__name__}: {exc}")
+
+    config_dir = Path(out_dir) if out_dir is not None else \
+                 (tested[0] if len(tested) == 1 else tested[0].parent if tested else None)
+    if config_dir is not None:
+        try:
+            config_dir.mkdir(parents=True, exist_ok=True)
+            with (config_dir/'test-config.json').open('w', encoding='utf-8') as f:
+                json.dump(config_value(rerun_kwargs), f, indent=2)
+        except Exception as exc:
+            print_color(f"[WARN] Failed saving test config in {config_dir}: "
+                        f"{type(exc).__name__}: {exc}", 'o')
 
     return tested
 
@@ -1144,20 +1224,31 @@ STREAM_SUB_TST = ["data/json_files/testing/weSmart_demo.json",
 
 def test_runner(tst_strm, **kwargs):
 
-    tst_strm  = [p for ptn in ("*.zip", "*.json") for p in Path(tst_strm).rglob(ptn)]
+    t0 = time.time()
+    tst_strm = Path(tst_strm)
+    if tst_strm.is_file() and tst_strm.suffix.lower() == '.txt':
+        # tst_strm = list_file_list(tst_strm, kwargs.get('root_path'))
+        tst_strm = resolve_json_files(tst_strm, kwargs.get('root_path'))
+    elif tst_strm.is_dir():
+        tst_strm = sorted({p for sfx in STREAM_FILE_TYPES for p in tst_strm.rglob(f'*{sfx}')})
+    else:
+         tst_strm = [tst_strm]
 
     mdl_dir = Path(kwargs.get('mdl_dir', DEFAULT_MDL_DIR) )
     out_dir = Path(kwargs.get('out_dir', DEFAULT_TST_DIR) )
     tst_ds =  None  # Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/ds")
-    tl_chart = False
+    tl_chart = kwargs.get('plot_charts', False)
     # tst_strm = None #Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/strm")
     # tst_strm = strm_test_set # Path("data/json_files/testing")
-    print(f"\n--- Testing list: ({len(tst_strm)} streams in total) ---:")
-    for f in tst_strm: print(f.stem)
+    threshold = kwargs.get('th', [0.5, 0.6])
 
-    threshold = [0.5, 0.6]
     test_models(mdl_dir, out_dir=out_dir, summary= out_dir, threshold=threshold,
                 ds_tests= tst_ds, stm_tests=tst_strm, test_pair=True, plotting=tl_chart)
+
+    print(f"\n--- Testing list: ({len(tst_strm)} streams in total) ---:")
+    for f in tst_strm: print(f.stem)
+    print(f"test_runner for {out_dir.name} completed; duration for {time.time() - t0:4f}\n{'*'*80}\n")
+          # f"*******************************************************\n")
 
 # * endregion
 
@@ -1165,9 +1256,9 @@ if __name__ == "__main__":
     pass
 
     # cache_builder()
-    test_runner( Path(STREAM_TEST_DIR),
-                 mdl_dir=DEFAULT_MDL_DIR,
-                 out_dir=DEFAULT_TST_DIR)
+    test_runner(tst_strm=Path(STREAM_TEST_DIR),
+                 mdl_dir=Path(DEFAULT_MDL_DIR),
+                 out_dir=Path(DEFAULT_TST_DIR))
 
     #* region Train models
     cache_dir = Path("data/cache/Joint_sets")

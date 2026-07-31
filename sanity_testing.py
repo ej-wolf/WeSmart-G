@@ -3,6 +3,15 @@
     - run one sanity flow with `run_sanity_flow(...)`
     - compare one new output tree against a reference with `assert_outputs(...)`
     - keep old/new export-format compatibility in this layer instead of the evaluation modules
+
+      python3 sanity_tools.py test \
+            --models work_dirs/models \
+            --ref-dir work_dirs/reference-run \
+            --ds-tests data/cache/Joint_sets \
+            --stm-tests data/json_files/testing \
+            --sanity-op-dir work_dirs/sanity \
+            --test-kwargs "{'threshold':[0.5, 0.6], 'test_pair':True, 'print_reports':'none'}"
+
     ToDo: check file naming for training mode    e.g
         timeline_J-RWL_ft25_w30-15_6_11_8_full_resolution_erez.png
         timeline******************_6_11_8_full_resolution_erez.png
@@ -1280,8 +1289,7 @@ def assert_outputs(test_dir, ref_dir, mode='no_train') -> tuple[bool, dict[str, 
 
 # endregion
 
-#* 1191 ->1161-> 1217-> 1199-> 1188(1,22,2) -> 1166(,22,2)->1155
-#* 1390(2,5,3)-> refact-01-1277(1,5,3)
+#* 1282(1,5,1)
 
 if __name__ == '__main__':
     import shutil

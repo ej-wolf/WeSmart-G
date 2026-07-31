@@ -23,6 +23,10 @@ def print_color(msg:str, clr=Fore.RED):
     print( f"{clr}{msg}{Style.RESET_ALL}")
 
 
+def cli_warning(msg, clr='r'):
+    print_color(f"[WARN] {msg}", clr)
+
+
 #* region *** Collection casting ***** #
 def as_collection(x):
     """  If x is a collection (list/tuple/set/dict/range/numpy array/torch tensor/etc.)
@@ -79,6 +83,30 @@ def _fmt(value, **kwargs):
 
 #* region *** General Files/ Paths sys Utils ***************************************#
 # -----------------------------------------------------------------------------
+
+def list_file_list(list_file:str|Path, root_path:str|Path|None=None, absolut:bool=False)->list[Path]:
+    """ Read paths from a line-based list file.
+    list file Entries are resolved against root_path or CWD, missing paths are skipped.
+    If absolut=True, entries are returned as is without resolution.
+    """
+    list_path = Path(list_file)
+    root = Path.cwd() if root_path is None else Path(root_path)
+    paths = []
+    for line in list_path.read_text(encoding='utf-8').splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith('#'):
+            continue
+        path = Path(entry)
+        if absolut:
+            paths.append(path)
+            continue
+        if not path.is_absolute():
+            path = root / path
+        if path.exists():
+            paths.append(path)
+        else:
+            print(f'Skipping missing path: {path}')
+    return paths
 
 def get_unique_name(file_name:str|Path, n:int=3) -> Path:
     """ Return a unique file name.

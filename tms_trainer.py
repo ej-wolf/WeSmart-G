@@ -49,7 +49,7 @@
 
 from pathlib import Path
 import argparse
-from common.my_local_utils import print_color
+from common.my_local_utils import cli_warning
 from torch_clip_model import run_training, run_testing
 # from stream_analysis import analyze_stream_test
 from analysis_api import analyze_raw_results
@@ -66,22 +66,18 @@ def _kwargs_from_args(args, names):
 
 def _run_train(args):
     """ Run training command."""
-    kw = _kwargs_from_args(args,
-                           ('work_dir', 'tag', 'lr', 'epochs', 'batch_size',
-                                   'hidden_dim', 'valid_ratio', 'valid_seed',))
+    kw = _kwargs_from_args(args, ('work_dir', 'tag', 'lr', 'epochs', 'batch_size',
+                                         'hidden_dim', 'valid_ratio', 'valid_seed',))
     run_dir = run_training(args.train_cache, args.valid_cache, **kw)
     print(f"Training done. Run dir: {run_dir}")
 
 
 def _run_test(args):
     """ Run testing command."""
-    def _warn(text): #* ToDo: move warn to common utils
-        print_color(f"[WARN] {text}", 'r')
-
     new_eval_target = None
     if args.eval_stream:
         if args.eval_video:
-            _warn("--eval-video was skipped because --eval-stream takes precedence")
+            cli_warning("--eval-video was skipped because --eval-stream takes precedence")
         new_eval_target = 'stream'
     elif args.eval_video:
         new_eval_target = 'video'
@@ -92,19 +88,19 @@ def _run_test(args):
     legacy_eval_requested = False
     legacy_eval_target = None
     if args.evaluate or args.video_mode or args.stream_mode:
-        _warn("Old test-evaluation flags are deprecated; use --eval-clip / --eval-video / --eval-stream")
+        cli_warning("Old test-evaluation flags are deprecated; use --eval-clip / --eval-video / --eval-stream")
         if args.evaluate:
             legacy_eval_requested = True
             if args.stream_mode:
                 if args.video_mode:
-                    _warn("Deprecated --video-mode was skipped because --stream-mode takes precedence")
+                    cli_warning("Deprecated --video-mode was skipped because --stream-mode takes precedence")
                 legacy_eval_target = 'stream'
             elif args.video_mode:
                 legacy_eval_target = 'video'
             else:
                 legacy_eval_target = 'clip'
         else:
-            _warn("Deprecated mode flags without --evaluate are ignored")
+            cli_warning("Deprecated mode flags without --evaluate are ignored")
 
     eval_target = new_eval_target if new_eval_target is not None else legacy_eval_target
 
@@ -117,7 +113,7 @@ def _run_test(args):
 
     if args.pure_clips:
         if new_eval_target is not None or legacy_eval_requested:
-            _warn("--pure-clips disables immediate evaluation; eval flags were ignored")
+            cli_warning("--pure-clips disables immediate evaluation; eval flags were ignored")
         return
 
     eval_kw = {'threshold': args.threshold, 'print_results': args.report, }
@@ -126,7 +122,7 @@ def _run_test(args):
     elif eval_target == 'stream':
         eval_kw['output_path']=  Path(args.out_dir or Path(res['path']).parent)/'stream_reports.json'
     else:
-        _warn(f"Unrecognized evalution mode: {eval_target}")
+        cli_warning(f"Unrecognized evalution mode: {eval_target}")
         return
 
     analyze_raw_results(res['path'], eval_target, **eval_kw)

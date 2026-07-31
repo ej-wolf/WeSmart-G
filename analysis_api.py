@@ -20,8 +20,29 @@ DEFAULT_METRIC_CONFIG = Path(__file__).resolve().parent/"configs/metrics/metric_
 
 #* region Public API  ---------------------------------------------------
 # -----------------------------------------------------------------------
-def timelines_from_results(test_results) -> list[dict]:
+def timelines_from_results(test_results, build_failures=None) -> list[dict]:
     """Load raw prediction results and build one ordered timeline per stream."""
+    build_failures = list(build_failures or [])
+
+    def add_failure(src, reason, error=None):
+        text = f"{type(error).__name__}: {error}" if error is not None else None
+        failures.append({'stream': src, 'reason': reason, 'error': text})
+
+    def print_summary():
+        total = len(timelines) + len(build_failures)
+        print(f"\tTimeline build:  {len(valid_tls)}/{total}  successded")
+        if not failures:
+            return
+        print(f"\tFaild: {len(failures)}")
+        for fail_i in failures:
+            if fail_i['reason'] == 'other errors':
+                msg = f"[{fail_i['error']}]" if fail_i['error'] else fail_i['reason']
+            elif fail_i['error']:
+                msg = f"{fail_i['reason']}  [{fail_i['error']}]"
+            else:
+                msg = fail_i['reason']
+            print(f"\t\t{fail_i['stream']}: {msg}")
+
     raw, _ = resolve_input(test_results)
     required = ('y_true', 'y_prob', 'meta_video', 'meta_t_start', 'meta_t_end')
     missing = [key for key in required if key not in raw or raw[key] is None]
@@ -32,19 +53,35 @@ def timelines_from_results(test_results) -> list[dict]:
                                 raw['meta_t_start'], raw['meta_t_end'],
                                 raw.get('meta_n_frames'))
     model_tag, _ = get_test_title_lines(raw.get('model_path'), raw.get('test_cache'))
-    for timeline in timelines:
-        source = timeline['metadata']['source']
-        timeline['metadata']['timeline'] = f"timeline_{model_tag}_{source}"
-        timing = get_timeline_timing(timeline['rows'], timeline['metadata'])
-        timeline['metadata'].update({'win_span': timing['window_span'],
-                                     'fps': timing['fps'],
-                                     'infer_t': 1.0/timing['frq_i'],
-                                     'frq_i': timing['frq_i']})
-    return timelines
+    valid_tls = []
+    failures = list(build_failures)
+    for tl in timelines:
+        src = tl['metadata']['source']
+        tl['metadata']['timeline'] = f"timeline_{model_tag}_{src}"
+        if len(tl['rows']) < 2:
+            add_failure(src, 'short duration')
+            continue
+        try:
+            timing = get_timeline_timing(tl['rows'], tl['metadata'])
+        except ValueError as exc:
+            add_failure(src, 'bad data', exc)
+            continue
+        except Exception as exc:
+            add_failure(src, 'other errors', exc)
+            continue
+        tl['metadata'].update({'win_span': timing['window_span'],
+                               'fps': timing['fps'],
+                               'infer_t': 1.0/timing['frq_i'],
+                               'frq_i': timing['frq_i']})
+        valid_tls.append(tl)
+    print_summary()
+    if not valid_tls:
+        raise ValueError("no valid timelines were produced")
+    return valid_tls
 
 
 def resolve_metric_params(config_path=None, values=None) -> dict:
-    """Load optional YAML values and resolve metric parameters through the core."""
+    """ Load optional YAML values and resolve metric parameters through the core."""
     if values is not None and not isinstance(values, dict):
         raise TypeError("metric parameter values must be a dictionary")
 
@@ -154,9 +191,10 @@ def analyze_raw_results(test_results, mode='stream', **kwargs):
     print_res = bool(kwargs.pop('print_results', False))
     print_kwargs = kwargs.pop('print_kwargs', {})
     plotting = kwargs.pop('plotting', False)
+    build_failures = kwargs.pop('build_failures', None)
     if not th_ls and pred_cols is None:
         th_ls = [DEFAULT_EVAL_THRESHOLD]
-    timelines = timelines_from_results(test_results)
+    timelines = timelines_from_results(test_results, build_failures=build_failures)
 
     timeline_files = []
     if timeline_dir is not None:
@@ -229,11 +267,10 @@ def load_results(result_path):
     return load_report_file(result_path)
 
 
-def print_results(result_path_or_report, **kwargs):
-    """Load when needed and print one previously calculated report."""
-    report = (load_report_file(result_path_or_report)
-              if isinstance(result_path_or_report, (str, Path))
-              else result_path_or_report)
+def print_results(result, **kwargs):
+    """Load when needed and print one previously calculated report.
+        :param result: results report or path to report """
+    report = load_report_file(result) if isinstance(result, (str, Path)) else result
     if isinstance(report, list):
         return print_threshold_comparison(report, **kwargs)
     if isinstance(report, dict) and 'streams' in report:
