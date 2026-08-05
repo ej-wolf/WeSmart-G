@@ -1,6 +1,7 @@
 """Stream JSON utilities for inspection, comparison, and pair conversion."""
 from __future__ import annotations
 import argparse
+import copy
 import io
 import json, csv
 import os
@@ -13,6 +14,7 @@ import numpy as np
 #* project import
 from common.my_local_utils import print_color, get_unique_name
 from json_utils import list_json_sources, load_json_raw, resolve_json_source, save_json_raw
+from stream_utils import compare_meta, compare_stream, event_durations, stream_duration
 
 JSON_SUFFIX = '.json'
 CSV_SUFFIX = '.csv'
@@ -20,30 +22,13 @@ NPZ_SUFFIX = '.npz'
 
 TAG_NO_EVENT = 0
 TAG_ABNORMAL = 1
-TAG_FALL = 2
+TAG_FALL    = 2
 TAG_TENSION = 3
-TAG_FIGHT = 4
+TAG_FIGHT   = 4
 
 SJ_EVENT_BUCKETS = {'empty': None, 'norm': TAG_NO_EVENT, 'abnormal': TAG_ABNORMAL,
                     'tension': TAG_TENSION, 'fight': TAG_FIGHT}
 SJ_DRAW_RANDOM_SEED = 66
-
-
-def _bbox_iou(box_1, box_2) -> float:
-    """Return IoU for two normalized XYXY boxes."""
-    if len(box_1) != 4 or len(box_2) != 4:
-        return 0.0
-    x1 = max(float(box_1[0]), float(box_2[0]))
-    y1 = max(float(box_1[1]), float(box_2[1]))
-    x2 = min(float(box_1[2]), float(box_2[2]))
-    y2 = min(float(box_1[3]), float(box_2[3]))
-    inter_w = max(0.0, x2 - x1)
-    inter_h = max(0.0, y2 - y1)
-    inter = inter_w * inter_h
-    area_1 = max(0.0, float(box_1[2]) - float(box_1[0])) * max(0.0, float(box_1[3]) - float(box_1[1]))
-    area_2 = max(0.0, float(box_2[2]) - float(box_2[0])) * max(0.0, float(box_2[3]) - float(box_2[1]))
-    union = area_1 + area_2 - inter
-    return 0.0 if union <= 0.0 else inter / union
 
 
 #* region Stream JSON info *****************************#
@@ -60,38 +45,44 @@ def stream_stem(path: str | Path) -> str:
     return Path(path).name.split('.', 1)[0]
 
 
-def _frame_delta_stats(frames: list[dict[str, Any]]) -> tuple[list[float], float]:
-    times = [float(frame.get('t', 0.0)) for frame in frames]
-    deltas = [max(0.0, times[idx + 1] - times[idx]) for idx in range(len(times) - 1)]
-    positive = [delta for delta in deltas if delta > 0.0]
-    tail_dt = float(np.median(positive)) if positive else 0.0
-    return times, tail_dt
+def load_stream_inputs(inputs) -> tuple[list[tuple[str, dict]], str, list[dict]]:
+    """Load homogeneous stream dictionaries or JSON sources for stream testing."""
+    if inputs is None:
+        return [], 'streams', []
+    items = list(inputs) if isinstance(inputs, (list, tuple, set, frozenset)) else [inputs]
+    has_dict = [isinstance(item, dict) for item in items]
+    if any(has_dict) and not all(has_dict):
+        raise ValueError("stream inputs cannot mix stream dictionaries and paths")
 
+    if all(has_dict):
+        streams = []
+        for index, data in enumerate(items):
+            name = Path(str(data.get('video') or f"stream_{index + 1}")).name
+            streams.append((name, copy.deepcopy(data)))
+        return streams, 'streams', []
 
-def _merged_bucket_durations(frames: list[dict[str, Any]], bucket: int | None) -> list[float]:
-    if not frames:
-        return []
+    paths = []
+    for item in items:
+        path = Path(item)
+        if path.is_dir():
+            paths.extend(list_json_sources(path))
+        else:
+            paths.append(path)
 
-    times, tail_dt = _frame_delta_stats(frames)
-    durations = []
-    start_idx = None
-    prev_idx = None
-
-    for idx, frame in enumerate(frames):
-        grp_evn = frame.get('group_events') or []
-        active = (len(grp_evn) == 0) if bucket is None else (bucket in grp_evn)
-        if active and start_idx is None:
-            start_idx = idx
-        if active:
-            prev_idx = idx
-            continue
-        if start_idx is not None and prev_idx is not None:
-            durations.append(max(0.0, times[prev_idx] - times[start_idx]) + tail_dt)
-            start_idx, prev_idx = None, None
-
-    if start_idx is not None and prev_idx is not None:
-        durations.append(max(0.0, times[prev_idx] - times[start_idx]) + tail_dt)
-    return durations
+    streams, failures = [], []
+    for path in paths:
+        try:
+            streams.append((path.name, load_json_raw(path)))
+        except Exception as exc:
+            failures.append({'stream': path.name, 'reason': 'bad data',
+                             'error': f'{type(exc).__name__}: {exc}'})
+    if len(items) == 1 and Path(items[0]).is_dir():
+        source_name = Path(items[0]).name
+    elif len(paths) == 1:
+        source_name = paths[0].stem
+    else:
+        source_name = 'streams'
+    return streams, source_name, failures
 
 
 def print_stream_json_info(report: dict[str, Any], **kwargs) -> None:
@@ -180,11 +171,6 @@ def stream_json_info(sj_path, op_path=None, **kwargs) -> dict[str, Any]:
             pass
         raise FileNotFoundError(sj_path)
 
-    def _stream_duration(frames: list[dict[str, Any]]) -> float:
-        if len(frames) < 2:
-            return 0.0
-        return max(0.0, float(frames[-1].get('t', 0.0)) - float(frames[0].get('t', 0.0)))
-
     def _ensure_stream_json(data: dict[str, Any], src: Path) -> list[dict[str, Any]]:
         frms = data.get('frames')
         if not isinstance(frms, list):
@@ -209,11 +195,11 @@ def stream_json_info(sj_path, op_path=None, **kwargs) -> dict[str, Any]:
         try:
             data = load_json_raw(path)
             frames = _ensure_stream_json(data, path)
-            durations.append(_stream_duration(frames))
+            durations.append(stream_duration(frames))
             frame_counts.append(len(frames))
             fps_values.append(float(data.get('fps', 0.0) or 0.0))
             for tag_name, bucket in SJ_EVENT_BUCKETS.items():
-                bucket_segments[tag_name].extend(_merged_bucket_durations(frames, bucket))
+                bucket_segments[tag_name].extend(event_durations(frames, bucket))
             valid_files.append(str(path))
         except Exception as exc:
             print_color(f"[ERROR] stream_json_info skipped {path}: {type(exc).__name__}: {exc}", 'r')
@@ -255,7 +241,7 @@ def stream_json_info(sj_path, op_path=None, **kwargs) -> dict[str, Any]:
 
 def collect_stream_meta(sj_path, op_path=None) -> dict[str, Any]:
     """Collect extendable per-stream metadata from plain or zipped SJ files."""
-    def _effective_fps(data: dict[str, Any]) -> float:
+    def _resolve_eff_fps(data: dict[str, Any]) -> float:
         def valid(val) -> float | None:
             return val if np.isfinite(val) and val > 0.0 else None
 
@@ -334,7 +320,7 @@ def collect_stream_meta(sj_path, op_path=None) -> dict[str, Any]:
                 raise ValueError('missing frames list')
 
             stem = stream_stem(path)
-            fps = _effective_fps(data)
+            fps = _resolve_eff_fps(data)
             ylth = data.get('detection_threshold')
             if ylth is None:
                 detector = data.get('detector')
@@ -415,11 +401,6 @@ def draw_json_streams(json_path, criteria, cutoff: float, **kwargs) -> tuple[lis
         valid = {'t_total', 'empty', TAG_NO_EVENT, TAG_ABNORMAL, TAG_FALL, TAG_TENSION, TAG_FIGHT}
         return [crit for crit in crt_ls if crit in valid], [crit for crit in crt_ls if crit not in valid]
 
-    def _stream_duration(frames: list[dict[str, Any]]) -> float:
-        if len(frames) < 2:
-            return 0.0
-        return max(0.0, float(frames[-1].get('t', 0.0)) - float(frames[0].get('t', 0.0)))
-
     def _file_times(path: Path) -> dict[str, Any]:
         path = resolve_json_source(path)
         data = load_json_raw(path)
@@ -427,13 +408,13 @@ def draw_json_streams(json_path, criteria, cutoff: float, **kwargs) -> tuple[lis
         if not isinstance(frames, list):
             raise ValueError('missing frames list')
 
-        parts = {'t_total': _stream_duration(frames),
-                 'empty': sum(_merged_bucket_durations(frames, None)),
-                 TAG_NO_EVENT: sum(_merged_bucket_durations(frames, TAG_NO_EVENT)),
-                 TAG_ABNORMAL: sum(_merged_bucket_durations(frames, TAG_ABNORMAL)),
-                 TAG_FALL: sum(_merged_bucket_durations(frames, TAG_FALL)),
-                 TAG_TENSION: sum(_merged_bucket_durations(frames, TAG_TENSION)),
-                 TAG_FIGHT: sum(_merged_bucket_durations(frames, TAG_FIGHT))}
+        parts = {'t_total': stream_duration(frames),
+                 'empty': sum(event_durations(frames, None)),
+                 TAG_NO_EVENT: sum(event_durations(frames, TAG_NO_EVENT)),
+                 TAG_ABNORMAL: sum(event_durations(frames, TAG_ABNORMAL)),
+                 TAG_FALL: sum(event_durations(frames, TAG_FALL)),
+                 TAG_TENSION: sum(event_durations(frames, TAG_TENSION)),
+                 TAG_FIGHT: sum(event_durations(frames, TAG_FIGHT))}
         return {'path': path,
                 'time': sum(parts[cr] for cr in criteria_ls),
                 'parts': parts}
@@ -600,23 +581,18 @@ def collect_jsons(json_ls, src_dir, trg_dir) -> list[Path]:
 #* endregion *#
 
 #* region Stream JSON compare **************************#
-DEFAULT_SJ_NUMERIC_TOLERANCES = {'avg_abs': 0.05, 'max_abs': 0.05}
-META_IGNORED = {'frames', 'event_intervals', 'detector', 'detection_threshold'}
 def compare_stream_json(j1, j2, *, tolerances=None, ignore_path_fields=True) -> tuple[bool, dict[str, Any]]:
     """Compare two stream JSONs by metadata, frame layout, annotations, and numeric payload."""
-    if tolerances is None:
-        tolerances = dict(DEFAULT_SJ_NUMERIC_TOLERANCES)
-    elif isinstance(tolerances, dict):
-        tolerances = {**DEFAULT_SJ_NUMERIC_TOLERANCES, **tolerances}
-    else:
-        raise TypeError("compare_stream_json tolerances must be None or a concrete dict")
+    if tolerances is not None and not isinstance(tolerances, dict):
+        raise TypeError('compare_stream_json tolerances must be None or a concrete dict')
     data_1 = j1 if isinstance(j1, dict) else load_json_raw(j1)
     data_2 = j2 if isinstance(j2, dict) else load_json_raw(j2)
 
-    metadata = _cmp_meta(data_1, data_2, ignore_path_fields=ignore_path_fields)
-    frame_structure = _cmp_frm_structure(data_1.get('frames', []), data_2.get('frames', []))
-    numeric = _cmp_numeric(data_1.get('frames', []), data_2.get('frames', []), tolerances)
-    annotations = _cmp_ann(data_1, data_2)
+    metadata = compare_meta(data_1, data_2, ignore_path_fields=ignore_path_fields)
+    stream = compare_stream(data_1, data_2, tolerances=tolerances)
+    frame_structure = stream['frame_structure']
+    annotations = stream['annotations']
+    numeric = stream['numeric']
 
     ok = (not metadata['unequal'] and
           not (frame_structure['frame_count'] or
@@ -634,165 +610,6 @@ def compare_stream_json(j1, j2, *, tolerances=None, ignore_path_fields=True) -> 
               'numeric': numeric,
               'annotations': annotations}
     return ok, report
-
-
-def _cmp_meta(data_1: dict[str, Any], data_2: dict[str, Any], *, ignore_path_fields: bool) -> dict[str, Any]:
-    ignored = set(META_IGNORED)
-    if ignore_path_fields:
-        ignored.add('video')
-
-    unequal = {}
-    keys = (set(data_1) | set(data_2)) - ignored
-    for key in sorted(keys):
-        val_1 = data_1.get(key, '<MISSING>')
-        val_2 = data_2.get(key, '<MISSING>')
-        if val_1 != val_2:
-            unequal[key] = {'j1': val_1, 'j2': val_2}
-    return {'unequal': unequal}
-
-
-def _frame_map(frames: list[dict[str, Any]]) -> dict[Any, dict[str, Any]]:
-    """Index frames by frame number for stable cross-file comparison."""
-    return {frame.get('f'): frame for frame in frames}
-
-
-def _cmp_frm_structure(frames_1: list[dict[str, Any]], frames_2: list[dict[str, Any]]) -> dict[str, Any]:
-    map_1, map_2 = _frame_map(frames_1), _frame_map(frames_2)
-    frame_count = None
-    if len(frames_1) != len(frames_2):
-        frame_count = {'j1': len(frames_1), 'j2': len(frames_2)}
-
-    missing = sorted(set(map_1) - set(map_2))
-    extra = sorted(set(map_2) - set(map_1))
-    timestamp_mismatches = []
-    detection_count_mismatches = []
-
-    for frame_idx in sorted(set(map_1) & set(map_2)):
-        frame_1, frame_2 = map_1[frame_idx], map_2[frame_idx]
-        if frame_1.get('t') != frame_2.get('t'):
-            timestamp_mismatches.append({'frame': frame_idx, 'j1': frame_1.get('t'), 'j2': frame_2.get('t')})
-
-        det_count_1 = len(frame_1.get('detection_list') or [])
-        det_count_2 = len(frame_2.get('detection_list') or [])
-        if det_count_1 != det_count_2:
-            detection_count_mismatches.append({'frame': frame_idx, 'j1': det_count_1, 'j2': det_count_2})
-
-    return {'frame_count': frame_count,
-            'missing_frame_indices': missing,
-            'extra_frame_indices': extra,
-            'timestamp_mismatches': timestamp_mismatches,
-            'detection_count_mismatches': detection_count_mismatches}
-
-
-def _match_detections(dets_1: list[dict[str, Any]], dets_2: list[dict[str, Any]]) -> list[tuple[int, int]]:
-    """Greedily align detections by class first, then by bbox IoU."""
-    candidates = []
-    for idx_1, det_1 in enumerate(dets_1):
-        cls_1 = det_1.get('class')
-        box_1 = det_1.get('bbox', [])
-        for idx_2, det_2 in enumerate(dets_2):
-            cls_2 = det_2.get('class')
-            box_2 = det_2.get('bbox', [])
-            candidates.append((int(cls_1 == cls_2), _bbox_iou(box_1, box_2), -idx_1, -idx_2, idx_1, idx_2))
-
-    used_1, used_2 = set(), set()
-    matches = []
-    for _, _, _, _, idx_1, idx_2 in sorted(candidates, reverse=True):
-        if idx_1 in used_1 or idx_2 in used_2:
-            continue
-        used_1.add(idx_1)
-        used_2.add(idx_2)
-        matches.append((idx_1, idx_2))
-        if len(matches) == min(len(dets_1), len(dets_2)):
-            break
-    return sorted(matches)
-
-
-def _cmp_numeric(frames_1: list[dict[str, Any]], frames_2: list[dict[str, Any]], tolerances: dict[str, float]) -> dict[str, Any]:
-    """Compare comparable numeric fields after aligning detections by class-aware IoU."""
-    map_1, map_2 = _frame_map(frames_1), _frame_map(frames_2)
-    total_abs, count = 0.0, 0
-    max_abs, max_path = 0.0, None
-
-    def add_delta(path: str, val_1, val_2) -> None:
-        nonlocal total_abs, count, max_abs, max_path
-        delta = abs(float(val_1) - float(val_2))
-        total_abs += delta
-        count += 1
-        if delta > max_abs:
-            max_abs, max_path = delta, path
-
-    def cmp_num_lists(values_1, values_2, path: str) -> None:
-        if len(values_1) != len(values_2):
-            return
-        for idx, (val_1, val_2) in enumerate(zip(values_1, values_2)):
-            if _is_number(val_1) and _is_number(val_2):
-                add_delta(f'{path}[{idx}]', val_1, val_2)
-
-    for frame_idx in sorted(set(map_1) & set(map_2)):
-        dets_1 = map_1[frame_idx].get('detection_list') or []
-        dets_2 = map_2[frame_idx].get('detection_list') or []
-        if len(dets_1) != len(dets_2):
-            continue
-
-        for det_idx_1, det_idx_2 in _match_detections(dets_1, dets_2):
-            det_1, det_2 = dets_1[det_idx_1], dets_2[det_idx_2]
-            if _is_number(det_1.get('conf')) and _is_number(det_2.get('conf')):
-                add_delta(f'frames[{frame_idx}].detection_list[{det_idx_1}].conf', det_1['conf'], det_2['conf'])
-            cmp_num_lists(det_1.get('bbox', []), det_2.get('bbox', []),
-                          f'frames[{frame_idx}].detection_list[{det_idx_1}].bbox')
-            cmp_num_lists(det_1.get('key_points', []), det_2.get('key_points', []),
-                          f'frames[{frame_idx}].detection_list[{det_idx_1}].key_points')
-
-    avg_abs = total_abs / count if count else 0.0
-    return {'count': count,
-            'avg_abs': avg_abs,
-            'max_abs': max_abs,
-            'max_path': max_path,
-            'tolerances': dict(tolerances),
-            'within_tolerance': (avg_abs <= float(tolerances['avg_abs']) and max_abs <= float(tolerances['max_abs']))}
-
-
-def _is_number(val) -> bool:
-    return isinstance(val, (int, float)) and not isinstance(val, bool)
-
-
-def _cmp_ann(data_1: dict[str, Any], data_2: dict[str, Any]) -> dict[str, Any]:
-    """Compare top-level event intervals and per-frame annotation payloads."""
-    def norm_intervals(value):
-        if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
-            value = value[0]
-        if not isinstance(value, dict):
-            return {}
-
-        intervals = {}
-        for key, payload in value.items():
-            if isinstance(payload, dict):
-                sec_intervals = payload.get('sec', [])
-            elif isinstance(payload, list):
-                sec_intervals = payload
-            else:
-                sec_intervals = []
-            if sec_intervals:
-                intervals[key] = sec_intervals
-        return intervals
-
-    intervals_1 = norm_intervals(data_1.get('event_intervals'))
-    intervals_2 = norm_intervals(data_2.get('event_intervals'))
-    map_1, map_2 = _frame_map(data_1.get('frames', [])), _frame_map(data_2.get('frames', []))
-    mismatches = []
-
-    for frame_idx in sorted(set(map_1) & set(map_2)):
-        ann_1 = {'group_events': map_1[frame_idx].get('group_events', []),
-                 'individual_events': map_1[frame_idx].get('individual_events', [])}
-        ann_2 = {'group_events': map_2[frame_idx].get('group_events', []),
-                 'individual_events': map_2[frame_idx].get('individual_events', [])}
-        if ann_1 != ann_2:
-            mismatches.append({'frame': frame_idx, 'j1': ann_1, 'j2': ann_2})
-
-    return {'event_intervals_equal': intervals_1 == intervals_2,
-            'event_intervals': {'j1': intervals_1, 'j2': intervals_2} if intervals_1 != intervals_2 else None,
-            'frame_annotation_mismatches': mismatches}
 
 #* endregion *#
 
@@ -1054,9 +871,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         help='output directory for converted stream JSON files')
     return parser
 
-#349- 600(1,9,1)
-#824(3,14,4)-> add info-collection
-#983(3,31,6) -> 952(3,18,8)->950(3,15,5)
+#1056(3,16,5)
+# 833(3,15,5)
 
 if __name__ == '__main__':
     pass

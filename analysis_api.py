@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import yaml
+import numpy as np
 
 from analysis_utils import (AUTO_META, attach_stream_meta, build_timelines,
                             load_report_file, load_timelines, print_metric_report,
@@ -9,9 +10,9 @@ from analysis_utils import (AUTO_META, attach_stream_meta, build_timelines,
                             print_threshold_comparison,
                             resolve_stream_meta_path,
                             save_metric_report, save_timeline_csv)
-from common.my_local_utils import as_collection
+from common.my_local_utils import as_collection, print_color
 from evaluation_core import DEFAULT_EVAL_THRESHOLD, analyze_clip_test, analyze_video_test, resolve_input
-from project_utils import get_test_title_lines
+from project_utils import get_exporting_name, get_test_title_lines
 from stream_metric import eval_multi_thresholds, get_timeline_timing, resolve_metric_config
 
 
@@ -20,6 +21,75 @@ DEFAULT_METRIC_CONFIG = Path(__file__).resolve().parent/"configs/metrics/metric_
 
 #* region Public API  ---------------------------------------------------
 # -----------------------------------------------------------------------
+def print_eval_group(reports, output_name) -> None:
+    """Print shared ROC outputs and threshold-specific summary files."""
+    def relative_path(path, root):
+        """Return a display path relative to root when both resolve below it."""
+        path, root = Path(path), Path(root)
+        try:
+            return path.resolve().relative_to(root.resolve())
+        except ValueError:
+            return path
+
+    if not reports:
+        return
+    report = reports[0]
+    output_dir = Path(report.get('output_dir', '.'))
+    display_dir = relative_path(output_dir, Path.cwd())
+    model_tag, test_tag = get_test_title_lines(report.get('model_path'), report.get('test_cache'))
+    print(f"\t==== Evaluation for {model_tag} ===")
+    print(f"\tTest data: {test_tag}")
+    print(f"\tTest type: {report.get('analysis_mode', 'N/A')}")
+    print(f"\tOutputs:\tsaved to :\t{display_dir}", end='')
+    # print_color(str(display_dir), 'b')
+    roc_plot = report.get('roc_plot')
+    roc_csv = report.get('roc_csv')
+    if roc_plot not in {None, 'N/A'}:
+        print_color(f"\tROC image: {relative_path(roc_plot, output_dir)}", 'b')
+    if roc_csv not in {None, 'N/A'}:
+        print_color(f"\tROC table: {relative_path(roc_csv, output_dir)}", 'b')
+    for report_i in reports:
+        threshold = report_i.get('analysis_config', {}).get('threshold')
+        out_dir = Path(report_i.get('output_dir', '.'))
+        th_dir = report_i.get('threshold_dir')
+        path = out_dir/(th_dir or '')/f"{output_name}.json"
+        print(f"\tThreshold: {threshold} summary:  ", end='')
+        print_color(str(relative_path(path, output_dir)), 'b')
+
+
+def evaluate_raw_test(raw_path, mode, out_dir, threshold=DEFAULT_EVAL_THRESHOLD, **kwargs):
+    """Evaluate one raw test NPZ as clip, video, or stream output."""
+    raw_path, out_dir = Path(raw_path), Path(out_dir)
+    with np.load(raw_path, allow_pickle=True) as data:
+        model_path = data['model_path'].item() if isinstance(data['model_path'], np.ndarray) else data['model_path']
+        test_cache = data['test_cache'].item() if isinstance(data['test_cache'], np.ndarray) else data['test_cache']
+
+    output_name = get_exporting_name(model_path, test_cache, 'summary', unit=mode)
+    if mode == 'stream':
+        return analyze_raw_results(
+            raw_path, mode='stream', threshold=threshold,
+            timeline_dir=out_dir,
+            output_path=out_dir/f"{output_name}.json",
+            print_results=kwargs.get('print_report', False),
+            plotting=kwargs.get('plotting', False),
+            build_failures=kwargs.get('build_failures'))
+
+    threshold = float(threshold)
+    common = {'out_path': out_dir,
+              'threshold': threshold,
+              'threshold_dir': Path(f"th-{int(round(threshold * 100.0))}"),
+              'overwrite': True,
+              'show_roc': kwargs.get('show_roc', False),
+              'roc_csv': kwargs.get('roc_csv', True),
+              'print_policy': kwargs.get('print_policy', 'summary'),
+              'print': kwargs.get('print_report', False)}
+    if mode == 'video':
+        return analyze_video_test(raw_path, output_name=output_name, **common)
+    if mode == 'clip':
+        return analyze_clip_test(raw_path, output_name=output_name, **common)
+    raise ValueError(f'Unrecognized mode: {mode}')
+
+
 def timelines_from_results(test_results, build_failures=None) -> list[dict]:
     """Load raw prediction results and build one ordered timeline per stream."""
     build_failures = list(build_failures or [])

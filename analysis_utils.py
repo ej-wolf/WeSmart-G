@@ -9,6 +9,7 @@ import numpy as np
 
 #* project imports
 from json_stream_utils import DEFAULT_STREAM_META, SJ_META_INFO, stream_stem
+from json_utils import STREAM_FILE_TYPES
 from common.my_local_utils import _fmt, as_collection, get_unique_name
 
 
@@ -151,7 +152,7 @@ def load_timelines(timeline_input) -> tuple[list[dict], list[dict], list[Path]]:
 
 
 def convert_tcn_format(csv_path, out_dir=None) -> list[Path]:
-    """Convert one TCN multi-stream prediction CSV into compatible timeline CSVs."""
+    """Convert one TCN prediction CSV or a directory of CSVs into compatible timelines."""
 
     required = {'json_name', 'window_index', 'window_start_frame', 'window_end_frame',
                 'window_start_time_sec', 'window_end_time_sec', 'target',
@@ -160,7 +161,26 @@ def convert_tcn_format(csv_path, out_dir=None) -> list[Path]:
     def number(row, key, kind=float):
         return kind(float(row[key]))
 
+    def json_stem(value):
+        """Remove only a recognized JSON/archive suffix, preserving variant tags such as `.5fps`."""
+        name = Path(value).name
+        lower = name.lower()
+        for suffix in STREAM_FILE_TYPES:
+            if lower.endswith(suffix):
+                return name[:-len(suffix)]
+        return Path(name).stem
+
     csv_path = Path(csv_path)
+    if csv_path.is_dir():
+        csv_files = sorted(csv_path.glob('*.window_predictions.csv'))
+        if not csv_files:
+            raise FileNotFoundError(f'no *.window_predictions.csv files found: {csv_path}')
+        target_dir = Path(out_dir) if out_dir is not None else csv_path
+        out_files = []
+        for path in csv_files:
+            out_files.extend(convert_tcn_format(path, target_dir))
+        return out_files
+
     out_dir = Path(out_dir) if out_dir is not None else csv_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -194,7 +214,8 @@ def convert_tcn_format(csv_path, out_dir=None) -> list[Path]:
         diffs = [right - left for left, right in zip(times, times[1:]) if right > left]
         frame_spans = [(row['n_frm'], row['t_frm'] - row['t_start']) for row in rows
                        if row['n_frm'] > 0 and row['t_frm'] > row['t_start']]
-        metadata = {'source': stream_stem(json_name),
+        source = json_stem(json_name)
+        metadata = {'source': source,
                     'win_span': median(spans) if spans else None,
                     'fps': (sum(count for count, _ in frame_spans)/sum(span for _, span in frame_spans)
                             if frame_spans else None),
@@ -207,7 +228,7 @@ def convert_tcn_format(csv_path, out_dir=None) -> list[Path]:
                 metadata['threshold'] = number(rows_in[0], 'threshold_raw')
         metadata = {key: val for key, val in metadata.items() if val is not None}
 
-        out_path = out_dir/f"timeline_{stream_stem(json_name)}.csv"
+        out_path = out_dir/f"timeline_{source}.csv"
         with out_path.open('w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
             for key in ('source', 'threshold', 'win_span', 'fps', 'infer_t', 'frq_i'):
@@ -514,6 +535,7 @@ def _print_table(headers, rows, alignments, separators=()):
 
 def print_metric_report(report: dict, **kwargs):
     """ Print an aggregate stream-metric report and optional per-file details."""
+
     results_table = bool(kwargs.get('results_table', False))
     total_row = bool(kwargs.get('total_row', False))
     meta_info = kwargs.get('meta_info')
@@ -590,6 +612,12 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
     """ Print multi-threshold summaries using the selected table layout."""
 
     def print_thrs_cmp():
+        def fmt_yolo_dets(value):
+            if value is None:
+                return 'N/A'
+            value = int(value)
+            return f'{value/1000:.0f}k' if value > 100_000 else f'{value:,}'
+
         selector_header = ('Prediction' if any(rep.get('prediction', {}).get('column') for rep in reports)
                                         else 'Threshold')
         grouped, stream_order = {}, []
@@ -609,7 +637,7 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
 
         headers = ['Stream', selector_header, 'Total(s)', 'GT dur']
         if show_stream_meta:
-            headers.append('P dets')
+            headers.append('yolo-det')
         headers += ['GT', 'Detected', 'False', 'Recall', 'Lag(s)', 'FP burden', f'False/{fp_unit}']
         if show_stream_meta:
             headers.append('False/P')
@@ -635,7 +663,8 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
                        base_values['total'] if first else '',
                        base_values['gt_dur'] if first else '']
                 if show_stream_meta:
-                    row.append(base_values['p_dets'] if first else '')
+                    yolo_dets = base_stream.get('stream_meta', {}).get('person_dets')
+                    row.append(fmt_yolo_dets(yolo_dets) if first else '')
                 row += [(base_values['gt'] if first else ''),
                         val['detected'], val['false'], val['recall'],
                         val['lag'], val['fp_burden'], val['fp_rate']]

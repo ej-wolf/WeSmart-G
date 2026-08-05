@@ -108,8 +108,9 @@ def list_file_list(list_file:str|Path, root_path:str|Path|None=None, absolut:boo
             print(f'Skipping missing path: {path}')
     return paths
 
-def get_unique_name(file_name:str|Path, n:int=3) -> Path:
+def get_unique_name(file_name:str|Path, n:int=3, exists=None) -> Path:
     """ Return a unique file name.
+    exists may override the filesystem check for logical or virtual paths.
     Rules:  If file does not exist → return as is.
     If exists:  my_file.txt      -> my_file_001.txt  (padding = n)
                 my_file_01.txt   -> my_file_02.txt   (padding preserved = 2)
@@ -117,7 +118,8 @@ def get_unique_name(file_name:str|Path, n:int=3) -> Path:
     """
 
     file_path = Path(file_name)
-    if not file_path.exists():
+    exists = exists or Path.exists
+    if not exists(file_path):
         return file_path
 
     parent, stem, suffix = file_path.parent, file_path.stem, file_path.suffix
@@ -137,7 +139,7 @@ def get_unique_name(file_name:str|Path, n:int=3) -> Path:
     while True:
         new_name = f"{base}_{counter:0{padding}d}{suffix}"
         new_path = parent / new_name
-        if not new_path.exists():
+        if not exists(new_path):
             return new_path
         counter += 1
 

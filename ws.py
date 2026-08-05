@@ -71,8 +71,6 @@ def run_npz2stream(args):
         return out.with_name(f"{out.name}_{idx:0{len(str(count))}d}{suffix}")
 
     input_path = Path(args.input_path)
-    # output = args.output
-    # zip_output = not args.no_zip
 
     pairs = _npz_json_pairs()
     if not pairs:

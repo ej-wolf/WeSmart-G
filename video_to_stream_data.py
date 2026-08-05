@@ -35,10 +35,10 @@ from ultralytics.utils.checks import check_imgsz
 from annotations import load_event_ann, resolve_event_time
 #* import from my utils
 from common.my_local_utils import get_unique_name, print_color
-from json_utils import save_json_raw
+from json_utils import resolve_json_source, save_json_raw
 
 #* Defaults and constants  -------------------------------------------------------------------
-YOLO_THRESHOLD = 0.5
+YOLO_THRESHOLD = 0.4 #* 03/08/26 changed from 0.5
 DEFAULT_SAMPLING = 5
 SPLIT_EPS = 1e-9
 
@@ -117,10 +117,19 @@ def process_video(input_videos: Path|str|list,
                                 <video_stem>.txt, <video_stem>.ann, or <video_stem>
     :param kwargs Options
     skip_without_ann:           → If True, skip videos that have no usable annotation file.
+    skip_existing:              → If True, skip videos with an existing same-stem Stream JSON.
     ignore_split:               → If True, do not split output; mark the sampled frame nearest
                                  each split start with stream_event: ['S'].
     use_old_meta:               → Optional kwargs flag. If True, write the old compact detector metadata.
     """
+
+    def json_exists(path):
+        """Return whether any supported JSON variant exists for a logical path."""
+        try:
+            resolve_json_source(path)
+        except FileNotFoundError:
+            return False
+        return True
 
     def find_ann_file(vid:str|Path):
         """Find the annotation file selected for one video."""
@@ -170,12 +179,10 @@ def process_video(input_videos: Path|str|list,
     show = kwargs.get('show', False)
     use_legacy_meta = kwargs.get('use_legacy_meta', False)
     skip_without_ann = kwargs.get('skip_without_ann', False)
+    skip_existing = kwargs.get('skip_existing', False)
     ignore_split = kwargs.get('ignore_split', False)
     zip_output = kwargs.get('zip_output', kwargs.get('zip', ZIP_JSONS))
     json_compression = kwargs.get('json_compression', kwargs.get('compression', 'zip' if zip_output else 'none'))
-
-    #* load model :
-    model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
 
     #* resolve input/output paths :
     # vid_list = []
@@ -210,6 +217,20 @@ def process_video(input_videos: Path|str|list,
         raise FileNotFoundError(f"Bad output path: {output_path}\nSee --help for further information")
     json_dir.mkdir(parents=True, exist_ok=True)
 
+    if skip_existing:
+        pending_videos = []
+        for vid_path in vid_list:
+            logical_path = json_dir/f"{json_name if json_name else vid_path.stem}.json"
+            try:
+                existing_path = resolve_json_source(logical_path)
+            except FileNotFoundError:
+                pending_videos.append(vid_path)
+                continue
+            print(f"Skipping existing output: {vid_path.name} -> {existing_path}")
+        vid_list = pending_videos
+        if not vid_list:
+            return True
+
     #* resolve annotation source once; matching files are found per video
     if ann_path is None:
         ann_mode, ann_source = 'auto', None
@@ -224,9 +245,12 @@ def process_video(input_videos: Path|str|list,
         else:
             ann_mode = 'none'
 
+    #* load model :
+    model = YOLO(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
+
     #* detection info for header
     model_file = Path(model_path if Path(model_path).is_file() else DEFAULT_YOLO)
-    checksum = hashlib.sha256()
+    checksum = hashlib.sha256   ()
     with model_file.open('rb') as f:
         for chunk in iter(lambda: f.read(1 << 20), b''):
             checksum.update(chunk)
@@ -443,7 +467,9 @@ def process_video(input_videos: Path|str|list,
             data.update({'detector': detector_info, 'event_intervals':event_intervals, 'frames': segment_frames,})
 
             #Todo: resolve case when video_path is dir while output_path is a file name
-            json_path = get_unique_name(json_dir/f"{json_name if json_name else vid_path.stem}.json",4)
+            json_path = get_unique_name(
+                json_dir/f"{json_name if json_name else vid_path.stem}.json", 4,
+                exists=json_exists)
             save_path = save_json_raw(data, json_path, compression=json_compression)
 
             print_color(f"Saved::{len(segment_frames)} frame to {save_path}\n----------------\n'",'b')
@@ -459,18 +485,24 @@ def process_video(input_videos: Path|str|list,
 if __name__ == "__main__":
 
     ubi_ann   = Path("data/video/UBI_FIGHTS/ann_ws_ready")
-    ubi_fight = Path("data/video/UBI_FIGHTS/videos/fight-x")
-    ubi_norm  = Path("data/video/UBI_FIGHTS/videos/normal-x")
+    ubi_fight = Path("data/video/UBI_FIGHTS/videos/fight")
+    ubi_norm  = Path("data/video/UBI_FIGHTS/videos/normal")
     ubi_tst_ls = [ "data/video/testing-streams/F_116_0_0_0_0.mp4",  #* Fights
                    "data/video/testing-streams/F_121_1_0_0_0.mp4",
                    "data/video/testing-streams/F_141_0_0_0_0.mp4",]
-    ubi_tst_ls +=["data/video/testing-streams/N_656_1_0_1_0.mp4",   #* Normal
-                  "data/video/testing-streams/N_765_0_0_1_0.mp4",]
+    ubi_tst_ls +=[ "data/video/testing-streams/N_656_1_0_1_0.mp4",   #* Normal
+                   "data/video/testing-streams/N_765_0_0_1_0.mp4",]
 
-    fps_ = 6; grp_tag = 0
+    fps_ = 3; yolo_th =0.4 ;grp_tag = 0
     # output_dir = Path(f"data/json_files/UBI/{fps_}fps-v/test")
     # process_video(ubi_tst_ls, output_dir, ann_path=ubi_ann, default_grp_tag=grp_tag,
     #               sample_rate=fps_, zip_output=False, skip_without_ann=True, ignore_split=False)
-    output_dir = Path(f"data/json_files/UBI/{fps_}fps/normal")
-    process_video(ubi_tst_ls, output_dir, ann_path=None, default_grp_tag=grp_tag,
-                  sample_rate=fps_, zip_output=True, skip_without_ann=False)
+    output_dir = Path(f"data/json_files/UBI/{fps_}fps-yl{int(100*yolo_th)}/")
+    skip = True
+    process_video(ubi_norm, output_dir/'normal',
+                  zip_output=True, skip_existing=skip,
+                  ann_path=ubi_ann,  skip_without_ann=False,
+                  default_grp_tag=grp_tag,
+                  sample_rate=fps_,
+                  yolo_thresh=yolo_th,
+                  )

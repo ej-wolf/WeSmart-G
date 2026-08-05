@@ -41,6 +41,8 @@ DEFAULT_VARIANCE_K = 0.03
 DEFAULT_MAX_ISSUES = 50
 FILE_COMPARE_CHUNK_SIZE = 1024*1024
 DEFAULT_OP_DIR = Path('work_dirs/sanity')
+DEFAULT_JSON_IGNORE_PATHS = {'output_dir', 'raw_results_path'}
+JSON_REQUIRED_STRING_PATHS = {'detector.model'}
 SUPPORTED_PATTERNS = tuple(f'*{suffix}' for suffix in STREAM_FILE_TYPES) + ('*.npz', '*.csv')
 
 
@@ -111,13 +113,18 @@ def compare_json(test, ref, **kwargs) -> dict[str, Any]:
             numeric.add(test_val, ref_val, path)
             return
 
+        if isinstance(test_val, str) and isinstance(ref_val, str):
+            if path in JSON_REQUIRED_STRING_PATHS and test_val != ref_val:
+                add_issue('value', path, test=test_val, ref=ref_val)
+            return
+
         if type(test_val) is not type(ref_val):
             add_issue('type', path, test=type(test_val).__name__, ref=type(ref_val).__name__)
         elif test_val != ref_val:
             add_issue('value', path, test=test_val, ref=ref_val)
 
     max_issues = int(kwargs.get('max_issues', DEFAULT_MAX_ISSUES))
-    ignore_paths = set(kwargs.get('ignore_paths') or ())
+    ignore_paths = DEFAULT_JSON_IGNORE_PATHS | set(kwargs.get('ignore_paths') or ())
     numeric = _NumericComparison(kwargs.get('atol', DEFAULT_ATOL),
                                  kwargs.get('rtol', DEFAULT_RTOL), max_issues,
                                  kwargs.get('variance_k', DEFAULT_VARIANCE_K))
@@ -360,14 +367,22 @@ def compare_file(test, ref, *, kind=None, **kwargs) -> dict[str, Any]:
 
 
 def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
-    """Compare supported files in two directories by exact relative path."""
+    """Compare supported files in two directories by relative path or logical name."""
     def collect_files(base_dir):
         def is_excluded(path):
             return any(path.match(pattern) for pattern in exclude_patterns)
 
+        def pair_key(path):
+            key = path.name if match_by_name else path.relative_to(base_dir).as_posix()
+            lower = key.lower()
+            for suffix in STREAM_FILE_TYPES:
+                if lower.endswith(suffix):
+                    return key[:-len(suffix)] + '.json'
+            return key
+
         if patterns is None:
             paths = base_dir.rglob('*') if recursive else base_dir.glob('*')
-            return {path.relative_to(base_dir).as_posix(): path for path in paths
+            return {pair_key(path): path for path in paths
                     if path.is_file() and not is_excluded(path)}
 
         files = {}
@@ -375,7 +390,11 @@ def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
             paths = base_dir.rglob(pattern) if recursive else base_dir.glob(pattern)
             for path in paths:
                 if path.is_file() and not is_excluded(path):
-                    files[path.relative_to(base_dir).as_posix()] = path
+                    key = pair_key(path)
+                    if key in files and files[key] != path:
+                        raise ValueError(f'Ambiguous directory comparison key {key!r}: '
+                                         f'{files[key]} and {path}')
+                    files[key] = path
         return files
 
     test_dir, ref_dir = Path(test_dir), Path(ref_dir)
@@ -384,6 +403,7 @@ def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
             raise NotADirectoryError(path)
 
     recursive = bool(kwargs.get('recursive', True))
+    match_by_name = bool(kwargs.get('match_by_name', False))
     raw_patterns = kwargs.get('patterns')
     patterns = ([raw_patterns] if isinstance(raw_patterns, str)
                 else list(raw_patterns) if raw_patterns is not None else None)
@@ -418,6 +438,7 @@ def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
     return {'ok': ok,
             'test_dir': str(test_dir),
             'ref_dir': str(ref_dir),
+            'match_by_name': match_by_name,
             'missing': missing,
             'extra': extra,
             'files': file_reports,
@@ -471,7 +492,9 @@ def run_sanity_test(models, ref_dir, ds_tests=None, stm_tests=None, **kwargs) ->
 
     sanity_op_dir = Path(kwargs.pop('sanity_op_dir', DEFAULT_OP_DIR))
     root_path = kwargs.pop('root_path', None)
-    report_mode = kwargs.pop('report', 'quick')
+    print_report = kwargs.pop('print_report', 'none')
+    save_report = kwargs.pop('save_report', True)
+    report_dir = kwargs.pop('output_dir', None)
     atol = kwargs.pop('atol', DEFAULT_ATOL)
     variance_k = kwargs.pop('variance_k', DEFAULT_VARIANCE_K)
     if 'out_dir' in kwargs:
@@ -504,7 +527,8 @@ def run_sanity_test(models, ref_dir, ds_tests=None, stm_tests=None, **kwargs) ->
     tested_dirs = test_models(model_refs, ds_tests=ds_tests, stm_tests=stream_inputs,
                               out_dir=target_dir, **kwargs)
     comparison, report_path = _run_comparison(
-        ref_dir, target_dir, output_dir=target_dir, report_mode=report_mode,
+        ref_dir, target_dir, output_dir=report_dir or target_dir,
+        print_report=print_report, save_report=save_report,
         atol=atol, variance_k=variance_k)
     return {'target_dir': target_dir,
             'tested_dirs': [Path(path) for path in tested_dirs],
@@ -650,23 +674,33 @@ def _is_supported(path):
     return True
 
 
-def _print_table(headers, rows, separator_before=None):
+def _print_table(headers, rows, separator_before=None, equal_width=False, bold_after=()):
     widths = [max(len(str(value)) for value in [header, *(row[idx] for row in rows)])
               for idx, header in enumerate(headers)]
-    fmt = ' | '.join(f'{{:^{width}}}' for width in widths)
+    if equal_width:
+        widths = [max(widths)]*len(widths)
+    bold_after = set(bold_after)
+    fmt = ''.join(f'{{{idx}:^{width}}}' + (' ┃ ' if idx in bold_after else ' | ')
+                  for idx, width in enumerate(widths[:-1])) + f'{{{len(widths) - 1}:^{widths[-1]}}}'
+    divider = ''.join('-'*width + ('-╋-' if idx in bold_after else '-+-')
+                      for idx, width in enumerate(widths[:-1])) + '-'*widths[-1]
     print(fmt.format(*headers))
-    print('-+-'.join('-'*width for width in widths))
+    print(divider)
     for row_idx, row in enumerate(rows):
         if row_idx == separator_before:
-            print('-+-'.join('-'*width for width in widths))
+            print(divider)
         print(fmt.format(*row))
 
 
 def _file_result(file_report):
     if file_report.get('byte_equal') is True:
         return 'Byte equal'
+    kind = file_report.get('kind')
     structure = file_report.get('structure') or {}
     numeric = file_report.get('numeric') or {}
+    if kind == 'npz' and numeric.get('ok'):
+        return 'Numerical equal'
+    #*ToDo: recheck that rules
     if structure.get('ok') and numeric.get('ok'):
         return 'Numerical equal'
     if structure.get('ok'):
@@ -675,6 +709,7 @@ def _file_result(file_report):
 
 
 def _report_counts(file_reports):
+    """Count each file once by its highest achieved equality level."""
     counts = {kind: {'total': 0, 'byte': 0, 'numerical': 0, 'structural': 0, 'failed': 0}
               for kind in ('npz', 'csv', 'json')}
     for file_report in file_reports:
@@ -685,26 +720,38 @@ def _report_counts(file_reports):
         counts[kind]['total'] += 1
         byte_equal = file_report.get('byte_equal') is True
         structural = byte_equal or bool((file_report.get('structure') or {}).get('ok'))
-        numerical = structural and (byte_equal or bool((file_report.get('numeric') or {}).get('ok')))
-        counts[kind]['byte'] += int(byte_equal)
-        counts[kind]['structural'] += int(structural)
-        counts[kind]['numerical'] += int(numerical)
-        counts[kind]['failed'] += int(not file_report['ok'])
+        numeric_ok = byte_equal or bool((file_report.get('numeric') or {}).get('ok'))
+        numerical = numeric_ok if kind == 'npz' else structural and numeric_ok
+        if byte_equal:
+            counts[kind]['byte'] += 1
+        elif numerical:
+            counts[kind]['numerical'] += 1
+        elif structural:
+            counts[kind]['structural'] += 1
+        else:
+            counts[kind]['failed'] += 1
     return counts
 
 
 def _print_quick(report, ref_path, target_path, ref_files=None, target_files=None, saved_path=None):
+    def inventory_key(path, base_dir):
+        """Return the relative or logical filename used in inventory counts."""
+        key = path.name if report.get('match_by_name') else path.relative_to(base_dir).as_posix()
+        lower = key.lower()
+        for sfx in STREAM_FILE_TYPES:
+            if lower.endswith(sfx):
+                return key[:-len(sfx)] + '.json'
+        return key
+
     print()
     if ref_files is None:
         print(f'Compared: {ref_path.name}  vs  {target_path.name}')
         print(f'Result: {_file_result(report)}')
     else:
-        ref_all = {path.relative_to(ref_path).as_posix() for path in ref_files}
-        target_all = {path.relative_to(target_path).as_posix() for path in target_files}
-        ref_supported = {path.relative_to(ref_path).as_posix()
-                         for path in ref_files if _is_supported(path)}
-        target_supported = {path.relative_to(target_path).as_posix()
-                            for path in target_files if _is_supported(path)}
+        ref_all = {inventory_key(path, ref_path) for path in ref_files}
+        target_all = {inventory_key(path, target_path) for path in target_files}
+        ref_supported = {inventory_key(path, ref_path) for path in ref_files if _is_supported(path)}
+        target_supported = {inventory_key(path, target_path) for path in target_files if _is_supported(path)}
         ref_ignored = ref_all - ref_supported
         target_ignored = target_all - target_supported
         counts = _report_counts(report['files'])
@@ -714,33 +761,32 @@ def _print_quick(report, ref_path, target_path, ref_files=None, target_files=Non
         print('File inventory')
         _print_table(['', 'Ref', 'Target', 'Missing', 'Extra'],
                      [('All files', len(ref_all), len(target_all),
-                       len(ref_all - target_all), len(target_all - ref_all)),
-                      ('Supported', len(ref_supported), len(target_supported),
-                       len(ref_supported - target_supported),
-                       len(target_supported - ref_supported)),
-                      ('Ignored', len(ref_ignored), len(target_ignored),
-                       len(ref_ignored - target_ignored),
-                       len(target_ignored - ref_ignored))])
+                            len(ref_all - target_all), len(target_all - ref_all)),
+                            ('Supported', len(ref_supported), len(target_supported),
+                            len(ref_supported - target_supported),
+                            len(target_supported - ref_supported)),
+                            ('Ignored', len(ref_ignored), len(target_ignored),
+                            len(ref_ignored - target_ignored),
+                            len(target_ignored - ref_ignored))])
         print(f"\nCompared pairs: {total_compared}  (npz: {counts['npz']['total']} |"
               f" csv: {counts['csv']['total']} | json: {counts['json']['total']})\n")
-        result_rows = [(kind, counts[kind]['byte'], counts[kind]['numerical'],
-                        counts[kind]['structural'], counts[kind]['failed'])
-                       for kind in ('npz', 'csv', 'json')]
-        result_rows.append(('Total',
+        result_rows = [(kind, counts[kind]['total'], counts[kind]['byte'],
+                        counts[kind]['numerical'], counts[kind]['structural'], counts[kind]['failed'])
+                       for kind in ('npz', 'csv', 'json') if counts[kind]['total']]
+        result_rows.append(('Total', total_compared,
                             sum(row['byte'] for row in counts.values()),
                             sum(row['numerical'] for row in counts.values()),
                             sum(row['structural'] for row in counts.values()),
                             sum(row['failed'] for row in counts.values())))
-        _print_table(['Results', 'Byte', 'Numerical', 'Structural', 'Failed'], result_rows,
-                     separator_before=len(result_rows) - 1)
+        _print_table(['Type', 'Compr.', 'Byte', 'Numeric', 'Struct.', 'Failed'], result_rows,
+                     separator_before=len(result_rows) - 1, equal_width=True, bold_after=(0, 4))
     if saved_path is not None:
-        print()
-        print(f'Saved report: {saved_path}')
+        print(f'\nSaved report: {saved_path}')
 
 
 def _all_files(path):
     return [file for file in Path(path).rglob('*')
-            if file.is_file() and not file.match('sanity_report*.json')]
+                  if file.is_file() and not file.match('sanity_report*.json')]
 
 
 def _save_report(report, output_dir):
@@ -765,11 +811,11 @@ def _save_report(report, output_dir):
         return None
 
 
-def _run_comparison(ref_path, target_path, *, output_dir=None, report_mode='quick',
-                    atol=DEFAULT_ATOL, variance_k=DEFAULT_VARIANCE_K):
+def _run_comparison(ref_path, target_path, *, output_dir=None, print_report='none',
+                    save_report=True, atol=DEFAULT_ATOL, variance_k=DEFAULT_VARIANCE_K):
     ref_path, target_path = Path(ref_path), Path(target_path)
-    if report_mode not in {'quick', 'full', 'none'}:
-        raise ValueError("report must be 'quick', 'full', or 'none'")
+    if print_report not in {'quick', 'full', 'none'}:
+        raise ValueError("print_report must be 'quick', 'full', or 'none'")
     if not ref_path.exists():
         raise FileNotFoundError(f'Reference path does not exist: {ref_path}')
     if not target_path.exists():
@@ -783,22 +829,20 @@ def _run_comparison(ref_path, target_path, *, output_dir=None, report_mode='quic
         ref_files, target_files = _all_files(ref_path), _all_files(target_path)
         options = {kind: dict(compare_kwargs) for kind in ('json', 'npz', 'csv')}
         report = compare_dirs(target_path, ref_path, patterns=SUPPORTED_PATTERNS,
-                              exclude_patterns='sanity_report*.json', options=options)
+                              exclude_patterns='sanity_report*.json', options=options, match_by_name=True)
     else:
         if _file_kind(ref_path) != _file_kind(target_path):
             raise ValueError('Reference and target file types must match')
         report = compare_file(target_path, ref_path, **compare_kwargs)
 
-    report_path = _save_report(report, output_dir or ref_path.parent)
-    if report_mode == 'quick':
+    report_path = _save_report(report, output_dir or ref_path.parent) if save_report else None
+    if print_report == 'quick':
         _print_quick(report, ref_path, target_path, ref_files, target_files, report_path)
-    elif report_mode == 'full':
+    elif print_report == 'full':
         print('Full sanity report is not implemented yet.')
     return report, report_path
 
-
 # endregion
-
 
 # region CLI
 def main(argv=None):
@@ -835,19 +879,17 @@ def main(argv=None):
         return parsed
 
     def add_comparison_args(prs):
-        prs.add_argument('-k', type=float, default=DEFAULT_VARIANCE_K,
-                         help=f'Adaptive relative tolerance factor (default: {DEFAULT_VARIANCE_K})')
-        prs.add_argument('--atol', type=float, default=DEFAULT_ATOL,
-                         help=f'Absolute tolerance (default: {DEFAULT_ATOL})')
-        prs.add_argument('--report', choices=('quick', 'full', 'none'), default='quick',
-                         help='Console report mode (default: quick)')
+        prs.add_argument('-k', type=float, default=DEFAULT_VARIANCE_K, help=f'k for Relative Tolerance Factor ')
+        prs.add_argument('--atol', type=float, default=DEFAULT_ATOL, help=f'Absolute tolerance. default: {DEFAULT_ATOL}')
+        prs.add_argument('--report', choices=('quick', 'full', 'none'), default='quick', help='Console report mode (default: quick)')
+        prs.add_argument('-s', '--save-report', nargs='?', const='', default=None, metavar='DIR',
+                         help='Save JSON report, optionally in DIR (default: do not save)')
 
     parser = argparse.ArgumentParser(description='Compare numerical project outputs for sanity checks.')
     commands = parser.add_subparsers(dest='command', required=True)
     compare = commands.add_parser('compare', help='Compare reference and target files or directories')
     compare.add_argument('ref_path', type=Path, help='Reference file or directory')
     compare.add_argument('target_path', type=Path, help='Target file or directory')
-    compare.add_argument('--op_dir', type=Path, default=None, help='Directory for the saved JSON report')
     add_comparison_args(compare)
 
     test = commands.add_parser('test', help='Test model and compare with reference')
@@ -857,13 +899,15 @@ def main(argv=None):
     test.add_argument('-stm', '--stm-tests', type=Path, nargs='+', default=None, help='Stream testing files, dir or stream-list file')
     test.add_argument('-rp', '--root-path', type=Path, default=None, help='Root dir for paths in a stream-list file')
     test.add_argument('-arg','--test-kwargs', type=parse_test_kwargs, default=None,
-                      help='Python dict or JSON file forwarded to test_models(); default: REF_DIR/test-config.json')
+                                   help='Python dict or JSON file forwarded to test_models(); default: REF_DIR/test-config.json')
     test.add_argument('-op', '--sanity-op-dir', type=Path, default=DEFAULT_OP_DIR, help=f'Parent dir for generated runs (default: {DEFAULT_OP_DIR})')
 
     add_comparison_args(test)
     args = parser.parse_args(argv)
 
     try:
+        save_report = args.save_report is not None
+        report_dir = Path(args.save_report) if args.save_report else None
         if args.command == 'test':
             config_path = args.ref_dir/'test-config.json'
             if args.test_kwargs is not None:
@@ -874,7 +918,9 @@ def main(argv=None):
                 test_kwargs = {}
             test_kwargs.update({'sanity_op_dir': args.sanity_op_dir,
                                 'root_path': args.root_path,
-                                'report': args.report,
+                                'print_report': args.report,
+                                'save_report': save_report,
+                                'output_dir': report_dir,
                                 'atol': args.atol,
                                 'variance_k': args.k})
             return run_sanity_test(args.models, args.ref_dir, args.ds_tests,
@@ -882,8 +928,8 @@ def main(argv=None):
 
         report, _ = _run_comparison(
             args.ref_path, args.target_path,
-            output_dir=args.op_dir or args.ref_path.parent,
-            report_mode=args.report, atol=args.atol, variance_k=args.k)
+            output_dir=report_dir, print_report=args.report, save_report=save_report,
+            atol=args.atol, variance_k=args.k)
         return report
     except (FileNotFoundError, NotADirectoryError, TypeError, ValueError) as error:
         parser.error(str(error))

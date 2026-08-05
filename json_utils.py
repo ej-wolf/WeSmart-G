@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 # Local imports.
-from common.my_local_utils import print_color
+from common.my_local_utils import cli_warning, print_color
 
 STREAM_FILE_TYPES = ('.json.zip', '.json.gz', '.json', '.zip', '.gz')
 
@@ -76,7 +76,7 @@ def resolve_json_files(file_ls: str|Path|list, root_dir:str|Path|None=None) -> l
         try:
             resolved.append(resolve_json_source(candidate))
         except FileNotFoundError:
-            print(f'Skipping missing JSON: {candidate}')
+            cli_warning(f'Skipping missing JSON: {candidate}', 'o')
     return resolved
 
 
@@ -86,18 +86,18 @@ def list_json_sources(dir_path: str | Path):
     entries = {}
     priorities = {'.json': 0, '.json.zip': 1, '.zip': 2, '.json.gz': 3, '.gz': 4}
 
-    def source_info(path: Path):
-        name = path.name
+    def source_info(p: Path):
+        name = p.name
         if name.endswith('.json'):
-            return path, '.json'
+            return p, '.json'
         if name.endswith('.json.zip'):
-            return path.with_suffix(''), '.json.zip'
+            return p.with_suffix(''), '.json.zip'
         if name.endswith('.zip'):
-            return path.with_suffix('.json'), '.zip'
+            return p.with_suffix('.json'), '.zip'
         if name.endswith('.json.gz'):
-            return path.with_suffix(''), '.json.gz'
+            return p.with_suffix(''), '.json.gz'
         if name.endswith('.gz'):
-            return path.with_suffix('.json'), '.gz'
+            return p.with_suffix('.json'), '.gz'
         return None, None
 
     for path in sorted(dir_path.iterdir()):
@@ -202,15 +202,15 @@ def load_json_data(file:str|Path, j_type='type_1'):
         return frames_out
 
     file = Path(file)
-    raw = load_json_raw(file)
+    json_raw = load_json_raw(file)
 
     try:
         if j_type == 'type_1':
-            return {'header': _header(raw, '1.0'),
-                    'frames': _normalize_frames(raw, _type_1_detections)}
+            return {'header': _header(json_raw, '1.0'),
+                    'frames': _normalize_frames(json_raw, _type_1_detections)}
         elif j_type in ['type_2', '2', 2]:
-            return {'header': _header(raw, '2.0'),
-                    'frames': _normalize_frames(raw, _type_2_detections)}
+            return {'header': _header(json_raw, '2.0'),
+                    'frames': _normalize_frames(json_raw, _type_2_detections)}
         else:
             print_color(f"Warning: Unknown Json format: {j_type}", 'y')
             return None
