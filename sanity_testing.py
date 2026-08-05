@@ -3,6 +3,15 @@
     - run one sanity flow with `run_sanity_flow(...)`
     - compare one new output tree against a reference with `assert_outputs(...)`
     - keep old/new export-format compatibility in this layer instead of the evaluation modules
+
+      python3 sanity_tools.py test \
+            --models work_dirs/models \
+            --ref-dir work_dirs/reference-run \
+            --ds-tests data/cache/Joint_sets \
+            --stm-tests data/json_files/testing \
+            --sanity-op-dir work_dirs/sanity \
+            --test-kwargs "{'threshold':[0.5, 0.6], 'test_pair':True, 'print_reports':'none'}"
+
     ToDo: check file naming for training mode    e.g
         timeline_J-RWL_ft25_w30-15_6_11_8_full_resolution_erez.png
         timeline******************_6_11_8_full_resolution_erez.png
@@ -20,7 +29,9 @@ import torch
 from common.my_local_utils import as_collection, print_color
 from precompute_clips import RANDOM_SEED
 from project_utils import get_exporting_name, strip_split_suffix, strip_timestamp_prefix
-from scripts import train_models, test_models, infer_eval_threshold, evaluate_raw_test
+from analysis_utils import load_timeline_csv
+from scripts import train_models, test_models, infer_eval_threshold
+from analysis_api import evaluate_raw_test
 from torch_clip_model import run_training
 
 LOOSE_TOLERANCES = 0.05
@@ -353,16 +364,10 @@ def _compare_csv_with_tolerance(test_path: Path, ref_path: Path, *, atol: float)
 
 def _compare_timeline_csv(test_path: Path, ref_path: Path, *, atol: float) -> dict[str, Any]:
     """Compare one timeline CSV by label flips and probability drift."""
-    with test_path.open('r', encoding='utf-8', newline='') as f:
-        sample = f.readline()
-        f.seek(0)
-        delim = ';' if sample.count(';') > sample.count(',') else ','
-        test_rows = list(csv.DictReader(f, delimiter=delim))
-    with ref_path.open('r', encoding='utf-8', newline='') as f:
-        sample = f.readline()
-        f.seek(0)
-        delim = ';' if sample.count(';') > sample.count(',') else ','
-        ref_rows = list(csv.DictReader(f, delimiter=delim))
+    test_data = load_timeline_csv(test_path)
+    ref_data = load_timeline_csv(ref_path)
+    test_rows = test_data['rows']
+    ref_rows = ref_data['rows']
 
     if len(test_rows) != len(ref_rows):
         return {'ok': False, 'kind': 'csv', 'max_fp_err': 0.0,
@@ -370,8 +375,8 @@ def _compare_timeline_csv(test_path: Path, ref_path: Path, *, atol: float) -> di
                 'issue_type': 'shape', 'issue_count': 1}
 
     req_cols = {'win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob'}
-    test_cols = set(test_rows[0]) if test_rows else set()
-    ref_cols = set(ref_rows[0]) if ref_rows else set()
+    test_cols = set(test_data['fieldnames'])
+    ref_cols = set(ref_data['fieldnames'])
     pred_cols = sorted(col for col in test_cols if col == 'y_pred' or col.startswith('y_prd-'))
     if test_rows and (test_cols != ref_cols or not req_cols.issubset(test_cols) or not pred_cols):
         return {'ok': False, 'kind': 'csv', 'max_fp_err': 0.0,
@@ -1285,8 +1290,7 @@ def assert_outputs(test_dir, ref_dir, mode='no_train') -> tuple[bool, dict[str, 
 
 # endregion
 
-#* 1191 ->1161-> 1217-> 1199-> 1188(1,22,2) -> 1166(,22,2)->1155
-#* 1390(2,5,3)-> refact-01-1277(1,5,3)
+#* 1282(1,5,1)
 
 if __name__ == '__main__':
     import shutil

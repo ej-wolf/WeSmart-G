@@ -80,6 +80,41 @@ def build_temporal_schema(window: float, stride: float) -> dict[str, float]:
     return {'window': float(window), 'stride': float(stride)}
 
 
+def resolve_stream_schema(source: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Extract one consistent feature and temporal schema from nested model metadata."""
+    feature_fields = {'extractor', 'extractor_version', 'feature_dim', 'pure_motion', 'legacy',
+                      'temp_smooth', 'temp_kernel', 'pool_mode', 'top_k_ratio', 'top_k_min',
+                      'motion_fps_ref', 'motion_fps_min', 'motion_fps_max'}
+    temporal_fields = {'target_window', 'target_stride'}
+    values = {key: [] for key in feature_fields | temporal_fields}
+
+    def collect(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in values:
+                    values[key].append(value)
+                collect(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                collect(value)
+
+    collect(source)
+    missing = [key for key, found in values.items() if not found]
+    if missing:
+        raise ValueError(f"missing schema fields: {', '.join(sorted(missing))}")
+    for key, found in values.items():
+        if any(value != found[0] for value in found[1:]):
+            raise ValueError(f"conflicting values for schema field '{key}'")
+
+    feature_schema = {key: values[key][0] for key in feature_fields}
+    temporal_schema = {key: values[key][0] for key in temporal_fields}
+    if feature_schema['extractor'] != DEFAULT_FEATURE_EXTRACTOR:
+        raise ValueError(f"unsupported feature extractor: {feature_schema['extractor']}")
+    if temporal_schema['target_window'] <= 0 or temporal_schema['target_stride'] <= 0:
+        raise ValueError("target_window and target_stride must be positive")
+    return feature_schema, temporal_schema
+
+
 def get_clip_features_vec(frames: list[dict[str, Any]], **kwargs) -> np.ndarray:
     """ Convert one clip/window frame list into the pooled feature
       vector saved in cache `X`."""

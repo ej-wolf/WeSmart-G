@@ -23,7 +23,11 @@ def print_color(msg:str, clr=Fore.RED):
     print( f"{clr}{msg}{Style.RESET_ALL}")
 
 
-# ***** Collection casting ***** #
+def cli_warning(msg, clr='r'):
+    print_color(f"[WARN] {msg}", clr)
+
+
+#* region *** Collection casting ***** #
 def as_collection(x):
     """  If x is a collection (list/tuple/set/dict/range/numpy array/torch tensor/etc.)
     return it as-is. Otherwise, wrap it in a single-element list.
@@ -61,11 +65,52 @@ def as_collection(x):
 
 collection = as_collection
 
-# ***** General Files/ Paths sys Utils ***************************************#
+# endregion
+
+
+def _fmt(value, **kwargs):
+    """Format a number by decimal/significant digits and optional total length."""
+    if value is None:
+        return 'N/A'
+    if not isinstance(value, float):
+        return str(value)
+    d = kwargs.get('d', 3)
+    s = kwargs.get('s')
+    length = kwargs.get('l')
+    text = f'{value:.{s}g}' if s is not None else f'{value:.{d}f}'
+    return text.zfill(length) if length is not None else text
+
+
+#* region *** General Files/ Paths sys Utils ***************************************#
 # -----------------------------------------------------------------------------
 
-def get_unique_name(file_name:str|Path, n:int=3) -> Path:
+def list_file_list(list_file:str|Path, root_path:str|Path|None=None, absolut:bool=False)->list[Path]:
+    """ Read paths from a line-based list file.
+    list file Entries are resolved against root_path or CWD, missing paths are skipped.
+    If absolut=True, entries are returned as is without resolution.
+    """
+    list_path = Path(list_file)
+    root = Path.cwd() if root_path is None else Path(root_path)
+    paths = []
+    for line in list_path.read_text(encoding='utf-8').splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith('#'):
+            continue
+        path = Path(entry)
+        if absolut:
+            paths.append(path)
+            continue
+        if not path.is_absolute():
+            path = root / path
+        if path.exists():
+            paths.append(path)
+        else:
+            print(f'Skipping missing path: {path}')
+    return paths
+
+def get_unique_name(file_name:str|Path, n:int=3, exists=None) -> Path:
     """ Return a unique file name.
+    exists may override the filesystem check for logical or virtual paths.
     Rules:  If file does not exist → return as is.
     If exists:  my_file.txt      -> my_file_001.txt  (padding = n)
                 my_file_01.txt   -> my_file_02.txt   (padding preserved = 2)
@@ -73,7 +118,8 @@ def get_unique_name(file_name:str|Path, n:int=3) -> Path:
     """
 
     file_path = Path(file_name)
-    if not file_path.exists():
+    exists = exists or Path.exists
+    if not exists(file_path):
         return file_path
 
     parent, stem, suffix = file_path.parent, file_path.stem, file_path.suffix
@@ -93,7 +139,7 @@ def get_unique_name(file_name:str|Path, n:int=3) -> Path:
     while True:
         new_name = f"{base}_{counter:0{padding}d}{suffix}"
         new_path = parent / new_name
-        if not new_path.exists():
+        if not exists(new_path):
             return new_path
         counter += 1
 
@@ -212,8 +258,9 @@ def _make_unique_dir(root, base_name, **kwargs):
     clip_dir.mkdir(parents=True, exist_ok=True)
     return clip_dir, clip_name
 
+# endregion
 
-#* region ***** Compressing Utils  ****************************************************#
+#* region *** Compressing Utils  ****************************************************#
 
 def zip_dir(target_dir:Path|str, method='file', protocol='zip', rm_policy='ask', mask=None):
     """ Compress a directory either child-by-child or as one archive.
@@ -361,6 +408,7 @@ def _extract_zip_file(zip_path: str | Path, out_dir: str | Path | None = None):
     return [out_dir / name for name in names]
 
 # endregion
+
 
 # ***** JSON  Utils  *********************************************************#
 def serialize_json_data(value):
