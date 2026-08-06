@@ -78,8 +78,11 @@ def run_npz2stream(args):
         raise FileNotFoundError(f"No matched .json/.npz pairs found in {args.input_path}")
     for i, (npz_path, json_path, stem) in enumerate(pairs, start=1):
         out_path = _output_path_for_pair(stem, i, len(pairs))
-        save_pair_stream_json(npz_path, json_path, out_path=out_path)
-        print(f"Saved: {out_path}")
+        try:
+            save_pair_stream_json(npz_path, json_path, out_path=out_path)
+            print(f"Saved: {out_path}")
+        except Exception as error:
+            print(f"Failed: {json_path.name}: {type(error).__name__}: {error}")
 
 #* endregion
 
@@ -229,10 +232,8 @@ def main():
     if table_mode == 'auto':
         table_mode = 'thrs_cmp' if isinstance(report, list) and len(report) > 1 else 'standard'
 
-    print_kwargs = {'results_table': table_mode,
-                    'total_row': True,
-                    'fp_unit': args.fp_unit,
-                    'meta_info': args.meta_info}
+    print_kwargs = {'results_table': table_mode, 'total_row': True,
+                    'fp_unit': args.fp_unit, 'meta_info': args.meta_info}
     if table_mode == 'all':
         _print_standard_reports(report, is_batch, print_kwargs)
 
@@ -267,4 +268,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-#85()
+#85()-273(1,3,1)

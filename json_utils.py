@@ -173,7 +173,10 @@ def save_json_raw(jdata:dict, j_path:str|Path, compression='zip', **json_kwargs)
 def load_json_data(file:str|Path, j_type='type_1'):
     """Load one JSON file and normalize it into the internal data structure."""
     def _header(raw, version: str) -> dict[str, Any]:
-        return {'video_file': raw.get('video'), 'fps': raw.get('fps'), 'sampling': raw.get('step'), 'version': version}
+        return {'video_file': raw.get('video'), 'fps': raw.get('fps'),
+                'sampling': raw.get('step'),
+                'sampling_rate': raw.get('sampling rate', raw.get('sampling_rate')),
+                'timing': raw.get('timing'), 'version': version}
 
     def _type_1_detections(frame: dict[str, Any]) -> list[dict[str, Any]]:
         detections = []

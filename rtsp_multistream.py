@@ -946,6 +946,15 @@ def main() -> None:
                         try:
                             runtime = tms_runtimes.get(spec.tag)
                             feature_schema = runtime.feature_schema if runtime and runtime.feature_schema else runtime_feature_schema
+                            motion_fps = None
+                            if feature_schema.get("motion_mode", "standard") == "velocity":
+                                if len(frames) < 2:
+                                    raise ValueError("velocity motion mode requires at least two payload frames")
+                                t_first = float(frames[0]["t"])
+                                t_last = float(frames[-1]["t"])
+                                if t_last <= t_first:
+                                    raise ValueError("velocity motion mode requires increasing payload timestamps")
+                                motion_fps = (len(frames) - 1)/(t_last - t_first)
                             clip_vec = get_clip_features_vec(
                                 frames,
                                 pure_motion=bool(feature_schema["pure_motion"]),
@@ -955,9 +964,11 @@ def main() -> None:
                                 pool_mode=str(feature_schema["pool_mode"]),
                                 top_k_ratio=float(feature_schema["top_k_ratio"]),
                                 top_k_min=int(feature_schema["top_k_min"]),
+                                motion_mode=feature_schema.get("motion_mode", "standard"),
                                 motion_fps_ref=feature_schema["motion_fps_ref"],
                                 motion_fps_min=float(feature_schema["motion_fps_min"]),
                                 motion_fps_max=float(feature_schema["motion_fps_max"]),
+                                motion_fps=motion_fps,
                                 j_version=float(feature_schema["extractor_version"]),
                             )
                         except Exception as exc:

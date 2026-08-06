@@ -441,7 +441,7 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
     infer_threshold = kwargs.pop('infer_threshold', False)
     thresholds = kwargs.pop('threshold', None)
     summary = kwargs.pop('summary', False)
-    test_pair = kwargs.pop('test_pair', False)
+    test_pair = kwargs.pop('test_pair', True)
     ds_eval = kwargs.pop('ds_eval_mode', 'clip')
     stream_schema = kwargs.pop('stream_schema', None)
     fps_rsmp = kwargs.pop('resample_fps', None)
@@ -1089,7 +1089,7 @@ if __name__ == "__main__":
     work_dir = Path("work_dirs/models")
     sum_trn = True
 
-    # train_models(cache_dir, work_dir, run_tests=True, summary=sum_trn)
+    train_models(cache_dir, work_dir, run_tests=True, summary=sum_trn)
 
     #endregion
     # _______________________________________________________________________#

@@ -78,7 +78,8 @@ from motion_feature_schema import (DEFAULT_POOL_MODE, DEFAULT_TOP_K_MIN, DEFAULT
                                    FEATURE_SCHEMA_KEY, SOURCE_CACHES_KEY, TEMPORAL_SCHEMA_KEY,
                                    assert_feature_schema_match, build_cache_record, get_clip_features_vec, pack_json_value,
                                    build_feature_schema, load_cache_contract, load_cache_contract_compact, build_temporal_schema,
-                                   MOTION_FPS_MAX, MOTION_FPS_MIN, MOTION_FPS_REF)
+                                   MOTION_FPS_MAX, MOTION_FPS_MIN)
+from stream_utils import stream_effective_fps
 
 
 #* Defaults (ToDo config later if needed)
@@ -149,6 +150,8 @@ def extract_stream_features(streams, feature_schema:dict, temporal_profile:dict,
     """ Build feature, label, and metadata arrays from named stream dictionaries."""
     feats, labels, meta = [], [], []
     for stream_name, stream_data in streams:
+        stream_fps = (stream_effective_fps(stream_data)
+                      if feature_schema['motion_mode'] == 'velocity' else None)
         clips = slice_json_stream(
             stream_data,
             window_sec=temporal_profile['target_window'],
@@ -166,9 +169,11 @@ def extract_stream_features(streams, feature_schema:dict, temporal_profile:dict,
                          top_k_ratio=feature_schema['top_k_ratio'],
                          top_k_min=feature_schema['top_k_min'],
                          j_version=feature_schema['extractor_version'],
+                         motion_mode=feature_schema['motion_mode'],
                          motion_fps_ref=feature_schema['motion_fps_ref'],
                          motion_fps_min=feature_schema['motion_fps_min'],
-                         motion_fps_max=feature_schema['motion_fps_max'])
+                         motion_fps_max=feature_schema['motion_fps_max'],
+                         motion_fps=stream_fps)
                          )
             labels.append(int(clip['label']))
             meta.append({'video': stream_name, 't_start': clip['t_start'],
@@ -199,7 +204,8 @@ def build_cache_from_json(json_paths, out_path:str|Path, **kwargs): #158->70
                      pool_mode=kwargs.get('pool_mode', DEFAULT_POOL_MODE),
                      top_k_ratio=kwargs.get('top_k_ratio', kwargs.get('pool_top_k_ratio', DEFAULT_TOP_K_RATIO)),
                      top_k_min=kwargs.get('top_k_min', kwargs.get('pool_top_k_min', DEFAULT_TOP_K_MIN)),
-                     motion_fps_ref=kwargs['motion_fps_ref'] if 'motion_fps_ref' in kwargs else MOTION_FPS_REF,
+                     motion_mode=kwargs.get('motion_mode', 'standard'),
+                     motion_fps_ref=kwargs.get('motion_fps_ref'),
                      motion_fps_min=kwargs.get('motion_fps_min', MOTION_FPS_MIN),
                      motion_fps_max=kwargs.get('motion_fps_max', MOTION_FPS_MAX),
                  )
@@ -655,6 +661,8 @@ def _run_build_cache_ds(args):
                                         pool_mode=args.pool_mode,
                                         top_k_ratio=args.top_k_ratio,
                                         top_k_min=args.top_k_min,
+                                        motion_mode=args.motion_mode,
+                                        motion_fps_ref=args.motion_fps_ref,
                                         )
     cache_info(train_cache, mode='dataset')
     test_cache = build_cache_from_json(_load_list(eval_list), cache_dir/f"{npz_name}_test",
@@ -668,6 +676,8 @@ def _run_build_cache_ds(args):
                                        pool_mode=args.pool_mode,
                                        top_k_ratio=args.top_k_ratio,
                                        top_k_min=args.top_k_min,
+                                       motion_mode=args.motion_mode,
+                                       motion_fps_ref=args.motion_fps_ref,
                                        )
     cache_info(test_cache, mode='dataset')
 
@@ -707,6 +717,8 @@ def _run_stream_cache(args):
                                        pool_mode=args.pool_mode,
                                        top_k_ratio=args.top_k_ratio,
                                        top_k_min=args.top_k_min,
+                                       motion_mode=args.motion_mode,
+                                       motion_fps_ref=args.motion_fps_ref,
                                        )
     cache_info(cache_path, mode='stream')
 
@@ -725,6 +737,10 @@ def main():
                          choices=['max', 'mean', 'lse', 'top_k', 'mean_max', 'mean_std_max', 'mm', 'msm'], help='clip pooling mode')
         prs.add_argument('-kr', '--top-k-ratio', dest='top_k_ratio', type=float, default=DEFAULT_TOP_K_RATIO, help='ratio for top_k pooling')
         prs.add_argument('-k',  '--top-k-min'  , dest='top_k_min',   type=int, default=DEFAULT_TOP_K_MIN, help='minimum pooled k for top_k')
+        prs.add_argument('--motion-mode', choices=['standard', 'reference', 'velocity'], default='standard',
+                         help='motion scaling mode')
+        prs.add_argument('--motion-fps-ref', type=float, default=None,
+                         help='explicit reference FPS; required for reference motion mode')
         prs.add_argument('--no-temp-smooth', action='store_true', help='disable temporal smoothing')
         prs.add_argument('--json-type', default=DEFAULT_TYPE, choices=['type_1', 'type_2', '1', '2'], help='input JSON format for loader')
 

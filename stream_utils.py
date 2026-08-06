@@ -11,6 +11,44 @@ DEFAULT_SJ_NUMERIC_TOLERANCES = {'avg_abs': 0.05, 'max_abs': 0.05}
 META_IGNORED = {'frames', 'event_intervals', 'detector', 'detection_threshold'}
 
 
+def stream_effective_fps(stream: dict) -> float:
+    """Return the FPS of the sampled frames represented by a stream dict."""
+    def valid(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if np.isfinite(value) and value > 0.0 else None
+
+    headers = [stream]
+    header = stream.get('header')
+    if isinstance(header, dict):
+        headers.append(header)
+
+    for node in headers:
+        for key in ('sampling rate', 'sampling_rate'):
+            sampling = node.get(key)
+            if isinstance(sampling, dict):
+                value = valid(sampling.get('effective'))
+                if value is not None:
+                    return value
+
+    for node in headers:
+        timing = node.get('timing')
+        if isinstance(timing, dict):
+            value = valid(timing.get('sampling_rate_hz'))
+            if value is not None:
+                return value
+
+    for node in headers:
+        fps = valid(node.get('fps'))
+        step = valid(node.get('step', node.get('sampling')))
+        if fps is not None and step is not None:
+            return fps / step
+
+    raise ValueError('stream header has no valid sampled effective FPS')
+
+
 def resample_fps(stream: dict, fps_rsmp: float) -> dict:
     """Resample stream frames in place and return the modified stream."""
 
