@@ -1,5 +1,6 @@
 """Public workflows for prediction, timeline, and metric analysis."""
 import json
+import re
 from pathlib import Path
 import yaml
 import numpy as np
@@ -10,7 +11,7 @@ from analysis_utils import (AUTO_META, attach_stream_meta, build_timelines,
                             print_threshold_comparison,
                             resolve_stream_meta_path,
                             save_metric_report, save_timeline_csv)
-from common.my_local_utils import as_collection, print_color
+from common.my_local_utils import as_collection, cli_warning, print_color
 from evaluation_core import DEFAULT_EVAL_THRESHOLD, analyze_clip_test, analyze_video_test, resolve_input
 from project_utils import get_exporting_name, get_test_title_lines
 from stream_metric import eval_multi_thresholds, get_timeline_timing, resolve_metric_config
@@ -221,6 +222,45 @@ def analyze_timelines(timeline_input, thresholds=None, pred_cols=None, **kwargs)
         else:
             print_metric_report(result, **print_kwargs)
     return result
+
+
+def analyze_timeline_batch(timeline_inputs, thresholds=None, pred_cols=None, **kwargs):
+    """Analyze independent timeline directories and return tagged reports."""
+    def model_tag(input_path, reports):
+        for report in reports:
+            for stream in report.get('streams', []):
+                timeline = str(stream.get('timeline', ''))
+                source = str(stream.get('stream', ''))
+                name = timeline.removeprefix('timeline_')
+                if source and name.endswith(f'_{source}'):
+                    return name[:-(len(source) + 1)]
+        name = Path(input_path).name
+        return re.sub(r'^\d{6}_\d{2}-\d{2}-\d{2}_', '', name)
+
+    inputs = list(as_collection(timeline_inputs))
+    batch_kwargs = dict(kwargs)
+    batch_kwargs.pop('output_path', None)
+    batch_kwargs.pop('print_results', None)
+    batch_kwargs.pop('print_kwargs', None)
+
+    reports = []
+    for input_path in inputs:
+        try:
+            result = analyze_timelines(input_path, thresholds=thresholds,
+                                       pred_cols=pred_cols, **batch_kwargs)
+            group_reports = result if isinstance(result, list) else [result]
+            tag = model_tag(input_path, group_reports)
+            for report in group_reports:
+                report['model'] = tag
+                report['source_dir'] = str(input_path)
+                reports.append(report)
+        except Exception as error:
+            cli_warning(f"Skipping timeline directory {input_path}: "
+                        f"{type(error).__name__}: {error}")
+
+    if not reports:
+        raise ValueError("no valid timeline directories were analyzed")
+    return reports
 
 
 def analyze_raw_results(test_results, mode='stream', **kwargs):

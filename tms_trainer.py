@@ -3,7 +3,9 @@
     Train one clip-level MLP classifier from cached NPZ features.
     usage:
     >> tms_trainer.py train train_cache [-h] [-v VALID_CACHE] [-t TAG] [-wd WORK_DIR]
-                          [-lr LR] [-e EPOCHS] [-bs BATCH_SIZE] [-hd HIDDEN_DIM]
+                          [-c CONFIG_PATH] [-lr LR] [-e EPOCHS] [-bs BATCH_SIZE]
+                          [-hd HIDDEN_DIMS [HIDDEN_DIMS ...]] [--optimizer {Adam,AdamW}]
+                          [--weight-decay WEIGHT_DECAY] [--scheduler {none,plateau}]
                           [-sr SPLIT_RATIO] [-rs RANDOM_SEED]
     * positional arguments:
       train_cache                   : train cache npz path
@@ -15,7 +17,11 @@
       -lr                           : learning rate
       -e/ --epochs                  : number of epochs
       -bs/--batch-size              : batch size
-      -hd/--hidden-dim              : hidden layer size
+      -c/--config                   : model YAML configuration
+      -hd/--hidden-dims             : hidden layer sizes
+      --optimizer                   : optimizer name
+      --weight-decay                : optimizer weight decay
+      --scheduler                   : learning-rate scheduler
       -sr/--split-ratio             : runtime train/valid split ratio
       -rs/--random-seed             : runtime train/valid split seed
 
@@ -66,8 +72,18 @@ def _kwargs_from_args(args, names):
 
 def _run_train(args):
     """ Run training command."""
-    kw = _kwargs_from_args(args, ('work_dir', 'tag', 'lr', 'epochs', 'batch_size',
-                                         'hidden_dim', 'valid_ratio', 'valid_seed',))
+    kw = _kwargs_from_args(args, ('work_dir', 'tag', 'config_path', 'lr', 'epochs', 'batch_size',
+                                  'hidden_dims', 'optimizer', 'weight_decay',
+                                  'valid_ratio', 'valid_seed',))
+    scheduler = _kwargs_from_args(args, ('scheduler', 'scheduler_factor',
+                                         'scheduler_patience', 'scheduler_min_lr'))
+    if scheduler:
+        kw['scheduler'] = {'type': scheduler.get('scheduler'),
+                           'factor': scheduler.get('scheduler_factor'),
+                           'patience': scheduler.get('scheduler_patience'),
+                           'min_lr': scheduler.get('scheduler_min_lr')}
+        kw['scheduler'] = {key: value for key, value in kw['scheduler'].items()
+                           if value is not None}
     run_dir = run_training(args.train_cache, args.valid_cache, **kw)
     print(f"Training done. Run dir: {run_dir}")
 
@@ -140,10 +156,24 @@ def main():
     train_p.add_argument('-v', '--valid-cache', type=Path, default=None, help='Optional valid cache npz path')
     train_p.add_argument('-t', '--tag', type=str, default=None, help='Run tag suffix')
     train_p.add_argument('-wd', '--work-dir', type=Path, default=None, help='Output run directory root')
+    train_p.add_argument('-c', '--config', dest='config_path', type=Path, default=None,
+                         help='Model YAML configuration')
     train_p.add_argument('-lr', type=float, default=None, help='Learning rate')
     train_p.add_argument('-e', '--epochs', type=int, default=None, help='Number of epochs')
     train_p.add_argument('-bs', '--batch-size', type=int, default=None, help='Batch size')
-    train_p.add_argument('-hd', '--hidden-dim', type=int, default=None, help='Hidden layer size')
+    train_p.add_argument('-hd', '--hidden-dims', type=int, nargs='+', default=None,
+                         help='Hidden layer sizes')
+    train_p.add_argument('--optimizer', choices=('Adam', 'AdamW'), default=None,
+                         help='Optimizer name')
+    train_p.add_argument('--weight-decay', type=float, default=None, help='Optimizer weight decay')
+    train_p.add_argument('--scheduler', choices=('none', 'plateau'), default=None,
+                         help='Learning-rate scheduler')
+    train_p.add_argument('--lr-factor', dest='scheduler_factor', type=float, default=None,
+                         help='Plateau scheduler reduction factor')
+    train_p.add_argument('--lr-patience', dest='scheduler_patience', type=int, default=None,
+                         help='Plateau scheduler patience')
+    train_p.add_argument('--min-lr', dest='scheduler_min_lr', type=float, default=None,
+                         help='Plateau scheduler minimum learning rate')
     train_p.add_argument('-sr', '--split-ratio', dest='valid_ratio', type=float, default=None, help='Runtime train/valid split ratio')
     train_p.add_argument('-rs', '--random-seed', dest='valid_seed', type=int, default=None, help='Runtime train/valid split seed')
     train_p.set_defaults(fn=_run_train)

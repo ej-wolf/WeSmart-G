@@ -12,6 +12,7 @@ from datetime import datetime
 import json
 import numpy as np
 import torch
+import yaml
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, Subset, TensorDataset, random_split
 from torch.utils.tensorboard import SummaryWriter
@@ -28,22 +29,8 @@ from motion_feature_schema import ( schema_has_na,  assert_feature_schema_match,
 DEFAULT_WORKDIR = "work_dirs/json_models"
 LOCAL_CONFIG    = "config.json"
 LOCAL_LOG       = "log.json"
-
-DEFAULT_VALID_RATIO = 0.85
-DEFAULT_VALID_SEED  = 42
-DEFAULT_BATCH_SIZE  = 256
-#* training parameters
-DEFAULT_LR = 1e-3
-DEFAULT_HIDDEN_DIM  = 64
-#* epochs
-DEFAULT_MIN_EPOCHS = 30
-DEFAULT_MAX_EPOCHS = 150
-DEFAULT_SAVE_EVERY = 10
-#*
-DEFAULT_PATIENCE = 30
-DEFAULT_MIN_DELTA = 0.002
-DEFAULT_WINDOW_TOLERANCE = 0.25
-DEFAULT_STRIDE_TOLERANCE = 0.25
+DEFAULT_MODEL_CONFIG = Path(__file__).resolve().parent / 'configs/model.yaml'
+DEFAULT_INFER_BATCH_SIZE = 256
 
 DEFAULT_DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -71,11 +58,14 @@ class ClipFeatureDataset(Dataset):
 #* ---------------------------------------------------
 
 class ClipMLP(nn.Module):
-    def __init__(self, in_dim:int, hidden_dim:int=64):
+    def __init__(self, in_dim: int, hidden_dims: list[int] | tuple[int, ...]):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(in_dim, hidden_dim),
-                                 nn.ReLU(inplace=True),
-                                 nn.Linear(hidden_dim, 1),)
+        dims = [int(in_dim), *(int(dim) for dim in hidden_dims), 1]
+        layers = []
+        for layer_idx, (dim_in, dim_out) in enumerate(zip(dims[:-2], dims[1:-1])):
+            layers.extend((nn.Linear(dim_in, dim_out), nn.ReLU(inplace=True)))
+        layers.append(nn.Linear(dims[-2], dims[-1]))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.net(x).squeeze(1)
@@ -127,12 +117,46 @@ def eval_one_epoch(model, loader, criterion):
     return total_loss/len(loader.dataset), preds, targets
 
 
-def _infer_hidden_dim_from_state(state: dict) -> int:
-    """Infer the hidden layer width from one saved MLP state dict."""
-    weight = state.get('net.0.weight', None)
-    if weight is None or getattr(weight, 'ndim', None) != 2:
-        raise ValueError("Could not infer hidden_dim from model state")
-    return int(weight.shape[0])
+def load_model_config(config_path: str | Path | None = None) -> dict:
+    """Load the global model defaults from YAML."""
+    path = Path(config_path) if config_path is not None else DEFAULT_MODEL_CONFIG
+    if not path.is_file():
+        raise FileNotFoundError(f"Model configuration not found: {path}")
+    with path.open('r', encoding='utf-8') as file:
+        config = yaml.safe_load(file) or {}
+    if not isinstance(config, dict):
+        raise ValueError(f"Model configuration must be a mapping: {path}")
+    return config
+
+
+def _infer_hidden_dims_from_state(state: dict) -> list[int]:
+    """Infer hidden layer widths from a saved sequential MLP state dict."""
+    weights = []
+    for key, value in state.items():
+        if key.startswith('net.') and key.endswith('.weight'):
+            try:
+                layer_idx = int(key.split('.')[1])
+            except (IndexError, ValueError):
+                continue
+            if getattr(value, 'ndim', None) == 2:
+                weights.append((layer_idx, value))
+    weights.sort(key=lambda item: item[0])
+    if len(weights) < 2 or int(weights[-1][1].shape[0]) != 1:
+        raise ValueError("Could not infer hidden_dims from model state")
+    return [int(weight.shape[0]) for _, weight in weights[:-1]]
+
+
+def _hidden_dims_from_run(model_path: Path, state: dict) -> list[int]:
+    """Read hidden_dims from a run config or infer them from the checkpoint."""
+    cfg_path = model_path.parent / LOCAL_CONFIG
+    if cfg_path.is_file():
+        with cfg_path.open('r', encoding='utf-8') as file:
+            config = json.load(file)
+        hidden_dims = config.get('hidden_dims')
+        if hidden_dims is not None:
+            return [int(dim) for dim in hidden_dims]
+    print_color(f"{LOCAL_CONFIG} is missing hidden_dims; inferring model architecture from state", 'o')
+    return _infer_hidden_dims_from_state(state)
 
 
 def _labels_from_dataset(ds) -> np.ndarray:
@@ -174,7 +198,9 @@ def _binary_auc(y_true, y_score):
     return (np.sum(pos_ranks) - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
 
 
-def _training_contract_from_cache(train_cache: str | Path, **kwargs) -> tuple[list[dict[str, object]], dict[str, object], dict[str, float]]:
+def _training_contract_from_cache(train_cache: str | Path,
+                                  window_tolerance: float,
+                                  stride_tolerance: float) -> tuple[list[dict[str, object]], dict[str, object], dict[str, float]]:
     """Load and validate the canonical feature/temporal contract for one train cache."""
     contract, used_legacy_fallback = load_cache_contract_compact(train_cache)
     train_caches = [dict(item) for item in contract["source_caches"]]
@@ -183,8 +209,6 @@ def _training_contract_from_cache(train_cache: str | Path, **kwargs) -> tuple[li
 
     canonical_feature_schema = dict(contract["feature_schema"])
     canonical_temporal_schema = dict(train_caches[0]["temporal_schema"])
-    window_tolerance = float(kwargs.get("window_tolerance", DEFAULT_WINDOW_TOLERANCE))
-    stride_tolerance = float(kwargs.get("stride_tolerance", DEFAULT_STRIDE_TOLERANCE))
     if used_legacy_fallback:
         print_color(
             f"[WARN] {train_cache} is missing cache metadata; training will continue with 'N/A' contract fields.",
@@ -242,8 +266,10 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
         :param kwargs:
             work_dir, tag   : directory for output files and their tag, by default
                               both work dir & tag are generated from the cache and model properties
-            lr, batch_size, hidden_dim, save_every :
+            config_path : YAML model configuration; defaults to configs/model.yaml.
+            lr, batch_size, hidden_dims, optimizer, weight_decay, save_every :
                              Training params, if passed they overwrite the defaults/config settings
+            scheduler : optional scheduler mapping or 'none'.
             max_epochs, patience, min_delta :
                              E"arly-stop settings; `epochs` is kept as alias for `max_epochs`
             valid_ratio, valid_seed : ratio and seed for runtime train/valid split
@@ -257,19 +283,71 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     run_dir = work_dir/f"{datetime.now().strftime('%y%m%d_%H-%M-%S')}_{kwargs.get('tag', train_npz.stem)}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    lr = kwargs.get('lr', DEFAULT_LR)
-    batch_size  = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
-    hidden_dim  = kwargs.get('hidden_dim', DEFAULT_HIDDEN_DIM)
-    save_every  = kwargs.get('save_every', DEFAULT_SAVE_EVERY)
-    max_epochs = kwargs.get('max_epochs', kwargs.get('epochs', DEFAULT_MAX_EPOCHS))
-    min_epochs = DEFAULT_MIN_EPOCHS
-    patience = kwargs.get('patience', DEFAULT_PATIENCE)
-    min_delta = kwargs.get('min_delta', DEFAULT_MIN_DELTA)
+    model_config_path = kwargs.get('config_path', None)
+    model_config = load_model_config(model_config_path)
+    model_cfg = dict(model_config.get('model', {}) or {})
+    training_cfg = dict(model_config.get('training', {}) or {})
+    scheduler_cfg = model_config.get('scheduler', {})
+    validation_cfg = dict(model_config.get('validation', {}) or {})
+    early_cfg = dict(model_config.get('early_stopping', {}) or {})
+    schema_cfg = dict(model_config.get('schema_validation', {}) or {})
+
+    hidden_dims = kwargs.get('hidden_dims', model_cfg.get('hidden_dims'))
+    if hidden_dims is None:
+        raise ValueError("Model configuration is missing model.hidden_dims")
+    hidden_dims = [int(dim) for dim in hidden_dims]
+    if not hidden_dims or any(dim < 1 for dim in hidden_dims):
+        raise ValueError(f"Invalid hidden_dims={hidden_dims}")
+
+    optimizer_name = str(kwargs.get('optimizer', training_cfg.get('optimizer', 'AdamW'))).lower()
+    if optimizer_name not in {'adam', 'adamw'}:
+        raise ValueError(f"Unsupported optimizer={optimizer_name}; use Adam or AdamW")
+    lr = float(kwargs.get('lr', training_cfg.get('lr')))
+    batch_size = int(kwargs.get('batch_size', training_cfg.get('batch_size')))
+    weight_decay = float(kwargs.get('weight_decay', training_cfg.get('weight_decay', 0.0)))
+    save_every = kwargs.get('save_every', early_cfg.get('save_every'))
+    max_epochs = kwargs.get('max_epochs', kwargs.get('epochs', early_cfg.get('max_epochs')))
+    min_epochs = int(kwargs.get('min_epochs', early_cfg.get('min_epochs')))
+    patience = kwargs.get('patience', early_cfg.get('patience'))
+    min_delta = float(kwargs.get('min_delta', early_cfg.get('min_delta')))
+    valid_ratio = float(kwargs.get('valid_ratio', validation_cfg.get('valid_ratio')))
+    valid_seed = int(kwargs.get('valid_seed', validation_cfg.get('valid_seed')))
+    window_tolerance = float(kwargs.get('window_tolerance', schema_cfg.get('window_tolerance')))
+    stride_tolerance = float(kwargs.get('stride_tolerance', schema_cfg.get('stride_tolerance')))
+
+    if scheduler_cfg is None or str(scheduler_cfg).lower() == 'none':
+        scheduler_cfg = {'type': 'none'}
+    elif isinstance(scheduler_cfg, str):
+        scheduler_cfg = {'type': scheduler_cfg}
+    else:
+        scheduler_cfg = dict(scheduler_cfg)
+    if 'scheduler' in kwargs:
+        scheduler_override = kwargs['scheduler']
+        if scheduler_override is None or str(scheduler_override).lower() == 'none':
+            scheduler_cfg = {'type': 'none'}
+        elif isinstance(scheduler_override, str):
+            scheduler_cfg['type'] = scheduler_override
+        elif isinstance(scheduler_override, dict):
+            scheduler_cfg.update(scheduler_override)
+        else:
+            raise ValueError("scheduler must be None, a name, or a mapping")
+    scheduler_type = str(scheduler_cfg.get('type', 'none')).lower()
+    if scheduler_type not in {'none', 'plateau'}:
+        raise ValueError(f"Unsupported scheduler={scheduler_type}; use plateau or none")
+    scheduler_cfg['type'] = scheduler_type
+    scheduler_cfg.setdefault('factor', 0.5)
+    scheduler_cfg.setdefault('patience', 6)
+    scheduler_cfg.setdefault('min_lr', 1e-6)
+    if any(float(scheduler_cfg[key]) <= 0.0 for key in ('factor', 'min_lr')):
+        raise ValueError(f"Invalid scheduler configuration: {scheduler_cfg}")
 
     if max_epochs < 1:
         raise ValueError(f"Invalid max_epochs={max_epochs}. Expected positive integer.")
     min_epochs = min(min_epochs, max_epochs)
-    train_caches, feature_schema, temporal_profile = _training_contract_from_cache(train_npz, **kwargs)
+    if lr <= 0.0 or batch_size < 1 or weight_decay < 0.0:
+        raise ValueError(f"Invalid training configuration: lr={lr}, batch_size={batch_size}, weight_decay={weight_decay}")
+    train_caches, feature_schema, temporal_profile = _training_contract_from_cache(
+        train_npz, window_tolerance, stride_tolerance)
 
     # Build train/valid datasets;
     full_train_ds = ClipFeatureDataset(train_npz)
@@ -279,8 +357,6 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
         valid_used = str(valid_npz)
     else:
         #* split train cache only when valid cache is not given.
-        valid_ratio = kwargs.get('valid_ratio', DEFAULT_VALID_RATIO)
-        valid_seed = kwargs.get('valid_seed', DEFAULT_VALID_SEED)
         if not (0.0 < valid_ratio < 1.0): # or len(full_train_ds) < 2
             raise ValueError(f" Invalid valid_ratio= {valid_ratio}. Expected value in (0, 1).")
         n_total = len(full_train_ds)
@@ -295,10 +371,13 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
                'train_caches': train_caches,
                'feature_schema': feature_schema,
                'temporal_profile': temporal_profile,
+               'config_path': str(model_config_path or DEFAULT_MODEL_CONFIG),
                'min_epochs': min_epochs, 'max_epochs': max_epochs,  #* epoch related configs
                'save_every': save_every,
                'patience': patience, 'min_delta': min_delta,  #* early stop condition
-               'batch_size': batch_size, 'lr':lr, 'hidden_dim':hidden_dim, #* Training configs
+               'batch_size': batch_size, 'lr': lr, 'hidden_dims': hidden_dims,
+               'optimizer': optimizer_name, 'weight_decay': weight_decay,
+               'scheduler': scheduler_cfg,
                }
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
@@ -306,7 +385,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
     tb_writer = SummaryWriter(log_dir=str(run_dir))
 
     sample_x, _ = train_ds[0]
-    model = ClipMLP(int(sample_x.numel()), hidden_dim=hidden_dim).to(DEFAULT_DEVICE)
+    model = ClipMLP(int(sample_x.numel()), hidden_dims=hidden_dims).to(DEFAULT_DEVICE)
 
     #* Positive class weight for BCE (neg/pos) to reduce imbalance bias.
     pos_weight = None
@@ -318,7 +397,17 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
         pos_weight = torch.tensor(n_neg/max(n_pos, 1), device=DEFAULT_DEVICE)
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer_cls = torch.optim.AdamW if optimizer_name == 'adamw' else torch.optim.Adam
+    optimizer = optimizer_cls(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = None
+    if scheduler_type == 'plateau':
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='max',
+            factor=float(scheduler_cfg['factor']),
+            patience=int(scheduler_cfg['patience']),
+            min_lr=float(scheduler_cfg['min_lr']),
+        )
 
     best_score = None
     best_epoch = 0
@@ -334,6 +423,9 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
         if val_auc is None:
             best_metric = '-val_loss'
 
+        if scheduler is not None:
+            scheduler.step(monitor_score)
+
         is_better = best_score is None or monitor_score > best_score + min_delta
         if is_better:
             best_score = monitor_score
@@ -347,6 +439,7 @@ def run_training(train_cache:str|Path, valid_cache:str|Path|None=None, **kwargs)
             stale_epochs += 1
 
         train_log += [{'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss,
+                       'lr': optimizer.param_groups[0]['lr'],
                        'val_auc': val_auc, 'best_epoch': best_epoch, 'best_score': best_score, }]
         tb_writer.add_scalar('loss/train', train_loss, epoch)
         tb_writer.add_scalar('loss/valid', val_loss, epoch)
@@ -394,29 +487,17 @@ def run_testing(test_model:str|Path, test_cache:str|Path,  **kwargs):
     model_path = Path(test_model)
     test_npz = Path(test_cache)
 
-    batch_size = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
+    batch_size = kwargs.get('batch_size', DEFAULT_INFER_BATCH_SIZE)
 
     state = torch.load(model_path, map_location=DEFAULT_DEVICE)
     # Rebuild model shape from the training config saved with the checkpoint.
-    cfg_path = model_path.parent/LOCAL_CONFIG
-    cfg = {}
-    hidden_dim = None
-    if cfg_path.is_file():
-        try:
-            with cfg_path.open('r') as f:
-                cfg = json.load(f)
-            hidden_dim = int(cfg['hidden_dim'])
-        except Exception as e:
-            raise ValueError(f"Invalid hidden_dim value in run_config.json: {cfg.get('hidden_dim')}") from e
-    else:
-        print_color(f"{LOCAL_CONFIG} is missing, inferring hidden_dim from model state", 'o')
-        hidden_dim = _infer_hidden_dim_from_state(state)
+    hidden_dims = _hidden_dims_from_run(model_path, state)
 
     test_ds = ClipFeatureDataset(test_npz)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
     sample_x, _ = test_ds[0]
-    model = ClipMLP(int(sample_x.numel()), hidden_dim=hidden_dim).to(DEFAULT_DEVICE)
+    model = ClipMLP(int(sample_x.numel()), hidden_dims=hidden_dims).to(DEFAULT_DEVICE)
     model.load_state_dict(state, strict=True)
     model.eval()
 
@@ -485,18 +566,13 @@ def run_stream_testing(test_model:str|Path, X:np.ndarray, y:np.ndarray,
         raise ValueError("Stream X/y/meta size mismatch")
 
     state = torch.load(model_path, map_location=DEFAULT_DEVICE)
-    cfg_path = model_path.parent/LOCAL_CONFIG
-    if cfg_path.is_file():
-        with cfg_path.open('r', encoding='utf-8') as f:
-            hidden_dim = int(json.load(f)['hidden_dim'])
-    else:
-        hidden_dim = _infer_hidden_dim_from_state(state)
+    hidden_dims = _hidden_dims_from_run(model_path, state)
 
-    model = ClipMLP(X.shape[1], hidden_dim=hidden_dim).to(DEFAULT_DEVICE)
+    model = ClipMLP(X.shape[1], hidden_dims=hidden_dims).to(DEFAULT_DEVICE)
     model.load_state_dict(state, strict=True)
     model.eval()
     loader = DataLoader(TensorDataset(torch.from_numpy(X), torch.from_numpy(y).float()),
-                        batch_size=kwargs.get('batch_size', DEFAULT_BATCH_SIZE),
+                        batch_size=kwargs.get('batch_size', DEFAULT_INFER_BATCH_SIZE),
                         shuffle=False)
 
     probs = []
@@ -558,6 +634,7 @@ def test_test(test_cache:str|Path, test_model:str|Path, **kwargs):
     print_test_report(report)
 
 #*606(7,1,3)-620 -> 560(4,,0)
+#636(3,,5)
 
 if __name__ == '__main__':
     pass

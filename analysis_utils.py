@@ -354,6 +354,7 @@ def save_metric_report(report: dict | list[dict], output_path) -> Path:
             return f'{value:.{2 if time_field else 3}f}'
 
         reports = report if isinstance(report, list) else [report]
+        batch_report = any(result.get('model') is not None for result in reports)
         rows = []
         for result in reports:
             prediction = result.get('prediction', {})
@@ -364,7 +365,7 @@ def save_metric_report(report: dict | list[dict], output_path) -> Path:
                 duration = events.get('duration', {})
                 scores = stream.get('scores', {})
                 meta = stream.get('stream_meta', {})
-                rows.append({'stream': full_stream_name(stream),
+                row = {'stream': full_stream_name(stream),
                              'fps': timing.get('fps', ''),
                              'win_span': timing.get('window_span', ''),
                              'infer_frq': timing.get('frq_i', ''),
@@ -392,7 +393,11 @@ def save_metric_report(report: dict | list[dict], output_path) -> Path:
                              't_tn': time_info.get('t_tn', ''),
                              'fp_per_h' : events.get('fp_per_h', ''),
                              'fp_burden': scores.get('fp_burden', ''),
-                             'notes': stream.get('error', '')})
+                             'notes': stream.get('error', '')}
+                if batch_report:
+                    row['model'] = result.get('model', '')
+                    row['source_dir'] = result.get('source_dir', '')
+                rows.append(row)
 
         metadata = []
         passed = [row for row in rows if row['status'] == 'pass']
@@ -409,7 +414,8 @@ def save_metric_report(report: dict | list[dict], output_path) -> Path:
 
         params = reports[0].get('params', {}) if reports else {}
         metadata += list(params.items())
-        fields = ['stream', 'fps']
+        fields = ['model', 'source_dir'] if batch_report else []
+        fields += ['stream', 'fps']
         fields += [field for field in ('win_span', 'infer_frq') if field in rows[0]] if rows else []
         fields += ['threshold', 'y_pred', 'status', 'timeline_file',
                    'src_span', 'frames_count', 'yolo_threshold', 'yolo_dets',
@@ -421,7 +427,9 @@ def save_metric_report(report: dict | list[dict], output_path) -> Path:
         def sort_key(row):
             fps = row['fps']
             threshold = row['threshold']
-            return (str(row['stream']).casefold(),
+            return (str(row.get('model', '')).casefold(),
+                    str(row.get('source_dir', '')).casefold(),
+                    str(row['stream']).casefold(),
                     fps == '', float(fps) if fps != '' else math.inf,
                     threshold == '', float(threshold) if threshold != '' else math.inf,
                     str(row['y_pred']), str(row['timeline_file']))
@@ -772,6 +780,38 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
     tag = summary_tag()
     print(f"\n=== Threshold Summary{' for ' + tag if tag else ''} ===")
     print_grouped_summary(headers, table)
+    return reports
+
+
+def print_model_comparison(reports: list[dict], **kwargs):
+    """Print aggregate metric rows ordered by model and operating point."""
+    fp_unit = 'min' if kwargs.get('fp_unit', 'h') in {'min', 'minute'} else 'h'
+    reports = list(reports)
+    has_columns = any(report.get('prediction', {}).get('column') is not None
+                      for report in reports)
+    selector_header = 'Prediction' if has_columns else 'Threshold'
+    headers = ['Model', selector_header, 'GT', 'Detected', 'False', 'Recall',
+               'Lag(s)', 'FP burden', f'FP/{fp_unit}', 'Score']
+    rows = []
+    separators = set()
+    last_model = None
+    for report in reports:
+        model = str(report.get('model', 'N/A'))
+        if last_model is not None and model != last_model:
+            separators.add(len(rows))
+        last_model = model
+        values = _metric_values(report, fp_unit, lag_digits=1)
+        prediction = report.get('prediction', {})
+        selector = (str(prediction['column']) if has_columns and prediction.get('column') is not None
+                    else ('N/A' if prediction.get('threshold') is None
+                          else f"th={prediction['threshold']:g}"))
+        scores = report.get('scores', {})
+        rows.append([model, selector, values['gt'], values['detected'], values['false'],
+                     values['recall'], values['lag'], values['fp_burden'],
+                     values['fp_rate'], _fmt(scores.get('total'))])
+
+    print("\n=== Model Comparison ===")
+    _print_table(headers, rows, ['<'] + ['^']*(len(headers) - 1), separators)
     return reports
 
 

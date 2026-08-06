@@ -16,7 +16,7 @@ import numpy as np
 import torch
 
 from motion_feature_schema import assert_feature_schema_match, build_feature_schema, schema_has_na
-from torch_clip_model import ClipMLP, LOCAL_CONFIG, _infer_hidden_dim_from_state
+from torch_clip_model import ClipMLP, LOCAL_CONFIG, _infer_hidden_dims_from_state
 
 
 @dataclass
@@ -36,7 +36,7 @@ class TmsModelRuntime:
     model_path: Path
     threshold: float
     abnormal_tsh: float
-    hidden_dim: int
+    hidden_dims: list[int]
     input_dim: int
     device: torch.device
     model: torch.nn.Module
@@ -293,7 +293,7 @@ def _resolve_model_checkpoint(model_ref: str | Path, config_dir: Path) -> Path:
     raise FileNotFoundError(f"No model checkpoint found in {path}")
 
 
-def _load_model_contract(model_path: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int | None]:
+def _load_model_contract(model_path: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[int] | None]:
     """Load saved runtime contract from one training config when available."""
     cfg_path = model_path.parent / LOCAL_CONFIG
     if not cfg_path.is_file():
@@ -301,7 +301,10 @@ def _load_model_contract(model_path: Path) -> tuple[dict[str, Any] | None, dict[
 
     with cfg_path.open("r", encoding="utf-8") as handle:
         cfg = json.load(handle)
-    return cfg.get("feature_schema", None), cfg.get("temporal_profile", None), cfg.get("hidden_dim", None)
+    hidden_dims = cfg.get("hidden_dims")
+    if hidden_dims is not None:
+        hidden_dims = [int(dim) for dim in hidden_dims]
+    return cfg.get("feature_schema", None), cfg.get("temporal_profile", None), hidden_dims
 
 
 def load_tms_runtimes(
@@ -338,12 +341,12 @@ def load_tms_runtimes(
             raise ValueError(f"Unsupported model state in {model_path}")
 
         input_dim = int(state["net.0.weight"].shape[1])
-        feature_schema, temporal_profile, hidden_dim = _load_model_contract(model_path)
+        feature_schema, temporal_profile, hidden_dims = _load_model_contract(model_path)
         effective_feature_schema = resolve_model_feature_schema(feature_schema, runtime_feature_schema, item)
-        if hidden_dim is None:
-            hidden_dim = _infer_hidden_dim_from_state(state)
-        hidden_dim = int(hidden_dim)
-
+        if hidden_dims is None:
+            hidden_dims = _infer_hidden_dims_from_state(state)
+        if not hidden_dims or any(dim < 1 for dim in hidden_dims):
+            raise ValueError(f"Invalid hidden_dims in {model_path}: {hidden_dims}")
         if feature_schema and not schema_has_na(feature_schema):
             validate_runtime_feature_schema(effective_feature_schema, feature_schema)
         elif input_dim != int(effective_feature_schema["feature_dim"]):
@@ -353,7 +356,7 @@ def load_tms_runtimes(
         if temporal_profile and not schema_has_na(temporal_profile):
             validate_probe_temporal_profile(probe_map[tag], temporal_profile)
 
-        model = ClipMLP(input_dim, hidden_dim=hidden_dim).to(device)
+        model = ClipMLP(input_dim, hidden_dims=hidden_dims).to(device)
         model.load_state_dict(state, strict=True)
         model.eval()
 
@@ -362,7 +365,7 @@ def load_tms_runtimes(
             model_path=model_path,
             threshold=float(item.get("threshold", 0.5)),
             abnormal_tsh=float(item["abnormal_tsh"]),
-            hidden_dim=hidden_dim,
+            hidden_dims=hidden_dims,
             input_dim=input_dim,
             device=device,
             model=model,

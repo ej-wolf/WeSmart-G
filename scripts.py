@@ -1019,9 +1019,11 @@ def cache_builder():
     # *  Test test_models
 
 
-DEFAULT_MDL_DIR = "work_dirs/models"
-DEFAULT_TST_DIR = "work_dirs/testing-lib"
+# DEFAULT_MDL_DIR = "work_dirs/models"
 STREAM_TEST_DIR = "data/json_files/testing"
+DEFAULT_MDL_DIR = "work_dirs/models-lib"
+DEFAULT_RES_DIR = "work_dirs/testing-lib"
+
 
 STREAM_SUB_TST = ["data/json_files/testing/weSmart_demo.json",
                   "data/json_files/testing/Russian_Road_Rage- Micky_Mouse_&_Sponge_Bob.json",
@@ -1038,7 +1040,7 @@ def test_runner(tst_strm, **kwargs):
 
     mdl_dir = Path(kwargs.pop('mdl_dir', DEFAULT_MDL_DIR))
     root_path = kwargs.pop('root_path', None)
-    kwargs.setdefault('out_dir', DEFAULT_TST_DIR)
+    kwargs.setdefault('out_dir', DEFAULT_RES_DIR)
     out_dir = Path(kwargs['out_dir'])
 
     tst_strm = Path(tst_strm)
@@ -1075,9 +1077,11 @@ if __name__ == "__main__":
     pass
 
     # cache_builder()
-    test_runner(tst_strm=Path(STREAM_TEST_DIR)/"test-set_erez-24_f.txt",
-                 mdl_dir=Path(DEFAULT_MDL_DIR),
-                 out_dir=Path(DEFAULT_TST_DIR)/'gen-3 ')
+    test_runner(tst_strm=Path(STREAM_TEST_DIR)/"test_er-24_default.txt",
+                mdl_dir=Path(DEFAULT_MDL_DIR)/'G3',
+                out_dir=Path(DEFAULT_RES_DIR)/'gen-3/test-02',
+                plotting=True, th=[0.6, 0.7],
+                )
 
     #* region Train models
     cache_dir = Path("data/cache/Joint_sets")
