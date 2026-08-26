@@ -2,7 +2,6 @@ import shutil, re, zipfile, fnmatch
 import numpy as np, torch, json
 from pathlib import Path
 
-
 from colorama import Fore, Style
 # B, U, R = '\033[1m', '\033[4m', '\033[0m'
 # RED, GREEN, BLUE = Fore.RED, Fore.GREEN, Fore.BLUE
@@ -83,6 +82,18 @@ def _fmt(value, **kwargs):
 
 #* region *** General Files/ Paths sys Utils ***************************************#
 # -----------------------------------------------------------------------------
+
+def assert_path(path, kind='path'):
+    """ Return a Path after validating its existence and optional kind."""
+    path = Path(path)
+    # if kind not in {'any', 'file', 'dir'}:    raise ValueError(f"Unsupported path kind: {kind!r}")
+    if not path.exists():
+        raise ValueError(f'{path} does not exist')
+    if   kind == 'file' and not path.is_file():
+        raise ValueError(f'Not a file: {path}')
+    elif kind == 'dir' and not path.is_dir():
+        raise ValueError(f'Not a dir: {path}')
+    return path
 
 def list_file_list(list_file:str|Path, root_path:str|Path|None=None, absolut:bool=False)->list[Path]:
     """ Read paths from a line-based list file.

@@ -1040,7 +1040,7 @@ def test_stream_jsons(tst, ref, op_dir=None, **kwargs):
 
     selected_names = kwargs.pop('file_names', None)
     tolerances = _resolve_tolerance(kwargs.pop('tolerances', None))
-    ignore_path_fields = bool(kwargs.pop('ignore_path_fields', True))
+    ignore_video_path = bool(kwargs.pop('ignore_video_path', True))
     print_cli = bool(kwargs.pop('print_cli', False))
     verbose = bool(kwargs.pop('verbose', False))
     save_json = bool(kwargs.pop('save_json', True))
@@ -1055,7 +1055,7 @@ def test_stream_jsons(tst, ref, op_dir=None, **kwargs):
     files = []
     for file_name in names:
         ok, cmp_report = compare_stream_json(tst_files[file_name], ref_files[file_name],
-                                             tolerances=tolerances, ignore_path_fields=ignore_path_fields)
+                                             tolerances=tolerances, ignore_video_path=ignore_video_path)
         files.append(_build_stream_json_cmp_row(file_name, ok, cmp_report))
 
     tst_names = set(tst_files) if selected_names is None else set(name for name in selected_names if name in tst_files)

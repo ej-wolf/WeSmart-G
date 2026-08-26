@@ -581,14 +581,14 @@ def collect_jsons(json_ls, src_dir, trg_dir) -> list[Path]:
 #* endregion *#
 
 #* region Stream JSON compare **************************#
-def compare_stream_json(j1, j2, *, tolerances=None, ignore_path_fields=True) -> tuple[bool, dict[str, Any]]:
+def compare_stream_json(j1, j2, *, tolerances=None, ignore_video_path=True) -> tuple[bool, dict[str, Any]]:
     """Compare two stream JSONs by metadata, frame layout, annotations, and numeric payload."""
     if tolerances is not None and not isinstance(tolerances, dict):
         raise TypeError('compare_stream_json tolerances must be None or a concrete dict')
     data_1 = j1 if isinstance(j1, dict) else load_json_raw(j1)
     data_2 = j2 if isinstance(j2, dict) else load_json_raw(j2)
 
-    metadata = compare_meta(data_1, data_2, ignore_path_fields=ignore_path_fields)
+    metadata = compare_meta(data_1, data_2, ignore_video_path=ignore_video_path)
     stream = compare_stream(data_1, data_2, tolerances=tolerances)
     frame_structure = stream['frame_structure']
     annotations = stream['annotations']

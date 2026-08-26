@@ -245,10 +245,10 @@ def _frame_delta_stats(frames: list[dict[str, Any]]) -> tuple[list[float], float
 
 #* region Stream comparison *****************************#
 
-def compare_meta(stream_1: dict, stream_2: dict, *, ignore_path_fields=True) -> dict[str, Any]:
+def compare_meta(stream_1: dict, stream_2: dict, *, ignore_video_path=True) -> dict[str, Any]:
     """Compare Stream JSON header metadata excluding frame payloads."""
     ignored = set(META_IGNORED)
-    if ignore_path_fields:
+    if ignore_video_path:
         ignored.add('video')
 
     unequal = {}
