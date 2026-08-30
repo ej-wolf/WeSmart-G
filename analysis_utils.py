@@ -12,6 +12,11 @@ from json_stream_utils import DEFAULT_STREAM_META, SJ_META_INFO, stream_stem
 from json_utils import STREAM_FILE_TYPES
 from common.my_local_utils import _fmt, as_collection, get_unique_name
 
+TIMELINE_PROB_ATOL = 1e-6
+TIMELINE_PROB_VARIANCE_K = 0.03
+TIMELINE_TIME_ATOL = 1e-9
+TIMELINE_MAX_ISSUES = 50
+
 
 #* region Public API  ---------------------------------------------------
 # -----------------------------------------------------------------------
@@ -53,7 +58,7 @@ def build_timelines(y_true, y_prob, streams, t_start, t_end, n_frames=None) -> l
                  'n_frm': int(n_frames[index]),
                  'gt_label': int(y_true[index]),
                  'y_prob': float(y_prob[index])}
-                for win_idx, index in enumerate(ordered)]
+                 for win_idx, index in enumerate(ordered)]
         timelines.append({'metadata': {'timeline': stream, 'source': stream},
                           'fieldnames': list(fields), 'rows': rows})
     return timelines
@@ -118,6 +123,143 @@ def load_timeline_csv(csv_path: str | Path) -> dict:
         raise ValueError(f"timeline CSV contains no data rows: {csv_path}")
 
     return {'metadata': metadata, 'fieldnames': fieldnames, 'rows': rows} # 'metadata_rows': metadata_rows,
+
+
+def compare_timeline(test_timeline: dict, ref_timeline: dict, *,
+                     prob_atol=TIMELINE_PROB_ATOL,
+                     prob_variance_k=TIMELINE_PROB_VARIANCE_K,
+                     time_atol=TIMELINE_TIME_ATOL,
+                     max_issues=TIMELINE_MAX_ISSUES) -> dict:
+    """Compare two normalized timeline dictionaries without file handling."""
+    def add_structure_issue(issue_type, **details):
+        structure['mismatches'] += 1
+        if len(structure['issues']) < max_issues:
+            structure['issues'].append({'type': issue_type, **details})
+
+    def add_numeric_issue(field, row_idx, test_val, ref_val, abs_error):
+        numeric['mismatches'] += 1
+        if len(numeric['issues']) < max_issues:
+            numeric['issues'].append({'field': field, 'row': row_idx,
+                                      'test': test_val, 'ref': ref_val,
+                                      'abs_error': abs_error})
+
+    if not isinstance(test_timeline, dict) or not isinstance(ref_timeline, dict):
+        raise TypeError('compare_timeline expects two timeline dictionaries')
+    if prob_atol < 0 or prob_variance_k < 0 or time_atol < 0:
+        raise ValueError('timeline tolerances must be non-negative')
+    if max_issues < 0:
+        raise ValueError('max_issues must be non-negative')
+
+    test_rows = test_timeline.get('rows')
+    ref_rows = ref_timeline.get('rows')
+    test_fields = set(test_timeline.get('fieldnames') or ())
+    ref_fields = set(ref_timeline.get('fieldnames') or ())
+    if not isinstance(test_rows, list) or not isinstance(ref_rows, list):
+        raise TypeError("timeline dictionaries must contain a 'rows' list")
+
+    required = {'win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob'}
+    test_pred = {field for field in test_fields if field == 'y_pred' or field.startswith('y_prd-')}
+    ref_pred = {field for field in ref_fields if field == 'y_pred' or field.startswith('y_prd-')}
+    structure = {'ok': True,
+                 'mismatches': 0,
+                 'row_count': {'test': len(test_rows), 'ref': len(ref_rows)},
+                 'missing_required_test': sorted(required - test_fields),
+                 'missing_required_ref': sorted(required - ref_fields),
+                 'missing_columns': sorted(ref_fields - test_fields),
+                 'extra_columns': sorted(test_fields - ref_fields),
+                 'issues': []}
+    numeric = {'ok': True, 'count': 0, 'mismatches': 0,
+               'max_abs': 0.0, 'max_path': None, 'issues': [],
+               'time_atol': time_atol,
+               'probability': {}}
+
+    if len(test_rows) != len(ref_rows):
+        add_structure_issue('row_count', test=len(test_rows), ref=len(ref_rows))
+    if structure['missing_required_test'] or structure['missing_required_ref']:
+        add_structure_issue('required_columns',
+                            test=structure['missing_required_test'],
+                            ref=structure['missing_required_ref'])
+    if structure['missing_columns'] or structure['extra_columns']:
+        add_structure_issue('columns', missing=structure['missing_columns'],
+                            extra=structure['extra_columns'])
+    if not test_pred or not ref_pred:
+        add_structure_issue('prediction_columns', test=sorted(test_pred), ref=sorted(ref_pred))
+
+    comparable = (not structure['missing_required_test'] and
+                  not structure['missing_required_ref'] and
+                  test_fields == ref_fields and test_pred == ref_pred)
+    compared_rows = min(len(test_rows), len(ref_rows))
+    flip_count = 0
+    max_prob_delta = 0.0
+
+    if comparable and compared_rows:
+        ref_prob = np.asarray([row['y_prob'] for row in ref_rows[:compared_rows]], dtype=float)
+        test_prob = np.asarray([row['y_prob'] for row in test_rows[:compared_rows]], dtype=float)
+        finite = ref_prob[np.isfinite(ref_prob)]
+        if finite.size >= 2:
+            prob_median = float(np.median(finite))
+            prob_spread = float(1.4826*np.median(np.abs(finite - prob_median)))
+            prob_scale = float(np.sqrt(np.mean(np.abs(finite)**2)))
+            denominator = max(prob_scale, prob_atol)
+            prob_rtol = prob_variance_k*prob_spread/denominator if denominator else 0.0
+        else:
+            prob_median = float(finite[0]) if finite.size else None
+            prob_spread = prob_scale = prob_rtol = 0.0
+
+        prob_close = np.isclose(test_prob, ref_prob, atol=prob_atol,
+                               rtol=prob_rtol, equal_nan=True)
+        prob_delta = np.abs(test_prob - ref_prob)
+        prob_delta = np.where(prob_close & ~np.isfinite(prob_delta), 0.0, prob_delta)
+        prob_delta = np.where(~prob_close & np.isnan(prob_delta), np.inf, prob_delta)
+        max_prob_delta = float(np.max(prob_delta))
+        max_prob_idx = int(np.argmax(prob_delta))
+        numeric['count'] += compared_rows
+        numeric['max_abs'] = max_prob_delta
+        numeric['max_path'] = f'row[{max_prob_idx}].y_prob'
+        for row_idx in np.flatnonzero(~prob_close):
+            idx = int(row_idx)
+            add_numeric_issue('y_prob', idx, float(test_prob[idx]),
+                              float(ref_prob[idx]), float(prob_delta[idx]))
+
+        numeric['probability'] = {'atol': prob_atol,
+                                  'variance_k': prob_variance_k,
+                                  'rtol': prob_rtol,
+                                  'median': prob_median,
+                                  'spread': prob_spread,
+                                  'scale': prob_scale,
+                                  'mismatches': int(np.count_nonzero(~prob_close))}
+
+        for row_idx, (test_row, ref_row) in enumerate(zip(test_rows, ref_rows)):
+            for field in ('win_idx', 'n_frm', 'gt_label'):
+                if test_row[field] != ref_row[field]:
+                    add_structure_issue('value', field=field, row=row_idx,
+                                        test=test_row[field], ref=ref_row[field])
+
+            for field in ('t_frm', 't_start'):
+                test_val, ref_val = float(test_row[field]), float(ref_row[field])
+                delta = abs(test_val - ref_val)
+                numeric['count'] += 1
+                if not np.isclose(test_val, ref_val, atol=time_atol, rtol=0.0, equal_nan=True):
+                    add_numeric_issue(field, row_idx, test_val, ref_val, delta)
+                if delta > numeric['max_abs']:
+                    numeric['max_abs'] = delta
+                    numeric['max_path'] = f'row[{row_idx}].{field}'
+
+            for field in sorted(test_pred):
+                if test_row[field] != ref_row[field]:
+                    flip_count += 1
+                    add_structure_issue('prediction', field=field, row=row_idx,
+                                        test=test_row[field], ref=ref_row[field])
+
+    prediction_count = compared_rows*len(test_pred) if comparable else 0
+    structure['ok'] = structure['mismatches'] == 0
+    numeric['ok'] = numeric['mismatches'] == 0
+    ok = structure['ok'] and numeric['ok'] and flip_count == 0
+    return {'ok': ok, 'rows': compared_rows,
+            'structure': structure, 'numeric': numeric,
+            'flip_count': flip_count,
+            'flip_rate': flip_count/prediction_count if prediction_count else 0.0,
+            'max_prob_delta': max_prob_delta}
 
 
 def load_timelines(timeline_input) -> tuple[list[dict], list[dict], list[Path]]:

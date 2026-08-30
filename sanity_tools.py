@@ -4,6 +4,7 @@
     compare_json(test, ref, **kwargs) -> dict
     compare_npz(test, ref, **kwargs) -> dict
     compare_csv(test, ref, **kwargs) -> dict
+    compare_png(test, ref) -> dict
     compare_file(test, ref, **kwargs) -> dict
     compare_dirs(test_dir, ref_dir, **kwargs) -> dict
     compare_stream_json_dirs(test_dir, ref_dir, **kwargs) -> dict
@@ -27,8 +28,11 @@ import numpy as np
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from PIL import Image, ImageChops
 #* local imports
 from common.my_local_utils import as_collection, assert_path, get_unique_name, cli_warning
+import analysis_utils as au
+from analysis_utils import compare_timeline, load_timeline_csv
 from json_stream_utils import compare_stream_json
 from json_utils import (STREAM_FILE_TYPES, list_json_sources, load_json_raw,
                         resolve_json_files, resolve_json_source, save_json_raw)
@@ -141,6 +145,97 @@ def compare_json(test, ref, **kwargs) -> dict[str, Any]:
             'byte_equal': byte_equal,
             'structure': structure,
             'numeric': numeric_report}
+
+
+def _compare_classification_summary(test, ref, *, tst_data=None, ref_data=None, **kwargs)-> dict[str,Any]:
+    """ Compare a clip/video summary using classification-level semantics."""
+
+    def summary_sample_total(summary):
+        testing_set = summary.get('testing_set', {})
+        for key in ('clips_num', 'videos_num'):
+            if key in testing_set:
+                return int(testing_set[key])
+
+        confusion = summary.get('confusion_matrix')
+        if isinstance(confusion, list) and len(confusion) == 2:
+            if all(isinstance(row, list) and len(row) == 2 for row in confusion):
+                return sum(int(cell) for row in confusion for cell in row)
+        if isinstance(confusion, dict):
+            return sum(int(value) for value in confusion.values())
+        return 0
+
+    def summary_cm_cells(summary):
+        CM = summary.get('confusion_matrix')
+        if (isinstance(CM, list) and
+                len(CM) == 2  and all(isinstance(row, list) and len(row) == 2 for row in CM)):
+            return [int(CM[0][0]), int(CM[0][1]),
+                    int(CM[1][0]), int(CM[1][1])]
+        elif isinstance(CM, dict):
+            return [int(CM.get(key, 0)) for key in ('tn', 'fp', 'fn', 'tp')]
+        return []
+
+    if tst_data is None:
+        tst_data = load_json_raw(resolve_json_source(test))
+    if ref_data is None:
+        ref_data = load_json_raw(resolve_json_source(ref))
+
+    generic = compare_json(tst_data, ref_data, **kwargs)
+    tst_label = str(test) if isinstance(test, (str, Path)) else '<memory>'
+    ref_label = str(ref ) if isinstance(ref, (str, Path)) else '<memory>'
+    byte_equal = None
+    if isinstance(test, (str, Path)) and isinstance(ref, (str, Path)):
+        byte_equal = bytewise_equal(resolve_json_source(test), resolve_json_source(ref))
+        if byte_equal:
+            return _byte_equal_report('json', tst_label, ref_label)
+
+    metric_alias = {'ROC AUC': 'auc'}
+    metric_names = ('accuracy', 'precision', 'recall', 'f1', 'auc', 'TPR', 'FPR')
+    metric_diffs = []
+    for field in metric_names:
+        tst_key = next( (k for k in tst_data if metric_alias.get(k, k) == field), None)
+        ref_key = next( (k for k in ref_data if metric_alias.get(k, k) == field), None)
+        if tst_key is None or ref_key is None:
+            continue
+        tst_val, ref_val = tst_data[tst_key], ref_data[ref_key]
+        if _is_number(tst_val) and _is_number(ref_val):
+            metric_diffs.append({'metric': field, 'delta': abs(float(tst_val - ref_val)),})
+
+    summary_atol = float(kwargs.get('summary_atol', kwargs.get('atol', DEFAULT_ATOL)))
+    cm_atol = float(kwargs.get('summary_cm_atol', summary_atol))
+    sample_total = summary_sample_total(ref_data)
+    tst_cm, ref_cm = summary_cm_cells(tst_data), summary_cm_cells(ref_data)
+    cm_sum_delta = 0
+    if tst_cm and len(tst_cm) == len(ref_cm):
+        cm_sum_delta = sum( abs(v_tst - V_ref) for v_tst, V_ref in zip(tst_cm, ref_cm) )
+    cm_delta = cm_sum_delta/sample_total if sample_total else 0.0
+
+    metric_issues = [itm for itm in metric_diffs if itm['delta'] > summary_atol]
+    cm_issue = cm_delta > cm_atol
+    numeric_issues = [{'path': itm['metric'], 'delta': itm['delta'], 'tol': summary_atol} for itm in metric_issues]
+    if cm_issue:
+        numeric_issues.append({'path': 'confusion_matrix', 'delta': cm_delta, 'tol': cm_atol})
+    numeric = {'ok': not numeric_issues,
+               'count': len(metric_diffs) + (4 if tst_cm and ref_cm else 0),
+               'mismatches': len(numeric_issues),
+               'avg_abs': (sum(itm['delta'] for itm in numeric_issues)/len(numeric_issues)
+                                   if numeric_issues else 0.0),
+               'max_abs': max((itm['delta'] for itm in numeric_issues), default=0.0),
+               'max_path': numeric_issues[0]['path'] if numeric_issues else None,
+               'atol': summary_atol, 'rtol': None, 'variance_k': None, 'rtol_used': None,
+               'issues': numeric_issues}
+    generic.update({'ok': bool(generic['structure']['ok'] and numeric['ok']),
+                    'kind': 'json',
+                    'test': tst_label, 'ref': ref_label,
+                    'byte_equal': byte_equal, 'numeric': numeric,
+                    'summary': {'style': 'classification',
+                                'analysis_mode': tst_data.get('analysis_mode'),
+                                'sample_total': sample_total,
+                                'cm_sum_delta': cm_sum_delta,
+                                'cm_delta': cm_delta,
+                                'metric_diffs': metric_diffs,
+                                'metric_atol': summary_atol,
+                                'cm_atol': cm_atol}})
+    return generic
 
 
 def compare_npz(test, ref, **kwargs) -> dict[str, Any]:
@@ -283,15 +378,65 @@ def compare_csv(test, ref, **kwargs) -> dict[str, Any]:
             'numeric': numeric_report}
 
 
+def compare_timeline_csv(test, ref, *, prob_atol=au.TIMELINE_PROB_ATOL,
+                                       prob_variance_k=au.TIMELINE_PROB_VARIANCE_K,
+                                       time_atol=au.TIMELINE_TIME_ATOL,
+                                       max_issues=au.TIMELINE_MAX_ISSUES
+                         ) -> dict[str, Any]:
+    """ Load and compare two timeline CSV files using timeline-specific semantics."""
+
+    tl_tst = load_timeline_csv(assert_path(test, 'file'))
+    tl_ref = load_timeline_csv(assert_path(ref, 'file'))
+    result = compare_timeline(tl_tst, tl_ref, prob_atol=prob_atol, prob_variance_k=prob_variance_k,
+                              time_atol=time_atol, max_issues=max_issues)
+    return {'kind': 'csv', 'csv_style': 'timeline', 'test': str(test), 'ref': str(ref),
+            'byte_equal': bytewise_equal(test, ref), **result}
+
+
+def compare_png(test, ref) -> dict[str, Any]:
+    """Compare two PNG files by decoded RGBA pixels."""
+    test, ref = assert_path(test, 'file'), assert_path(ref, 'file')
+    if bytewise_equal(test, ref):
+        return _byte_equal_report('png', str(test), str(ref))
+
+    with Image.open(test) as tst_img, Image.open(ref) as ref_img:
+        tst_img = tst_img.convert('RGBA')
+        ref_img = ref_img.convert('RGBA')
+        if tst_img.size != ref_img.size:
+            structure = {'ok': False, 'mismatches': 1,
+                         'issues': [{'type': 'size', 'test': tst_img.size, 'ref': ref_img.size}]}
+        else:
+            difference = ImageChops.difference(tst_img, ref_img)
+            different_pixels = any(high != 0 for _, high in difference.getextrema())
+            structure = {'ok': not different_pixels,
+                         'mismatches': int(different_pixels),
+                         'issues': ([{'type': 'pixels'}] if different_pixels else [])}
+    return {'ok': structure['ok'], 'kind': 'png',
+            'test': str(test), 'ref': str(ref), 'byte_equal': False,
+            'structure': structure, 'numeric': None}
+
+
 def compare_file(test, ref, *, kind=None, **kwargs) -> dict[str, Any]:
     """Compare one supported file pair, inferring its kind when omitted."""
     kind = kind or _file_kind(test)
     if kind == 'json':
+        test_data = load_json_raw(resolve_json_source(test)) if isinstance(test, (str, Path)) else test
+        ref_data = load_json_raw(resolve_json_source(ref)) if isinstance(ref, (str, Path)) else ref
+        modes = {'clip', 'video'}
+        if (isinstance(test_data, dict) and isinstance(ref_data, dict)
+                and test_data.get('analysis_mode') in modes
+                and ref_data.get('analysis_mode') in modes
+                and ({'testing_set', 'confusion_matrix'} & set(test_data))
+                and ({'testing_set', 'confusion_matrix'} & set(ref_data))):
+            return _compare_classification_summary(test, ref, tst_data=test_data,
+                                                   ref_data=ref_data, **kwargs)
         return compare_json(test, ref, **kwargs)
     if kind == 'npz':
         return compare_npz(test, ref, **kwargs)
     if kind == 'csv':
         return compare_csv(test, ref, **kwargs)
+    if kind == 'png':
+        return compare_png(test, ref)
     if kind != 'stream_json':
         raise ValueError(f"Unsupported comparison kind: {kind!r}")
 
@@ -360,6 +505,8 @@ def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
             for file_path in all_paths:
                 if not file_path.is_file() or is_excluded(file_path):
                     continue
+                if file_path.suffix.lower() == '.png' and not include_png:
+                    continue
                 file_id = get_id(file_path)
                 if file_id in files_by_id:
                     first = files_by_id[file_id]
@@ -395,6 +542,10 @@ def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
                         list(raw_exc) if raw_exc is not None      else
                         [])
     options = kwargs.get('options') or {}
+    include_png = bool(kwargs.get('include_png', False))
+    if include_png and patterns is not None and not any(
+            str(pattern).lower() == '*.png' for pattern in patterns):
+        patterns.append('*.png')
     tst_files, ref_files = collect_files(test_dir), collect_files(ref_dir)
     misses = sorted(set(ref_files) - set(tst_files))
     extra  = sorted(set(tst_files) - set(ref_files))
@@ -421,6 +572,7 @@ def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
     return {'ok': ok,
             'test_dir': str(test_dir), 'ref_dir': str(ref_dir),
             'match_by_name': match_by_name,
+            'include_png': include_png,
             'missing': misses, 'extra': extra,
             'files': file_reports,
             'warnings': warnings_ls, 'errors': errors
@@ -607,6 +759,8 @@ def _file_kind(path):
         return 'npz'
     if name.endswith('.csv'):
         return 'csv'
+    if name.endswith('.png'):
+        return 'png'
     raise ValueError(f'Unsupported file type: {path}')
 
 
@@ -662,7 +816,7 @@ def _file_result(file_report):
 def _report_counts(file_reports):
     """Count each file once by its highest achieved equality level."""
     counts = {kind: {'total': 0, 'byte': 0, 'numerical': 0, 'structural': 0, 'failed': 0}
-                    for kind in ('npz', 'csv', 'json')}
+                    for kind in ('npz', 'csv', 'json', 'png')}
     for report in file_reports:
         try:
             kind = _file_kind(Path(report['file']))
@@ -687,6 +841,8 @@ def _report_counts(file_reports):
 def _print_quick(report, ref_path, target_path, ref_files=None, target_files=None, saved_path=None):
 
     def _is_supported(path):
+        if Path(path).suffix.lower() == '.png' and not report.get('include_png', False):
+            return False
         try:
             _file_kind(path)
         except ValueError:
@@ -727,14 +883,17 @@ def _print_quick(report, ref_path, target_path, ref_files=None, target_files=Non
                             ('Ignored', len(ref_ignored), len(target_ignored),
                             len(ref_ignored - target_ignored),
                             len(target_ignored - ref_ignored))])
-        print(f"\nCompared pairs: {total_compared}  (npz: {counts['npz']['total']} |"
-              f" csv: {counts['csv']['total']} | json: {counts['json']['total']})\n")
+        compared_types = (f"npz: {counts['npz']['total']} | csv: {counts['csv']['total']} | "
+                          f"json: {counts['json']['total']}")
+        if report.get('include_png', False):
+            compared_types += f" | png: {counts['png']['total']}"
+        print(f'\nCompared pairs: {total_compared}  ({compared_types})\n')
         for warning in report.get('warnings', []):
             cli_warning(f"Duplicated files for {warning['file_base']!r}: "
                         f"{', '.join(warning['files'])}", 'y')
         result_rows = [(kind, counts[kind]['total'], counts[kind]['byte'], counts[kind]['numerical'],
                         counts[kind]['structural'], counts[kind]['failed'])
-                                for kind in ('npz', 'csv', 'json') if counts[kind]['total']]
+                                for kind in ('npz', 'csv', 'json', 'png') if counts[kind]['total']]
         result_rows.append(('Total', total_compared,
                             sum(row['byte'] for row in counts.values()),
                             sum(row['numerical'] for row in counts.values()),
@@ -885,6 +1044,7 @@ def main(argv=None):
         parser.error(str(error))
 #* endregion
 
-#939(,11,)->888()
+#939(,11,)->888();  909(); 1010(); 1050(,1,)
+
 if __name__ == '__main__':
     main()
