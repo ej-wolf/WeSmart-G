@@ -2,7 +2,6 @@ import shutil, re, zipfile, fnmatch
 import numpy as np, torch, json
 from pathlib import Path
 
-
 from colorama import Fore, Style
 # B, U, R = '\033[1m', '\033[4m', '\033[0m'
 # RED, GREEN, BLUE = Fore.RED, Fore.GREEN, Fore.BLUE
@@ -21,6 +20,10 @@ def print_color(msg:str, clr=Fore.RED):
     elif clr in ['dark_orange', 'do']           :  clr = rgb(210, 100, 30)
 
     print( f"{clr}{msg}{Style.RESET_ALL}")
+
+
+def cli_warning(msg, clr='r'):
+    print_color(f"[WARN] {msg}", clr)
 
 
 #* region *** Collection casting ***** #
@@ -80,8 +83,45 @@ def _fmt(value, **kwargs):
 #* region *** General Files/ Paths sys Utils ***************************************#
 # -----------------------------------------------------------------------------
 
-def get_unique_name(file_name:str|Path, n:int=3) -> Path:
+def assert_path(path, kind='path'):
+    """ Return a Path after validating its existence and optional kind."""
+    path = Path(path)
+    # if kind not in {'any', 'file', 'dir'}:    raise ValueError(f"Unsupported path kind: {kind!r}")
+    if not path.exists():
+        raise ValueError(f'{path} does not exist')
+    if   kind == 'file' and not path.is_file():
+        raise ValueError(f'Not a file: {path}')
+    elif kind == 'dir' and not path.is_dir():
+        raise ValueError(f'Not a dir: {path}')
+    return path
+
+def list_file_list(list_file:str|Path, root_path:str|Path|None=None, absolut:bool=False)->list[Path]:
+    """ Read paths from a line-based list file.
+    list file Entries are resolved against root_path or CWD, missing paths are skipped.
+    If absolut=True, entries are returned as is without resolution.
+    """
+    list_path = Path(list_file)
+    root = Path.cwd() if root_path is None else Path(root_path)
+    paths = []
+    for line in list_path.read_text(encoding='utf-8').splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith('#'):
+            continue
+        path = Path(entry)
+        if absolut:
+            paths.append(path)
+            continue
+        if not path.is_absolute():
+            path = root / path
+        if path.exists():
+            paths.append(path)
+        else:
+            print(f'Skipping missing path: {path}')
+    return paths
+
+def get_unique_name(file_name:str|Path, n:int=3, exists=None) -> Path:
     """ Return a unique file name.
+    exists may override the filesystem check for logical or virtual paths.
     Rules:  If file does not exist → return as is.
     If exists:  my_file.txt      -> my_file_001.txt  (padding = n)
                 my_file_01.txt   -> my_file_02.txt   (padding preserved = 2)
@@ -89,7 +129,8 @@ def get_unique_name(file_name:str|Path, n:int=3) -> Path:
     """
 
     file_path = Path(file_name)
-    if not file_path.exists():
+    exists = exists or Path.exists
+    if not exists(file_path):
         return file_path
 
     parent, stem, suffix = file_path.parent, file_path.stem, file_path.suffix
@@ -109,7 +150,7 @@ def get_unique_name(file_name:str|Path, n:int=3) -> Path:
     while True:
         new_name = f"{base}_{counter:0{padding}d}{suffix}"
         new_path = parent / new_name
-        if not new_path.exists():
+        if not exists(new_path):
             return new_path
         counter += 1
 

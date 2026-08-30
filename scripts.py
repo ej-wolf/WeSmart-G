@@ -9,24 +9,30 @@
     - run paired stream-JSON conversions with `run_stream_json_dual(...)`
 """
 
-import copy, json, pickle, glob
-import re
-import time
+import json, pickle, glob, re, time
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import numpy as np
 import torch
 #* Imports from local project
+from common.my_local_utils import as_collection, cli_warning, get_unique_name, list_file_list, print_color
+from cache_builder import (build_cache, build_cache_batch, build_cache_pair,
+                           build_caches, draw_ttp, resolve_lists)
 from precompute_clips import (build_cache_from_json, extract_stream_features, merge_cache_npz, get_split_pair,
-                              WINDOW_SEC, STRIDE_SEC, RANDOM_SEED, split_json_ds, MOTION_FPS_REF)
+                              WINDOW_SEC, STRIDE_SEC)
 from tms_trainer import run_training, run_testing
 from torch_clip_model import run_stream_testing
 from evaluation_core import analyze_clip_test, analyze_video_test, support_pair, DEFAULT_EVAL_THRESHOLD
-from stream_analysis import analyze_stream_test
-from common.my_local_utils import as_collection, get_unique_name, print_color
-from json_utils import list_json_sources, load_json_raw
-from motion_feature_schema import load_cache_contract_compact
-from project_utils import get_exporting_name, resolve_best_pt_model, strip_split_suffix, strip_timestamp_prefix
+from analysis_api import evaluate_raw_test, print_eval_group
+from json_stream_utils import load_stream_inputs
+from json_utils import (STREAM_FILE_TYPES, list_json_sources, load_json_raw, resolve_json_files,
+                        resolve_json_source)
+from motion_feature_schema import load_cache_contract_compact, resolve_stream_schema
+from project_utils import (get_exporting_name, resolve_best_pt_model, strip_split_suffix,
+                           strip_timestamp_prefix)
+from stream_utils import filter_yolo, resample_fps
+
 
 #* general configuration
 RWF_DIR  = Path("data/json_files/RWF-2000/ds")
@@ -40,219 +46,8 @@ DATASETS = [('RWF', RWF_DIR), ('RLVS', RLVS_DIR)]
 JOINT_DS =  'J-RWL'
 RESULT_NAME = 'all_results'
 
-#*** region cache building ***
 
-def build_cache(json_dir, cache_dir=None, *, pool_mode='max', window=WINDOW_SEC, stride=STRIDE_SEC,
-                cache_tag=None, **kwargs):
-    """ Build train/test caches for one JSON dir and one cache configuration."""
-
-    def _json_paths_from_list(json_dir: Path, list_file: Path) -> list[Path]:
-        with list_file.open('r', encoding='utf-8') as handle:
-            names = [ln.strip() for ln in handle if ln.strip()]
-        return [json_dir/name for name in names]
-
-    def _dir_tag(j_dir: Path)->str:
-        return f"{j_dir.parent.name}-{j_dir.name}"
-
-    def _pool_tag(pool_name: str) -> str:
-        return {'mean_max': 'mm', 'mean_std_max': 'msm'}.get(pool_name, pool_name)
-
-    def _time_tag(win:float, strd:float) -> str:
-        return f"{str(win).replace('.', '')}-{str(strd).replace('.', '')}"
-
-    def _stream_src(j_dir: Path) -> str:
-        return f"{j_dir.parent.name}_{j_dir.name}"
-
-    def _write_log(row: dict):
-        columns = [('time-stamp',20,'<'), ('status',8,'<'), ('source',12,'<'),('count',8,'>'),
-                   ('set',7,'<'), ('split', 10, '>'),  ('fps ref', 8, '>'), ('pool',8,'<'),
-                   ('win-stride', 14,'<'), ('t', 8, '>'), ('cache name', 0, '<')]
-
-        def fmt_line(values: dict) -> str:
-            parts = []
-            for key, width, align in columns:
-                txt = str(values[key])
-                parts.append(f"{txt:{align}{width}}" if width else txt)
-            return '  '.join(parts)
-
-        try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            need_header = not log_path.is_file() or log_path.stat().st_size == 0
-            with log_path.open('a', encoding='utf-8') as f:
-                if need_header:
-                    f.write(fmt_line({key: key for key, _, _ in columns}) + '\n')
-                f.write(fmt_line(row) + '\n')
-        except Exception as exc:
-            print(f"[WARN] Failed to write cache build log {log_path}: {type(exc).__name__}: {exc}")
-
-    def _build_one_cache(json_paths: list[Path], out_path: Path):
-        control_keys = {'cache_dir', 'split_ratio', 'test_ratio', 'random_seed', 'log_path'}
-        build_kwargs = {key: val for key, val in kwargs.items() if key not in control_keys}
-        build_kwargs.update({'window': window, 'stride': stride, 'pool_mode': pool_mode})
-        build_cache_from_json(json_paths, out_path, **build_kwargs)
-
-    json_dir = Path(json_dir)
-    if not json_dir.is_dir():
-        raise NotADirectoryError(json_dir)
-
-    out_dir = Path(cache_dir or kwargs.get('cache_dir', MAIN_CACHE_DIR/'new_format'))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    log_path = Path(kwargs.get('log_path', out_dir/'caching_log.txt'))
-    split_seed = kwargs.get('random_seed', RANDOM_SEED)
-    fps_ref = kwargs.get('motion_fps_ref', MOTION_FPS_REF)
-
-    train_txt = json_dir/'train_videos.txt'
-    test_txt = json_dir/'test_videos.txt'
-    has_split = train_txt.is_file() and test_txt.is_file() and 'split_ratio' not in kwargs
-    all_jsons = list_json_sources(json_dir)
-    if not all_jsons:
-        print(f" No JSON sources found in {json_dir}")
-        return []
-
-    if has_split:
-        train_jsons = _json_paths_from_list(json_dir, train_txt)
-        test_jsons = _json_paths_from_list(json_dir, test_txt)
-        split_jobs = [('train', train_jsons), ('test', test_jsons)]
-    else:
-        split_ratio = kwargs.get('split_ratio', kwargs.get('test_ratio', 0.0))
-        if split_ratio:
-            splits = split_json_ds(json_dir, test_ratio=split_ratio, random_seed=kwargs.get('random_seed', RANDOM_SEED))
-            train_jsons, test_jsons = splits['train'], splits['test']
-        else:
-            train_jsons, test_jsons = all_jsons, []
-        split_jobs = [('train', train_jsons)]
-        if test_jsons:
-            split_jobs.append(('test', test_jsons))
-
-    if cache_tag is None:
-        cache_tag = f"{_dir_tag(json_dir)}_P-{_pool_tag(str(pool_mode))}_W{_time_tag(window, stride)}"
-
-    results = []
-    split_total = len(train_jsons) + len(test_jsons)
-    for split_name, json_paths in split_jobs:
-        if split_name == 'test' and not has_split and not test_jsons:
-            continue
-        out_path = out_dir/f"{cache_tag}_{split_name}.npz"
-        t0 = time.time()
-        try:
-            print(f"building cache: {out_path.name}  ")
-            _build_one_cache(json_paths, out_path)
-            ok = out_path.is_file()
-            t = time.time() - t0
-        except Exception as exc:
-            ok = False
-            t = time.time() - t0
-            print(f"[FAIL] {out_path}: {type(exc).__name__}: {exc}")
-        else:
-            print(f"OK | t = {t:.2f}  |  {out_path.name} " if ok else f"FAILED {out_path.name}")
-
-        split_part = (len(json_paths)/split_total) if split_total else 0.0
-        _write_log({'time-stamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'status': 'OK' if ok else 'FAIL',
-                    'stream_src': _stream_src(json_dir),
-                    'n_jsons': len(json_paths),
-                    'set': split_name,
-                    'split': f"{split_part:.3f}/{split_seed}",
-                    'fps_ref': fps_ref,
-                    'pool': pool_mode,
-                    'window-stride': f"{window:g}-{stride:g}",
-                    't_wrk': f"{t:.2f}",
-                    'cache_name': out_path.name})
-        results.append({'json_dir': json_dir, 'pool': pool_mode, 'window': window, 'stride': stride,
-                        'split': split_name, 'cache': out_path, 'ok': ok, 't_wrk': t})
-    return results
-
-
-def build_cache_batch(dir_ls, pooling, t_slc, kwargs=None):
-    """Build a cache grid for one or more JSON dirs, pool modes, and time slices."""
-    kwargs = dict(kwargs or {})
-    out_dir = Path(kwargs.get('cache_dir', MAIN_CACHE_DIR/'new_format'))
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    results = []
-    for json_dir in as_collection(dir_ls):
-        json_dir = Path(json_dir)
-        if not json_dir.is_dir():
-            raise NotADirectoryError(json_dir)
-        cache_kwargs = {key: val for key, val in kwargs.items() if key != 'cache_dir'}
-        for pool_name in as_collection(pooling):
-            pool_name = str(pool_name)
-            for slc in as_collection(t_slc):
-                if isinstance(slc, dict):
-                    win, strd  = slc['window'], slc['stride']
-                elif isinstance(slc, (tuple, list)) and len(slc) >= 2:
-                    win, strd =  slc[0], slc[1]
-                elif isinstance(slc, str):
-                    parts = [p.strip() for p in slc.split(':') if p.strip()]
-                    if len(parts) != 2:
-                        raise ValueError(f"Bad time-slice spec: {slc}")
-                    win, strd = float(parts[0]), float(parts[1])
-                else:
-                    raise TypeError(f"Unsupported time-slice spec: {slc}")
-
-                results.extend(build_cache(json_dir, out_dir, pool_mode=pool_name,
-                                           window=win, stride=strd, **cache_kwargs))
-    return results
-
-
-def build_caches(dir_ls, pooling, t_slc, kwargs=None):
-    """ Compatibility wrapper. Prefer build_cache_batch(...)."""
-    return build_cache_batch(dir_ls, pooling, t_slc, kwargs)
-
-
-def merge_caches(cache_path, output_path=None):
-    """Merge same-tag train/test caches in one directory into Joint_* outputs."""
-    cache_path = Path(cache_path)
-    if not cache_path.is_dir():
-        raise NotADirectoryError(cache_path)
-
-    out_dir = Path(output_path) if output_path is not None else cache_path
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    def _split_tag(stem: str) -> tuple[str, str]|None:
-        if stem.startswith("Joint_"):
-            return None
-        if stem.endswith("_train"):
-            set_t = "train"
-        elif stem.endswith("_test"):
-            set_t = "test"
-        else:
-            return None
-
-        base = stem[:-len(f"_{set_t}")]
-        if '_' not in base:
-            return None
-        return base.split("_", 1)[1], set_t
-
-    groups: dict[str, dict[str, list[Path]]] = {}
-    for path in sorted(cache_path.glob("*.npz")):
-        tag_info = _split_tag(path.stem)
-        if tag_info is None:
-            continue
-        tag, split = tag_info
-        groups.setdefault(tag, {}).setdefault(split, []).append(path)
-
-    merged = []
-    for tag, split_map in sorted(groups.items()):
-        for split in ("train", "test"):
-            members = split_map.get(split, [])
-            if not members:
-                print(f"[WARN] Missing {split} caches for tag {tag}")
-                continue
-
-            out_name = get_unique_name(out_dir / f"Joint_{tag}_{split}.npz")
-            try:
-                merge_cache_npz(members, out_name)
-                print(f"[OK]   {out_name}")
-                merged.append(out_name)
-            except Exception as exc:
-                print(f"[FAIL] {out_name}: {type(exc).__name__}: {exc}")
-
-    return merged
-
-#* endregion *#
-
-def resolve_npz_inputs(inputs, base_dir: Path | None = None) -> list[Path]:
+def resolve_npz_inputs(inputs, base_dir:Path|None = None) -> list[Path]:
     """ Resolve files, dirs, or masks into one ordered unique NPZ list."""
     resolved = []
     seen = set()
@@ -299,38 +94,6 @@ def infer_eval_threshold(run_dir: Path, default=DEFAULT_EVAL_THRESHOLD) -> float
         except Exception:
             continue
     return float(default)
-
-
-def evaluate_raw_test(raw_path, mode, out_dir, threshold=DEFAULT_EVAL_THRESHOLD, **kwargs):
-    """Evaluate one raw test NPZ as clip, video, or stream output."""
-
-    raw_path, out_dir  = Path(raw_path), Path(out_dir)
-
-    with np.load(raw_path, allow_pickle=True) as data:
-        model_path = data['model_path'].item() if isinstance(data['model_path'], np.ndarray) else data['model_path']
-        test_cache = data['test_cache'].item() if isinstance(data['test_cache'], np.ndarray) else data['test_cache']
-
-    output_name = get_exporting_name(model_path, test_cache, 'summary', unit=mode)
-    common = {'out_path': out_dir,
-              'threshold': threshold,
-              'threshold_dir': Path(f"th-{int(round(threshold * 100.0))}"),
-              'overwrite': True,
-              'show_roc': kwargs.get('show_roc', False),
-              'roc_csv': kwargs.get('roc_csv', True),
-              'print_policy': kwargs.get('print_policy', 'summary'),
-              'print': kwargs.get('print_report', False),}
-
-    if   mode == 'stream':
-        return analyze_stream_test(raw_path, output_name=output_name,
-                                   details_name=f"{get_exporting_name(model_path, test_cache, 'events')}.json",
-                                   events_json= kwargs.get('events_json', True),
-                                   plotting= kwargs.get('plotting', 'save'), **common)
-    elif mode == 'video':
-        return analyze_video_test(raw_path, output_name=output_name, **common)
-    elif mode == 'clip':
-        return analyze_clip_test(raw_path, output_name=output_name, **common)
-    else:
-        raise ValueError(f'Unrecognized mode: {mode}')
 
 
 def sum_all_results(res_dir: str | Path, **kwargs):  # 107 -250
@@ -461,6 +224,8 @@ def sum_all_results(res_dir: str | Path, **kwargs):  # 107 -250
         """Convert one summary json file into one flat table row."""
         with summary_path.open("r") as fh:
             summary = json.load(fh)
+        if 'streams' in summary and 'testing_set' not in summary:
+            return {}
 
         # Summary files come from clip/video/stream paths, so the table normalizes them
         # onto one shared row schema before sorting and printing.
@@ -519,7 +284,7 @@ def sum_all_results(res_dir: str | Path, **kwargs):  # 107 -250
     if not summary_paths:
         raise FileNotFoundError(f"No summary/report JSON files found in {res_dir}")
 
-    table = [_row_from_summary(p) for p in summary_paths]
+    table = [row for row in (_row_from_summary(p) for p in summary_paths) if row]
     _sort_table(table)
     table = _drop_na_columns(table)
 
@@ -641,97 +406,115 @@ def train_models(cache_dir, main_op_dir, ds_tests=None, stm_tests=None, **kwargs
     return built_runs
 
 def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
-    """ Run tests for existing trained models without retraining them.
+    """ Run tests for existing trained models without retraining them. #417-362-270
     :param models: single or list of model dir/ checkpoint path
     :param ds_tests: NPZ file, directory, mask, or list for dataset evaluations
     :param stm_tests: Stream JSON/ZIP path, directory, stream dict, or homogeneous list
     :param kwargs['stream_schema']: optional nested or flat feature/temporal contract
     :param kwargs['threshold']: one threshold or a list/tuple/set of values between 0 and 1
+    :param kwargs['resample_fps']: optional lower FPS used to resample streams before testing
+    :param kwargs['fps_mode']: `standard` keeps streams that cannot be resampled;
+                              `force`/`require` skips them
+    :param kwargs['yolo_th']: optional higher YOLO confidence threshold applied before testing
     :param kwargs['summary']: if summary==True aggregates summaries with sum_all_results(...)
                               summary=<path> stores the aggregate summary
     """
 
+    def config_value(value):
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): config_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [config_value(item) for item in value]
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    rerun_kwargs = {key: value for key, value in kwargs.items() if key != 'out_dir'}
+
     npz_dir = kwargs.pop('npz_dir', None)
     out_dir = kwargs.pop('out_dir', None)
     evaluate = kwargs.pop('evaluate', True)
+    print_reports = kwargs.pop('print_reports', None)
+    print_report_old = kwargs.pop('print_report', None)
     infer_threshold = kwargs.pop('infer_threshold', False)
     thresholds = kwargs.pop('threshold', None)
     summary = kwargs.pop('summary', False)
-    test_pair = kwargs.pop('test_pair', False)
+    test_pair = kwargs.pop('test_pair', True)
     ds_eval = kwargs.pop('ds_eval_mode', 'clip')
     stream_schema = kwargs.pop('stream_schema', None)
+    fps_rsmp = kwargs.pop('resample_fps', None)
+    fps_mode = kwargs.pop('fps_mode', 'standard')
+    yolo_th = kwargs.pop('yolo_th', None)
+
     npz_dir = Path(npz_dir) if npz_dir is not None else None
+    if yolo_th is not None:
+        yolo_th = float(yolo_th)
+        if not 0 < yolo_th <= 1:
+            raise ValueError('yolo_th must be greater than 0 and no greater than 1')
+    if fps_rsmp is not None:
+        fps_mode = str(fps_mode).strip().lower()
+        if fps_mode == 'require':
+            fps_mode = 'force'
+        if fps_mode not in {'standard', 'force'}:
+            raise ValueError("fps_mode must be 'standard', 'force', or 'require'")
+    if print_reports is None:
+        print_reports = 'eval' if print_report_old is not False else 'none'
+    print_reports = str(print_reports).strip().lower()
+    if print_reports == 'evaluation':
+        print_reports = 'eval'
+    if print_reports not in {'eval', 'stream', 'all', 'none'}:
+        raise ValueError("print_reports must be 'eval', 'evaluation', 'stream', 'all', or 'none'")
+    print_eval_report = print_reports in {'eval', 'all'}
+    print_stream_report = print_reports in {'stream', 'all'}
 
-    feature_fields = {'extractor', 'extractor_version', 'feature_dim', 'pure_motion', 'legacy',
-                      'temp_smooth', 'temp_kernel', 'pool_mode', 'top_k_ratio', 'top_k_min',
-                      'motion_fps_ref', 'motion_fps_min', 'motion_fps_max'}
-    temporal_fields = {'target_window', 'target_stride'}
-
-    def _resolve_stream_schema(source:dict) -> tuple[dict, dict]:
-        values = {key: [] for key in feature_fields | temporal_fields}
-
-        def collect(node):
-            if isinstance(node, dict):
-                for key, value in node.items():
-                    if key in values:
-                        values[key].append(value)
-                    collect(value)
-            elif isinstance(node, (list, tuple)):
-                for value in node:
-                    collect(value)
-
-        collect(source)
-        missing = [key for key, found in values.items() if not found]
-        if missing:
-            raise ValueError(f"missing schema fields: {', '.join(sorted(missing))}")
-        for key, found in values.items():
-            if any(value != found[0] for value in found[1:]):
-                raise ValueError(f"conflicting values for schema field '{key}'")
-
-        ftr_scm = {key: values[key][0] for key in feature_fields}
-        temp_scm = {key: values[key][0] for key in temporal_fields}
-        if ftr_scm['extractor'] != 'extract_motion_features':
-            raise ValueError(f"unsupported feature extractor: {ftr_scm['extractor']}")
-        if temp_scm['target_window'] <= 0 or temp_scm['target_stride'] <= 0:
-            raise ValueError("target_window and target_stride must be positive")
-        return ftr_scm, temp_scm
-
-    def _load_stream_inputs(inputs) -> tuple[list[tuple[str, dict]], str]:
-        if inputs is None:
-            return [], 'streams'
-        items = list(inputs) if isinstance(inputs, (list, tuple, set)) else [inputs]
-        has_dict = [isinstance(item, dict) for item in items]
-        if any(has_dict) and not all(has_dict):
-            raise ValueError("stm_tests cannot mix stream dictionaries and paths")
-
-        if all(has_dict):
-            loaded = []
-            for index, data in enumerate(items):
-                name = Path(str(data.get('video') or f"stream_{index + 1}")).name
-                loaded.append((name, copy.deepcopy(data)))
-            return loaded, 'streams'
-
-        paths = []
-        for i in items:
-            path = Path(i)
-            if path.is_dir():
-                paths.extend(list_json_sources(path))
-            else:
-                paths.append(path)
-        loaded = []
-        for path in paths:
+    def _prepare_stream(name, data):
+        details = []
+        if fps_rsmp is not None:
+            frames_before = data.get('frames')
             try:
-                data = load_json_raw(path)
-                loaded.append((path.name, data))
+                data = resample_fps(data, fps_rsmp)
+            except ValueError as exc:
+                if fps_mode == 'force':
+                    raise
+                details.append(f"FPS resample {fps_rsmp:g} skipped ({exc}); using original")
+            else:
+                if data.get('frames') is not frames_before:
+                    sampling = data.get('sampling rate', data.get('sampling_rate', {}))
+                    original_sampling = data['original_sampling_rate']
+                    counts = data['frame_count']
+                    source_fps = original_sampling.get('measured', original_sampling.get('effective'))
+                    details.append(f"FPS {source_fps:.3f} -> {sampling['effective']:.3f} "
+                                   f"(resample {sampling['target']:g}); frames {counts['original']} -> {counts['current']}")
+
+        if yolo_th is not None:
+            data = filter_yolo(data, yolo_th)
+            detector = data.get('detector')
+            original_yolo = detector.get('threshold') if isinstance(detector, dict) else None
+            source_th = 'unknown' if original_yolo is None else f'{original_yolo:g}'
+            counts = data['detection_count']
+            filtered = [int(key.rsplit('_', 1)[1]) for key in counts if key.startswith('filtered_')]
+            filter_idx = max(filtered)
+            previous = counts.get(f'filtered_{filter_idx - 1:02d}', counts['original'])
+            details.append(f"YOLO {source_th} -> {data['detection_threshold']:g}; "
+                           f"detections removed {previous - counts['current']}")
+        if details:
+            print(f"Stream preparation: {name} | {' | '.join(details)}")
+        return data
+
+    def _prepare_streams(loaded, load_failures):
+        prepared, failures = [], list(load_failures)
+        for failure in failures:
+            print_color(f"[WARN] Skipping stream {failure['stream']}: {failure['error']}", 'o')
+        for name, data in loaded:
+            try:
+                prepared.append((name, _prepare_stream(name, data)))
             except Exception as exc:
-                print_color(f"[WARN] Skipping stream {path}: {type(exc).__name__}: {exc}", 'o')
-        if len(items) == 1 and Path(items[0]).is_dir():
-            src_name = Path(items[0]).name
-        elif len(paths) == 1:
-            src_name = paths[0].stem
-        else:
-            src_name = 'streams'
-        return loaded, src_name
+                error = f'{type(exc).__name__}: {exc}'
+                print_color(f'[WARN] Skipping stream {name}: {error}', 'o')
+                failures.append({'stream': name, 'reason': 'bad data', 'error': error})
+        return prepared, failures
 
     def _model_refs(refs) -> list[Path]:
         out = []
@@ -753,11 +536,18 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             run_kwargs['batch_size'] = kwargs['batch_size']
         res = run_testing(model_path, tst_npz, out_dir=out_dir, output_tag=raw_tag, **run_kwargs)
         if evaluate:
+            output_name = get_exporting_name(model_path, tst_npz, 'summary', unit=mode)
+            reports = []
             for th in thres:
-                evaluate_raw_test(res['path'], mode, out_dir, th, **kwargs)
+                eval_kwargs = dict(kwargs)
+                eval_kwargs['print_report'] = False
+                eval_kwargs['print_policy'] = 'none'
+                reports.append(evaluate_raw_test(res['path'], mode, out_dir, th, **eval_kwargs))
+            if print_eval_report:
+                print_eval_group(reports, output_name)
 
-    def _run_stream_test(model_path:Path, s098treams, source_name:str, schema, out_dir:Path,
-                         thres:list[float]):
+    def _run_stream_test(model_path:Path, stream_inputs, source_name:str, schema, out_dir:Path,
+                         thres:list[float], prep_failures):
         ftr_schema, tmp_schema = schema
         state = torch.load(model_path, map_location='cpu')
         input_dim = int(state['net.0.weight'].shape[1])
@@ -765,13 +555,18 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             raise ValueError(
                 f"feature_dim mismatch: schema={ftr_schema['feature_dim']}, model={input_dim}")
         feature_parts = []
-        for name, data in streams:
+        build_failures = list(prep_failures)
+        for name, data in stream_inputs:
             try:
                 part = extract_stream_features([(name, data)], ftr_schema, tmp_schema)
                 if len(part[1]):
                     feature_parts.append(part)
+                else:
+                    build_failures.append({'stream': name, 'reason': 'short duration', 'error': None})
             except Exception as exc:
-                print_color(f"[WARN] Skipping stream {name}: {type(exc).__name__}: {exc}", 'o')
+                build_failures.append({'stream': name,
+                                       'reason': 'other errors',
+                                       'error': f"{type(exc).__name__}: {exc}"})
         if not feature_parts:
             raise ValueError("no valid stream windows were produced")
         X = np.concatenate([part[0] for part in feature_parts])
@@ -786,8 +581,10 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
             run_kwargs['batch_size'] = kwargs['batch_size']
         res = run_stream_testing(model_path, X, y, meta, source_name, **run_kwargs)
         if evaluate:
-            for value in thres:
-                evaluate_raw_test(res['path'], 'stream', out_dir, value, **kwargs)
+            evaluate_raw_test(res['path'], 'stream', out_dir, thres,
+                              build_failures=build_failures,
+                              print_report=print_stream_report,
+                              **kwargs)
 
     def _find_test_pair() -> Path|None: #23
         config_path = run_dir/'config.json'
@@ -807,10 +604,11 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
         return pair
 
     try:
-        streams, source_name = _load_stream_inputs(stm_tests)
+        loaded_streams, source_name, load_failures = load_stream_inputs(stm_tests)
+        streams, stream_failures = _prepare_streams(loaded_streams, load_failures)
     except Exception as exc:
         print_color(f"[WARN] Stream inputs skipped: {type(exc).__name__}: {exc}", 'o')
-        streams, source_name = [], 'streams'
+        streams, source_name, stream_failures = [], 'streams', []
 
     tested = []
     for ref_mdl in _model_refs(models):
@@ -866,8 +664,9 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
                         raise FileNotFoundError(f"no stream_schema and no config file: {config_path}")
                     with config_path.open('r', encoding='utf-8') as f:
                         schema_source = json.load(f)
-                schema = _resolve_stream_schema(schema_source)
-                _run_stream_test( b_mdl, streams, source_name, schema, target_dir, thres)
+                schema = resolve_stream_schema(schema_source)
+                _run_stream_test(b_mdl, streams, source_name, schema, target_dir, thres,
+                                 stream_failures)
             except Exception as exc:
                 print_color(
                     f"[WARN] Stream test skipped for {run_dir.name}: {type(exc).__name__}: {exc}", 'o')
@@ -881,9 +680,104 @@ def test_models(models, ds_tests=None, stm_tests=None, **kwargs):
         except Exception as exc:
             print(f"[WARN] sum_all_results failed for {summary_dir}: {type(exc).__name__}: {exc}")
 
+    config_dir = Path(out_dir) if out_dir is not None else \
+                 (tested[0] if len(tested) == 1 else tested[0].parent if tested else None)
+    if config_dir is not None:
+        try:
+            config_dir.mkdir(parents=True, exist_ok=True)
+            with (config_dir/'test-config.json').open('w', encoding='utf-8') as f:
+                json.dump(config_value(rerun_kwargs), f, indent=2)
+        except Exception as exc:
+            print_color(f"[WARN] Failed saving test config in {config_dir}: "
+                        f"{type(exc).__name__}: {exc}", 'o')
+
     return tested
 
+
 #* region video stream to json
+
+def reconvert_streams(stream_dir, video_dir, output_dir, ann_path=None, grp_tag=None, **kwargs):
+    """Reconvert videos referenced by Stream JSONs while preserving their stream names."""
+    from video_to_stream_data import VIDEO_SUFFIXES, process_video
+
+    def index_files(root: Path, suffixes: set[str]) -> dict[str, list[Path]]:
+        """ Index relevant files recursively by stem."""
+        index = {}
+        for path in root.rglob('*'):
+            if path.is_file() and path.suffix.lower() in suffixes:
+                index.setdefault(path.stem, []).append(path)
+        return index
+
+    def resolve_video(vid_ref: Path) -> Path:
+        """ Resolve one video stem, using its original parent to disambiguate duplicates."""
+        candidates = video_index.get(vid_ref.stem, [])
+        if len(candidates) == 1:
+            return candidates[0]
+        parent_matches = [p for p in candidates if p.parent.name == vid_ref.parent.name]
+        if len(parent_matches) == 1:
+            return parent_matches[0]
+        if not candidates:
+            raise FileNotFoundError(f'video not found below {video_dir}: {vid_ref.name}')
+        raise ValueError(f'ambiguous video stem {vid_ref.stem}: {len(candidates)} matches')
+
+    def infer_tags(strm: dict):
+        """ Resolve a constant stream tag from its first and last frames."""
+        frames = strm.get('frames')
+        if not isinstance(frames, list) or not frames:
+            raise ValueError('group event cannot be resolved: stream has no frames')
+        first = frames[0].get('group_events')
+        last = frames[-1].get('group_events')
+        if first is None or last is None:
+            raise ValueError('group event cannot be resolved: first or last frame has no group_events')
+        if first != last:
+            raise ValueError(f'group event cannot be resolved: first={first}, last={last}')
+        return first
+
+    stream_dir, video_dir, output_dir = Path(stream_dir), Path(video_dir), Path(output_dir)
+    if not stream_dir.is_dir():
+        raise NotADirectoryError(stream_dir)
+    if not video_dir.is_dir():
+        raise NotADirectoryError(video_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Index once because duplicate-stem resolution is needed for every source stream.
+    video_index = index_files(video_dir, set(VIDEO_SUFFIXES))
+    sources = list_json_sources(stream_dir)
+    generated, skipped = [], []
+
+    # An empty matching annotation disables process_video's automatic sibling lookup.
+    with TemporaryDirectory(prefix='wesmart-no-annotations-') as empty_ann_dir:
+        empty_ann_dir = Path(empty_ann_dir)
+        for src_path in sources:
+            try:
+                stream = load_json_raw(src_path)
+                video_value = stream.get('video')
+                if not video_value:
+                    raise ValueError("missing 'video' field")
+                video_path = resolve_video(Path(video_value))
+
+                tags = grp_tag
+                process_ann = ann_path
+                if ann_path is None:
+                    if tags is None:
+                        tags = infer_tags(stream)
+                    process_ann = empty_ann_dir
+                    (empty_ann_dir/video_path.stem).with_suffix('.ann').touch(exist_ok=True)
+
+                before = set(list_json_sources(output_dir))
+                process_video(video_path, output_dir/f'{src_path.stem}.json',
+                              ann_path=process_ann, default_grp_tag=tags, **kwargs)
+                generated.extend(resolve_json_source(path)
+                                 for path in set(list_json_sources(output_dir)) - before)
+            except Exception as exc:
+                reason = f'{type(exc).__name__}: {exc}'
+                cli_warning(f'Skipping {src_path.name}: {reason}', 'o')
+                skipped.append({'stream': src_path.name, 'reason': reason})
+
+    print(f"Reconversion: {len(sources) - len(skipped)}/{len(sources)} streams scheduled; "
+          f"{len(generated)} outputs created")
+    return {'total': len(sources), 'scheduled': len(sources) - len(skipped),
+            'outputs': generated, 'skipped': skipped}
 
 def convert_vid_2_json():
     from video_to_stream_data import process_video
@@ -925,7 +819,7 @@ def convert_vid_2_json():
 
 def run_stream_json_dual(data_dir, output_dir,tag=None, **kwargs):
     """Run two stream-JSON conversions for one video dir: plain and `group 0`."""
-    from video_to_stream_data import process_video
+    # from video_to_stream_data import process_video
     data_dir, output_dir = Path(data_dir),  Path(output_dir)
 
     if not data_dir.is_dir():
@@ -939,8 +833,8 @@ def run_stream_json_dual(data_dir, output_dir,tag=None, **kwargs):
                      'yolo_threshold': kwargs.get('yolo_threshold', 0.5),
                      'model_path' : kwargs.get('model_path', None),
                      'zip_output' : False}
-    process_video(data_dir, output_path=dir_none, **common_kwargs)
-    process_video(data_dir, output_path=dir_zero, default_grp_tag=[0], **common_kwargs)
+    # process_video(data_dir, output_path=dir_none, **common_kwargs)
+    # process_video(data_dir, output_path=dir_zero, default_grp_tag=[0], **common_kwargs)
 
 #* endregion
 
@@ -1091,17 +985,11 @@ def build_window_study(): # 80 -> 65
 
 #* endregion *#
 
-#733(,20,4)-> 755(,23,6)
-#build_caches 966(1,26,7)/ log 985(1,33,4)- build-rf 968(1,31,4)-cleanup : 926
-#tst/trn-refactor 850(1,26,2)->
-#sumallres-rfc 947(5,22,4) #tst_mdl-rfc 1096(4,28,11)
-#tst_mdl-rfc 1099(4,31,13)
-
-
 #_______________________________________________________________________#
 # * local runners (not to be used outside this model)  ***
 
-CURRENT_CACHE_DIR = MAIN_CACHE_DIR/"Joint_sets"
+#CURRENT_CACHE_DIR = MAIN_CACHE_DIR/"Joint_sets"
+CURRENT_CACHE_DIR = MAIN_CACHE_DIR/"gen_03"
 
 #*  Cache Building ***#
 def cache_builder():
@@ -1111,60 +999,97 @@ def cache_builder():
                  Path("data/json_files/HMC/cam-streams"),
                  Path("data/json_files/HMC/events"),
                  Path("data/json_files/RLVS/5fps"),
-                 Path("data/json_files/RWF-2000/5fps"), ]
+                 Path("data/json_files/RWF-2000/5fps"),
+                 ]
     pooling = ['max', 'lse', 'top_k', 'mm']
     t_slc = [(3.6, 1.2),
+             (3.0, 1.0),
              (1.2, 0.6)]
-    build_cache_batch(json_dirs, pooling, t_slc, {'cache_dir': cache_dir})
+    yolo_th = 0.4
+    #build_cache_batch(json_dirs, pooling, t_slc, {'cache_dir': cache_dir})
     ubi_json_dir = Path("data/json_files/UBI/6fps")
     # ubi_pooling = pooling
     # ubi_t_slc = t_slc
     build_cache_batch(ubi_json_dir, pooling, t_slc,
-                      {'cache_dir': cache_dir, 'split_ratio': 0.2, 'random_seed': 42})
+                      output_dir=cache_dir,
+                      split_dir=cache_dir / 'UBI-6fps_ttp',
+                      root_dir=Path.cwd(),
+                      split_ratio=0.2, random_seed=42)
 
     # *  Test test_models
-def test_runner(test_streams, **kwargs):
 
-    strm_test_subset = ["/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/weSmart_demo.json",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/Russian_Road_Rage- Micky_Mouse_&_Sponge_Bob.json",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/F_60_1_2_0_0.json",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/F_121_1_0_0_0.zip",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_529_0_1_1_0.zip",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_390_0_0_1_0.zip",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_383_0_0_1_0.zip",
-                        "/mnt/local-data/Python/Projects/weSmart/data/json_files/testing/N_115_0_0_1_0.zip"]
 
-    strm_test_set  = [p for ptn in ("*.zip", "*.json") for p in test_streams.rglob(ptn)]
+# DEFAULT_MDL_DIR = "work_dirs/models"
+STREAM_TEST_DIR = "data/json_files/testing"
+DEFAULT_MDL_DIR = "work_dirs/models-lib"
+DEFAULT_RES_DIR = "work_dirs/testing-lib"
 
-    # mdl_dir  = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/w30-15_models/w30-15-tst")
-    # op_dir = Path("/mnt/local-data/Python/Projects/weSmart/work_dirs/json_models/sanity-testing/testing"
-    mdl_dir = Path(kwargs.get('mdl_dir', "work_dirs/models" ))   # Path("work_dirs/models")
-    out_dir = Path(kwargs.get('out_dir', "work_dirs/testing"))   # Path("work_dirs/testing")
-    tst_ds =  None  # Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/ds")
 
+STREAM_SUB_TST = ["data/json_files/testing/weSmart_demo.json",
+                  "data/json_files/testing/Russian_Road_Rage- Micky_Mouse_&_Sponge_Bob.json",
+                  "data/json_files/testing/F_60_1_2_0_0.json",
+                  "data/json_files/testing/F_121_1_0_0_0.zip",
+                  "data/json_files/testing/N_529_0_1_1_0.zip",
+                  "data/json_files/testing/N_390_0_0_1_0.zip",
+                  "data/json_files/testing/N_383_0_0_1_0.zip",
+                  "data/json_files/testing/N_115_0_0_1_0.zip"]
+
+def test_runner(tst_strm, **kwargs):
+
+    t0 = time.time()
+
+    mdl_dir = Path(kwargs.pop('mdl_dir', DEFAULT_MDL_DIR))
+    root_path = kwargs.pop('root_path', None)
+    kwargs.setdefault('out_dir', DEFAULT_RES_DIR)
+    out_dir = Path(kwargs['out_dir'])
+
+    tst_strm = Path(tst_strm)
+    if tst_strm.is_file() and tst_strm.suffix.lower() == '.txt':
+        # tst_strm = list_file_list(tst_strm, kwargs.get('root_path'))
+        tst_strm = resolve_json_files(tst_strm, root_path)
+    elif tst_strm.is_dir():
+        tst_strm = sorted({p for sfx in STREAM_FILE_TYPES for p in tst_strm.rglob(f'*{sfx}')})
+    else:
+        tst_strm = [tst_strm]
     # tst_strm = None #Path("/mnt/local-data/Python/Projects/weSmart/data/cache/tmp_test/strm")
-    tst_strm = strm_test_set # Path("data/json_files/testing")
-    print(f"\n--- Testing list: ({len(tst_strm)} streams in total) ---:")
-    for f in tst_strm: print(f.stem)
+    # tst_strm = strm_test_set # Path("data/json_files/testing")
+    # tl_chart = kwargs.pop('plot_charts', False)
 
-    threshold = [0.5, 0.6]
-    test_models(mdl_dir, out_dir=out_dir, summary= out_dir, threshold=threshold,
-                ds_tests= tst_ds, stm_tests=tst_strm, test_pair=True, plotting=None)
+    kwargs.setdefault('summary', out_dir)
+    kwargs.setdefault('test_pair', True)
+    kwargs.setdefault('plotting', False)
+    kwargs.setdefault('threshold', kwargs.pop('th', [0.5, 0.6]))
+    test_models(mdl_dir, stm_tests=tst_strm, **kwargs)
+
+    print(f"\n--- Streams for inference: ({len(tst_strm)} in total) ---")
+    for path in tst_strm:
+        print(f"\t{path.name}")
+    print(f"test_runner for {out_dir.name} completed; duration for {time.time() - t0:4f}\n{'*'*80}\n")
 
 # * endregion
+
+#1358(7,32,7)
+#1354(8,32,8)-> strm-util 1300(.)
+#1174(8,28,8) -> 1370(10,36,8)-> 1282(29,29,8)-
+#>
 
 if __name__ == "__main__":
     pass
 
     # cache_builder()
-    test_runner(Path("data/json_files/testing"))
+    test_runner(tst_strm=Path(STREAM_TEST_DIR)/"test_er-24_default.txt",
+                mdl_dir=Path(DEFAULT_MDL_DIR)/'G3',
+                out_dir=Path(DEFAULT_RES_DIR)/'gen-3/test-02',
+                plotting=True, th=[0.6, 0.7],
+                )
 
     #* region Train models
     cache_dir = Path("data/cache/Joint_sets")
+    cache_dir = Path("data/cache/gen_03/Joint_sets")
     work_dir = Path("work_dirs/models")
     sum_trn = True
 
-    # train_models(cache_dir, work_dir, run_tests=True, summary=sum_trn)
+    train_models(cache_dir, work_dir, run_tests=True, summary=sum_trn)
 
     #endregion
     # _______________________________________________________________________#

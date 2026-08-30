@@ -21,7 +21,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from common.my_local_utils import _load_log_lines, _make_unique_dir, _save_log, print_color, get_unique_name
-from stream_metric_tools import load_timeline_csv
+from analysis_utils import load_timeline_csv
 
 FRAME_H, FRAME_W = 1080, 1920
 CENTER_SCALE = 0.12

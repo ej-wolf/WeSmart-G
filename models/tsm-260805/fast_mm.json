@@ -1,0 +1,57 @@
+{
+  "train_cache": "data/cache/gen_03/Joint_sets/Joint_P-mm_W12-06_train.npz",
+  "valid_cache": "Runtime valid split: ratio0.85, seed42",
+  "train_caches": [
+    {
+      "feature_schema": {
+        "extractor": "extract_motion_features",
+        "extractor_version": 3.0,
+        "feature_dim": 50,
+        "legacy": false,
+        "motion_fps_max": 20.0,
+        "motion_fps_min": 1.0,
+        "motion_fps_ref": 5.0,
+        "pool_mode": "mean_max",
+        "pure_motion": false,
+        "temp_kernel": 3,
+        "temp_smooth": true,
+        "top_k_min": 2,
+        "top_k_ratio": 0.2
+      },
+      "path": "data/cache/gen_03/Joint_sets-2/Joint_P-mm_W12-06_train.npz",
+      "temporal_schema": {
+        "stride": 0.6,
+        "window": 1.2
+      }
+    }
+  ],
+  "feature_schema": {
+    "extractor": "extract_motion_features",
+    "extractor_version": 3.0,
+    "feature_dim": 50,
+    "legacy": false,
+    "motion_fps_max": 20.0,
+    "motion_fps_min": 1.0,
+    "motion_fps_ref": 5.0,
+    "pool_mode": "mean_max",
+    "pure_motion": false,
+    "temp_kernel": 3,
+    "temp_smooth": true,
+    "top_k_min": 2,
+    "top_k_ratio": 0.2
+  },
+  "temporal_profile": {
+    "target_window": 1.2,
+    "target_stride": 0.6,
+    "window_tolerance": 0.25,
+    "stride_tolerance": 0.25
+  },
+  "min_epochs": 30,
+  "max_epochs": 150,
+  "save_every": 10,
+  "patience": 30,
+  "min_delta": 0.002,
+  "batch_size": 256,
+  "lr": 0.001,
+  "hidden_dim": 64
+}

@@ -40,8 +40,8 @@ def load_raw_results_npz(npz_path: str|Path) -> dict:
     raw = {'model_path': _scalar_or_none(data['model_path']) if 'model_path' in data.files else None,
            'test_cache': _scalar_or_none(data['test_cache']) if 'test_cache' in data.files else None,
            'y_true': data['y_true'].astype(np.int64),
-           'y_prob': data['y_prob'].astype(np.float32) if 'y_prob' in data.files else None,
-           }
+           'y_prob': data['y_prob'].astype(np.float32) if 'y_prob' in data.files else None,}
+
     if 'y_pred' in data.files:
         raw['y_pred'] = data['y_pred'].astype(np.int64)
     if 'meta_video' in data.files:
@@ -151,17 +151,21 @@ def save_analyze_summary(summary, out_path:Path|str, overwrite=False, **kwargs):
         print(f"\n==== Evaluation for {model_tag} ===")
         print(f"== Test data: {test_tag}")
         print(f"== Test type: {analysis_type}")
+        threshold = summary.get('analysis_config', {}).get('threshold', None)
+        if threshold is not None:
+            print(f"== Threshold: {threshold}")
         if print_policy == 'save':
             print(f"== Output dir: {output_dir}")
         roc_plot = summary.get('roc_plot', None)
         roc_csv_rel = save_summary.get('roc_csv', None)
-        if roc_plot not in {None, 'N/A'}:
+        print_roc = summary.get('threshold_dir', None) is None
+        if print_roc and roc_plot not in {None, 'N/A'}:
             print_color(f"\tROC plot image : {_rel_to_output_dir(roc_plot)}", 'b')
-        if roc_csv_rel not in {None, 'N/A'}:
+        if print_roc and roc_csv_rel not in {None, 'N/A'}:
             print_color(f"\tROC table      : {_rel_to_output_dir(roc_csv_rel)}", 'b')
         # print("\tAnalysis complete")
         # print_color(f"  Summary json   : {_rel_to_output_dir(out_path)}", 'b')
-        print_color(f"\tSummary json   : {out_path.name}", 'b')
+        print_color(f"\tSummary json   : {_rel_to_output_dir(out_path)}", 'b')
         timeline_csvs_local = summary.get('timeline_csvs', None) or []
         for timeline_csv in timeline_csvs_local:
             print_color(f"\tTimeline CSV   : {_rel_to_output_dir(timeline_csv)}", 'b')
@@ -467,8 +471,7 @@ def clip_metrics_for_threshold(y_true, y_prob, threshold: float) -> dict:
     metrics = binary_metrics(y_true, y_pred)
     metrics.update({'threshold': float(threshold),
                     'f1': _f1_from_cm(metrics['confusion_matrix']),
-                    'balanced_acc': _balanced_accuracy(metrics),
-                    })
+                    'balanced_acc': _balanced_accuracy(metrics),})
     return metrics
 
 
@@ -660,9 +663,6 @@ def analyze_clip_predictions(test_results:Path|str|dict, **kwargs): #552
                               print_policy=kwargs.get('print_policy', PRINT_POLICY))
     else:
         print("[INFO] Analysis complete\n Summary file wasn't saved; (please provide out_path)")
-    if kwargs.get('print', True):
-        from evaluation_cli import print_test_report
-        print_test_report(summary)
     return summary
 
 
@@ -770,12 +770,11 @@ def analyze_video_predictions(test_res: Path | str | dict, **kwargs):
         print_color(f"[WARN] Inconsistent GT in video {vid}; excluded from video test", 'o')
 
     out_name = kwargs.get('output_name',
-                          get_exporting_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),
-                                                   'summary', unit='video'))
+                          get_exporting_name(raw_res.get('model_path', None), raw_res.get('test_cache', None),'summary', unit='video'))
     out_base = resolve_output_path(res_path, out_name, kwargs.get('out_path', None))
-    roc_base = (out_base.parent / get_exporting_name(raw_res.get('model_path', None),
-                                                     raw_res.get('test_cache', None), 'roc', unit='vid', short=True)
-                                                        if out_base is not None else None)
+    roc_base = (out_base.parent/get_exporting_name(raw_res.get('model_path', None),
+                                                   raw_res.get('test_cache', None), 'roc', unit='vid', short=True)
+                                                       if out_base is not None else None)
     thr_dir = (resolve_threshold_dir(out_base.parent, threshold,
                                      overwrite=bool(kwargs.get('overwrite', False)),
                                      threshold_dir=kwargs.get('threshold_dir', None))
@@ -788,19 +787,15 @@ def analyze_video_predictions(test_res: Path | str | dict, **kwargs):
     merge_roc_summary(summary, kwargs.get('roc_summary', {}))
 
     if thr_dir is not None:
-        save_analyze_summary(summary,
-                              thr_dir / out_base.with_suffix('.json').name,
+        save_analyze_summary(summary, thr_dir/out_base.with_suffix('.json').name,
                               overwrite=bool(kwargs.get('overwrite', False)),
                               print_policy=kwargs.get('print_policy', PRINT_POLICY))
     else:
         print("[WARN] Summary file wasn't saved; invalid or missing out_path")
-    if kwargs.get('print', True):
-        from evaluation_cli import print_test_report
-        print_test_report(summary)
     return summary
 
 
-def analyze_video_test(test_res: Path | str | dict, **kwargs):
+def analyze_video_test(test_res:Path|str|dict, **kwargs):
     """ Run clip/video score analysis and threshold-dependent clip/video prediction analysis."""
     _, res_path = resolve_input(test_res)
     tst_name = res_path.stem if res_path is not None else 'video_test'
@@ -870,6 +865,4 @@ def optimize_video_threshold(test_results: Path | str | dict, threshold_range=DE
 
 # endregion
 
-#547(1,3,) -> threshold dependency resolution -> 936
-# 936-> 865(3,1,1)-># 835(2,1, 1)-> 833-> 822-> pm 748(2,,)
-# meta info refactoring 789(2,,)   // 854 
+#871(2,1,)

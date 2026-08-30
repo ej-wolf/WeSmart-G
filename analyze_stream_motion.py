@@ -1,8 +1,10 @@
-"""     Extract order-free dt-normalized motion features from stream JSON frame sequences.
+"""     Extract order-free motion features from stream JSON frame sequences.
     extract_motion_features(...): main API func.
     converts per-frame BB/keypoints into a clip-level motion representation.
     The motion is represented by a 25-dim feature vector for each pair of consecutive frames.
-    The features vectors are normalized by frame timestamp deltas.
+    Motion scaling is selected by ``motion_mode``: raw frame deltas (standard),
+    explicit reference-FPS normalization (reference), or sampled-FPS velocity
+    approximation (velocity).
     Static overlap features are copied from frame t+1 and remain unscaled.
     Feature order:
     1.  d_mean_center_x      : change in mean bbox center (x,y); global  crowd motion
@@ -39,9 +41,9 @@ import numpy as np
 
 N_KEYPOINTS = 17
 DEFAULT_VERSION = 3.0
-MOTION_FPS_REF = 5.0
 MOTION_FPS_MIN = 1.0
 MOTION_FPS_MAX = 20.0
+MOTION_MODES = {'standard', 'reference', 'velocity'}
 DEFAULT_TOP_K_RATIO = 0.2
 DEFAULT_TOP_K_MIN = 2
 POOL_MODE_ALIASES = {'mm': 'mean_max', 'msm': 'mean_std_max'}
@@ -50,22 +52,46 @@ POOL_MODE_ALIASES = {'mm': 'mean_max', 'msm': 'mean_std_max'}
 # region API
 
 def extract_motion_features(frames, j_version: float = DEFAULT_VERSION, **kwargs):
-    """ Convert frames into a (T-1) x C dt-normalized motion sequence."""
+    """Convert frames into a motion sequence using the selected FPS mode."""
+    motion_mode = str(kwargs.get('motion_mode', 'standard')).strip().lower()
+    if motion_mode not in MOTION_MODES:
+        raise ValueError(f"Unknown motion mode: {motion_mode}")
+
+    motion_fps_ref = kwargs.get('motion_fps_ref')
+    motion_fps = kwargs.get('motion_fps')
+    if motion_mode == 'reference':
+        if motion_fps_ref is None:
+            raise ValueError('reference motion mode requires motion_fps_ref')
+        motion_fps_ref = float(motion_fps_ref)
+        if not np.isfinite(motion_fps_ref) or motion_fps_ref <= 0.0:
+            raise ValueError('motion_fps_ref must be positive in reference motion mode')
+    elif motion_mode == 'velocity':
+        if motion_fps is None:
+            raise ValueError('velocity motion mode requires stream FPS')
+        motion_fps = float(motion_fps)
+        if not np.isfinite(motion_fps) or motion_fps <= 0.0:
+            raise ValueError('stream FPS must be positive in velocity motion mode')
+
     def dt_scale(frm_0, frm_1):
+        if motion_mode == 'standard':
+            return 1.0
+        if motion_mode == 'velocity':
+            return motion_fps
         dt = frm_1.get('t', 0.0) - frm_0.get('t', 0.0)
         dt = min(max(dt, dt_min), dt_max)
-        return 1.0/dt if fps_ref_scale is None else fps_ref_scale/dt
+        return 1.0/(motion_fps_ref * dt)
 
     if len(frames) < 2:
         raise ValueError("At least 2 frames are required to extract motion features")
 
     frame_ftrs, raw_pts = [], []
     kp_conf = float(j_version) >= 2.0
-    fps_min = float(kwargs.get('motion_fps_min', MOTION_FPS_MIN))
-    fps_max = float(kwargs.get('motion_fps_max', MOTION_FPS_MAX))
-    dt_min, dt_max = 1.0/fps_max, 1.0/fps_min
-    fps_ref = kwargs.get('motion_fps_ref', MOTION_FPS_REF)
-    fps_ref_scale = None if fps_ref is None or float(fps_ref) == 1.0 else 1.0/float(fps_ref)
+    if motion_mode == 'reference':
+        fps_min = float(kwargs.get('motion_fps_min', MOTION_FPS_MIN))
+        fps_max = float(kwargs.get('motion_fps_max', MOTION_FPS_MAX))
+        if fps_min <= 0.0 or fps_max <= 0.0 or fps_min > fps_max:
+            raise ValueError('motion FPS limits must be positive and ordered')
+        dt_min, dt_max = 1.0/fps_max, 1.0/fps_min
 
     for frame in frames:
         bb_centers, bb_sizes, keypoints, bboxes = extract_frame_geometry(frame, kp_conf=kp_conf)

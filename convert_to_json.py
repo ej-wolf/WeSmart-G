@@ -16,6 +16,7 @@
       -c/--conf CONF              YOLO detection confidence threshold
       -g/--group-ann [GROUP_ANN ...]  Default annotation for group event
       -a/--ann-path ANN_PATH      Optional annotation file or annotation directory
+      -sk/--skip-existing         Skip videos with an existing output Stream JSON
 """
 import argparse
 from pathlib import Path
@@ -35,6 +36,7 @@ def main():
                          help="Optional annotation file or annotation directory")
     parser.add_argument( '-sw', '--show', action='store_true', help='Show video during processing')
     parser.add_argument( '-z', '--zip', action='store_true', help='save JSONs as zip file')
+    parser.add_argument( '-sk', '--skip-existing', action='store_true', help='Skip existing videos JSON (by same-stem)')
 
     args = parser.parse_args()
     if args.conf is not None:
@@ -45,7 +47,8 @@ def main():
                           ann_path=args.ann_path,
                           default_grp_tag=args.group_ann,
                           model_path=args.model,
-                          zip_output=args.zip,)
+                          zip_output=args.zip,
+                          skip_existing=args.skip_existing,)
                           # show=args.show)
     if args.sample_rate is not None:
         process_kwargs['sample_rate'] = args.sample_rate

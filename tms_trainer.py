@@ -3,7 +3,9 @@
     Train one clip-level MLP classifier from cached NPZ features.
     usage:
     >> tms_trainer.py train train_cache [-h] [-v VALID_CACHE] [-t TAG] [-wd WORK_DIR]
-                          [-lr LR] [-e EPOCHS] [-bs BATCH_SIZE] [-hd HIDDEN_DIM]
+                          [-c CONFIG_PATH] [-lr LR] [-e EPOCHS] [-bs BATCH_SIZE]
+                          [-hd HIDDEN_DIMS [HIDDEN_DIMS ...]] [--optimizer {Adam,AdamW}]
+                          [--weight-decay WEIGHT_DECAY] [--scheduler {none,plateau}]
                           [-sr SPLIT_RATIO] [-rs RANDOM_SEED]
     * positional arguments:
       train_cache                   : train cache npz path
@@ -15,7 +17,11 @@
       -lr                           : learning rate
       -e/ --epochs                  : number of epochs
       -bs/--batch-size              : batch size
-      -hd/--hidden-dim              : hidden layer size
+      -c/--config                   : model YAML configuration
+      -hd/--hidden-dims             : hidden layer sizes
+      --optimizer                   : optimizer name
+      --weight-decay                : optimizer weight decay
+      --scheduler                   : learning-rate scheduler
       -sr/--split-ratio             : runtime train/valid split ratio
       -rs/--random-seed             : runtime train/valid split seed
 
@@ -49,11 +55,10 @@
 
 from pathlib import Path
 import argparse
-from common.my_local_utils import print_color
+from common.my_local_utils import cli_warning
 from torch_clip_model import run_training, run_testing
-from evaluation_core import analyze_clip_test, analyze_video_test
-from stream_analysis import analyze_stream_test
-
+# from stream_analysis import analyze_stream_test
+from analysis_api import analyze_raw_results
 
 def _kwargs_from_args(args, names):
     """ Collect non-None argument values from argparse namespace."""
@@ -67,44 +72,51 @@ def _kwargs_from_args(args, names):
 
 def _run_train(args):
     """ Run training command."""
-    kw = _kwargs_from_args(args,
-                           ('work_dir', 'tag', 'lr', 'epochs', 'batch_size',
-                                   'hidden_dim', 'valid_ratio', 'valid_seed',))
+    kw = _kwargs_from_args(args, ('work_dir', 'tag', 'config_path', 'lr', 'epochs', 'batch_size',
+                                  'hidden_dims', 'optimizer', 'weight_decay',
+                                  'valid_ratio', 'valid_seed',))
+    scheduler = _kwargs_from_args(args, ('scheduler', 'scheduler_factor',
+                                         'scheduler_patience', 'scheduler_min_lr'))
+    if scheduler:
+        kw['scheduler'] = {'type': scheduler.get('scheduler'),
+                           'factor': scheduler.get('scheduler_factor'),
+                           'patience': scheduler.get('scheduler_patience'),
+                           'min_lr': scheduler.get('scheduler_min_lr')}
+        kw['scheduler'] = {key: value for key, value in kw['scheduler'].items()
+                           if value is not None}
     run_dir = run_training(args.train_cache, args.valid_cache, **kw)
     print(f"Training done. Run dir: {run_dir}")
 
 
 def _run_test(args):
     """ Run testing command."""
-    def _warn(text):
-        print_color(f"[WARN] {text}", 'r')
-
     new_eval_target = None
     if args.eval_stream:
         if args.eval_video:
-            _warn("--eval-video was skipped because --eval-stream takes precedence")
+            cli_warning("--eval-video was skipped because --eval-stream takes precedence")
         new_eval_target = 'stream'
     elif args.eval_video:
         new_eval_target = 'video'
     elif args.eval_clip:
         new_eval_target = 'clip'
 
+    #* ToDo: take care of this legacy issues
     legacy_eval_requested = False
     legacy_eval_target = None
     if args.evaluate or args.video_mode or args.stream_mode:
-        _warn("Old test-evaluation flags are deprecated; use --eval-clip / --eval-video / --eval-stream")
+        cli_warning("Old test-evaluation flags are deprecated; use --eval-clip / --eval-video / --eval-stream")
         if args.evaluate:
             legacy_eval_requested = True
             if args.stream_mode:
                 if args.video_mode:
-                    _warn("Deprecated --video-mode was skipped because --stream-mode takes precedence")
+                    cli_warning("Deprecated --video-mode was skipped because --stream-mode takes precedence")
                 legacy_eval_target = 'stream'
             elif args.video_mode:
                 legacy_eval_target = 'video'
             else:
                 legacy_eval_target = 'clip'
         else:
-            _warn("Deprecated mode flags without --evaluate are ignored")
+            cli_warning("Deprecated mode flags without --evaluate are ignored")
 
     eval_target = new_eval_target if new_eval_target is not None else legacy_eval_target
 
@@ -117,23 +129,19 @@ def _run_test(args):
 
     if args.pure_clips:
         if new_eval_target is not None or legacy_eval_requested:
-            _warn("--pure-clips disables immediate evaluation; eval flags were ignored")
+            cli_warning("--pure-clips disables immediate evaluation; eval flags were ignored")
         return
 
-    if eval_target is None:
-        return
-
-    eval_kw = {'print': args.report, 'show_roc': args.show_roc,
-               'roc_csv': args.roc_csv, 'events_json': args.events_json,
-               'threshold': args.threshold}
-
-    # TODO: Remove the legacy flag compatibility, once the new CLI is fully adopted.
-    if   eval_target == 'stream':
-        analyze_stream_test(res['path'], **eval_kw)
-    elif eval_target == 'video':
-        analyze_video_test(res['path'], **eval_kw)
+    eval_kw = {'threshold': args.threshold, 'print_results': args.report, }
+    if  eval_target in {'clip', 'video'}:
+        eval_kw.update({ 'show_roc': args.show_roc, 'roc_csv': args.roc_csv,})
+    elif eval_target == 'stream':
+        eval_kw['output_path']=  Path(args.out_dir or Path(res['path']).parent)/'stream_reports.json'
     else:
-        analyze_clip_test(res['path'], **eval_kw)
+        cli_warning(f"Unrecognized evalution mode: {eval_target}")
+        return
+
+    analyze_raw_results(res['path'], eval_target, **eval_kw)
 
 
 def main():
@@ -148,10 +156,24 @@ def main():
     train_p.add_argument('-v', '--valid-cache', type=Path, default=None, help='Optional valid cache npz path')
     train_p.add_argument('-t', '--tag', type=str, default=None, help='Run tag suffix')
     train_p.add_argument('-wd', '--work-dir', type=Path, default=None, help='Output run directory root')
+    train_p.add_argument('-c', '--config', dest='config_path', type=Path, default=None,
+                         help='Model YAML configuration')
     train_p.add_argument('-lr', type=float, default=None, help='Learning rate')
     train_p.add_argument('-e', '--epochs', type=int, default=None, help='Number of epochs')
     train_p.add_argument('-bs', '--batch-size', type=int, default=None, help='Batch size')
-    train_p.add_argument('-hd', '--hidden-dim', type=int, default=None, help='Hidden layer size')
+    train_p.add_argument('-hd', '--hidden-dims', type=int, nargs='+', default=None,
+                         help='Hidden layer sizes')
+    train_p.add_argument('--optimizer', choices=('Adam', 'AdamW'), default=None,
+                         help='Optimizer name')
+    train_p.add_argument('--weight-decay', type=float, default=None, help='Optimizer weight decay')
+    train_p.add_argument('--scheduler', choices=('none', 'plateau'), default=None,
+                         help='Learning-rate scheduler')
+    train_p.add_argument('--lr-factor', dest='scheduler_factor', type=float, default=None,
+                         help='Plateau scheduler reduction factor')
+    train_p.add_argument('--lr-patience', dest='scheduler_patience', type=int, default=None,
+                         help='Plateau scheduler patience')
+    train_p.add_argument('--min-lr', dest='scheduler_min_lr', type=float, default=None,
+                         help='Plateau scheduler minimum learning rate')
     train_p.add_argument('-sr', '--split-ratio', dest='valid_ratio', type=float, default=None, help='Runtime train/valid split ratio')
     train_p.add_argument('-rs', '--random-seed', dest='valid_seed', type=int, default=None, help='Runtime train/valid split seed')
     train_p.set_defaults(fn=_run_train)
@@ -167,7 +189,7 @@ def main():
     test_p.add_argument('-ev', '--eval-video', action='store_true', help='run video evaluation after saving raw predictions')
     test_p.add_argument('-es', '--eval-stream',action='store_true', help='run stream evaluation after saving raw predictions')
     test_p.add_argument('--pure-clips', action='store_true', help='save minimal clip-only raw NPZ (skip evaluation)')
-    test_p.add_argument('-td', '--threshold', type=float, default=None, help='Evaluation threshold')
+    test_p.add_argument('-th', '--threshold', type=float, default=None, help='Evaluation threshold')
     test_p.add_argument('-nj', '--no-events-json', dest='events_json', action='store_false', help='Do not save stream events JSON file')
     test_p.add_argument('-ns', '--no-show-roc', dest='show_roc', action='store_false', help='Do not display ROC figure')
     test_p.add_argument('--no-roc-csv', dest='roc_csv', action='store_false', help='Do not save ROC CSV file')
@@ -184,6 +206,7 @@ def main():
     args = parser.parse_args()
     args.fn(args)
 
+#190()
 
 if __name__ == '__main__':
     main()

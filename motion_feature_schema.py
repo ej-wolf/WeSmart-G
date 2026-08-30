@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 #local imports
 from analyze_stream_motion import (DEFAULT_TOP_K_MIN, DEFAULT_TOP_K_RATIO, DEFAULT_VERSION, MOTION_FPS_MAX,
-                                   MOTION_FPS_MIN, MOTION_FPS_REF, canonical_pool_mode,
+                                   MOTION_FPS_MIN, MOTION_MODES, canonical_pool_mode,
                                    _clip_pooling, _temporal_conv_1d, extract_motion_features)
 
 
@@ -58,6 +58,18 @@ def build_feature_schema(**kwargs) -> dict[str, Any]:
         motion_fps_min = MOTION_FPS_MIN
     if motion_fps_max is None:
         motion_fps_max = MOTION_FPS_MAX
+    motion_mode = str(kwargs.get('motion_mode', 'standard')).strip().lower()
+    if motion_mode not in MOTION_MODES:
+        raise ValueError(f"Unknown motion mode: {motion_mode}")
+    motion_fps_ref = kwargs.get('motion_fps_ref')
+    if motion_mode == 'reference':
+        if motion_fps_ref is None:
+            raise ValueError('reference motion mode requires motion_fps_ref')
+        motion_fps_ref = float(motion_fps_ref)
+        if not np.isfinite(motion_fps_ref) or motion_fps_ref <= 0.0:
+            raise ValueError('motion_fps_ref must be positive in reference motion mode')
+    else:
+        motion_fps_ref = None
     pool_mode = canonical_pool_mode(kwargs.get('pool_mode', DEFAULT_POOL_MODE))
     return {'extractor': DEFAULT_FEATURE_EXTRACTOR,
             'extractor_version': kwargs.get('j_version', DEFAULT_VERSION),
@@ -68,7 +80,8 @@ def build_feature_schema(**kwargs) -> dict[str, Any]:
             'pool_mode'  : pool_mode,
             'top_k_ratio': float(kwargs.get('top_k_ratio', DEFAULT_TOP_K_RATIO)),
             'top_k_min'  : int(kwargs.get('top_k_min', DEFAULT_TOP_K_MIN)),
-            'motion_fps_ref': kwargs.get('motion_fps_ref', MOTION_FPS_REF),
+            'motion_mode': motion_mode,
+            'motion_fps_ref': motion_fps_ref,
             'motion_fps_min': float(motion_fps_min),
             'motion_fps_max': float(motion_fps_max),
             'feature_dim': feature_dim_from_flags(pure_motion=pure_motion, legacy=legacy, pool_mode=pool_mode),
@@ -78,6 +91,45 @@ def build_feature_schema(**kwargs) -> dict[str, Any]:
 def build_temporal_schema(window: float, stride: float) -> dict[str, float]:
     """ Describe the cache window/stride used to create one temporal dataset."""
     return {'window': float(window), 'stride': float(stride)}
+
+
+def resolve_stream_schema(source: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Extract one consistent feature and temporal schema from nested model metadata."""
+    feature_fields = {'extractor', 'extractor_version', 'feature_dim', 'pure_motion', 'legacy',
+                      'temp_smooth', 'temp_kernel', 'pool_mode', 'top_k_ratio', 'top_k_min',
+                      'motion_mode', 'motion_fps_ref', 'motion_fps_min', 'motion_fps_max'}
+    temporal_fields = {'target_window', 'target_stride'}
+    values = {key: [] for key in feature_fields | temporal_fields}
+
+    def collect(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in values:
+                    values[key].append(value)
+                collect(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                collect(value)
+
+    collect(source)
+    # Older contracts predate motion_mode. Their explicit reference FPS means
+    # they used reference normalization; contracts without it are standard.
+    if not values['motion_mode']:
+        values['motion_mode'] = ['reference' if values['motion_fps_ref'] else 'standard']
+    missing = [key for key, found in values.items() if not found]
+    if missing:
+        raise ValueError(f"missing schema fields: {', '.join(sorted(missing))}")
+    for key, found in values.items():
+        if any(value != found[0] for value in found[1:]):
+            raise ValueError(f"conflicting values for schema field '{key}'")
+
+    feature_schema = {key: values[key][0] for key in feature_fields}
+    temporal_schema = {key: values[key][0] for key in temporal_fields}
+    if feature_schema['extractor'] != DEFAULT_FEATURE_EXTRACTOR:
+        raise ValueError(f"unsupported feature extractor: {feature_schema['extractor']}")
+    if temporal_schema['target_window'] <= 0 or temporal_schema['target_stride'] <= 0:
+        raise ValueError("target_window and target_stride must be positive")
+    return feature_schema, temporal_schema
 
 
 def get_clip_features_vec(frames: list[dict[str, Any]], **kwargs) -> np.ndarray:
@@ -92,9 +144,11 @@ def get_clip_features_vec(frames: list[dict[str, Any]], **kwargs) -> np.ndarray:
                                          j_version=float(feature_schema['extractor_version']),
                                          pure_motion=bool(feature_schema['pure_motion']),
                                          legacy=bool(feature_schema['legacy']),
+                                         motion_mode=feature_schema['motion_mode'],
                                          motion_fps_ref=feature_schema['motion_fps_ref'],
                                          motion_fps_min=float(feature_schema['motion_fps_min']),
-                                         motion_fps_max=float(feature_schema['motion_fps_max']), )
+                                         motion_fps_max=float(feature_schema['motion_fps_max']),
+                                         motion_fps=kwargs.get('motion_fps'), )
     if bool(feature_schema['temp_smooth']):
         motion_seq = _temporal_conv_1d(motion_seq, int(feature_schema['temp_kernel']))
     clip_feat = _clip_pooling(motion_seq, mode=str(feature_schema['pool_mode']),
@@ -164,6 +218,7 @@ def load_cache_contract_compact(npz_path:str|Path) -> tuple[dict[str, Any], bool
                       'temp_smooth': "N/A",'temp_kernel': "N/A", 'pool_mode': "N/A",
                       'top_k_ratio': "N/A", 'top_k_min': "N/A",
                       'pure_motion': "N/A", 'legacy': "N/A",
+                      'motion_mode': "N/A",
                       'motion_fps_ref': "N/A", 'motion_fps_min': "N/A", 'motion_fps_max': "N/A",
                       'feature_dim': int(feature_dim) if feature_dim is not None else "N/A",
                       }
