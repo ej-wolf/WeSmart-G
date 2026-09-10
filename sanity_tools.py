@@ -23,7 +23,7 @@
     REF_DIR/test-config.json when available.
 """
 
-import csv, json
+import csv, io, json, zipfile
 import numpy as np
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +42,7 @@ DEFAULT_RTOL = None
 DEFAULT_VARIANCE_K = 0.03
 DEFAULT_MAX_ISSUES = 50
 COMPARE_CHUNK_SIZE = 1024 * 1024
+BYTEWISE_PAYLOAD_TYPES = {'json', 'npz', 'csv', 'png'}
 DEFAULT_OP_DIR = Path('work_dirs/sanity')
 DEFAULT_JSON_IGNORE_PATHS = {'output_dir', 'raw_results_path'}
 JSON_REQUIRED_STRING_PATHS = {'detector.model'}
@@ -49,20 +50,27 @@ SUPPORTED_PATTERNS = tuple(f'*{sfx}' for sfx in STREAM_FILE_TYPES) + ('*.npz', '
 
 # region Public API
 def bytewise_equal(file_1, file_2, chunk_size=COMPARE_CHUNK_SIZE)-> bool:
-    """ Return whether two files are bytewise equal """
+    """Compare raw files or extracted payload bytes for recognized ZIP files."""
 
     file_1, file_2 = assert_path(file_1, 'file'), assert_path(file_2, 'file')
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
-    if file_1.stat().st_size != file_2.stat().st_size:
-        return False
-    with file_1.open('rb') as f_1, file_2.open('rb') as f_2:
+    stream_1, archive_1 = _open_byte_stream(file_1)
+    stream_2, archive_2 = _open_byte_stream(file_2)
+    try:
         while True:
-            chunk_1,chunk_2 = f_1.read(chunk_size), f_2.read(chunk_size)
+            chunk_1, chunk_2 = stream_1.read(chunk_size), stream_2.read(chunk_size)
             if chunk_1 != chunk_2:
                 return False
             if not chunk_1:
                 return True
+    finally:
+        stream_1.close()
+        stream_2.close()
+        if archive_1 is not None:
+            archive_1.close()
+        if archive_2 is not None:
+            archive_2.close()
 
 
 def compare_json(test, ref, **kwargs) -> dict[str, Any]:
@@ -256,7 +264,8 @@ def compare_npz(test, ref, **kwargs) -> dict[str, Any]:
                  'dtype_mismatches': [],
                  'value_mismatches': []}
 
-    with np.load(test, allow_pickle=True) as test_data, np.load(ref, allow_pickle=True) as ref_data:
+    with np.load(io.BytesIO(_payload_bytes(test)), allow_pickle=True) as test_data, \
+            np.load(io.BytesIO(_payload_bytes(ref)), allow_pickle=True) as ref_data:
         test_keys = set(test_data.files) - ignored
         ref_keys = set(ref_data.files) - ignored
         structure['extra_keys'] = sorted(test_keys - ref_keys)
@@ -303,11 +312,10 @@ def compare_npz(test, ref, **kwargs) -> dict[str, Any]:
 def compare_csv(test, ref, **kwargs) -> dict[str, Any]:
     """Compare two CSV files structurally and with tolerant numeric cells."""
     def load_rows(path):
-        with path.open('r', encoding='utf-8-sig', newline='') as f:
-            sample = f.read(4096)
-            f.seek(0)
-            delimiter = ';' if sample.count(';') > sample.count(',') else ','
-            return list(csv.reader(f, delimiter=delimiter))
+        text = _payload_bytes(path).decode('utf-8-sig')
+        sample = text[:4096]
+        delimiter = ';' if sample.count(';') > sample.count(',') else ','
+        return list(csv.reader(io.StringIO(text, newline=''), delimiter=delimiter))
 
     def as_number(value):
         try:
@@ -399,7 +407,8 @@ def compare_png(test, ref) -> dict[str, Any]:
     if bytewise_equal(test, ref):
         return _byte_equal_report('png', str(test), str(ref))
 
-    with Image.open(test) as tst_img, Image.open(ref) as ref_img:
+    with Image.open(io.BytesIO(_payload_bytes(test))) as tst_img, \
+            Image.open(io.BytesIO(_payload_bytes(ref))) as ref_img:
         tst_img = tst_img.convert('RGBA')
         ref_img = ref_img.convert('RGBA')
         if tst_img.size != ref_img.size:
@@ -485,14 +494,31 @@ def compare_file(test, ref, *, kind=None, **kwargs) -> dict[str, Any]:
 def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
     """ Compare supported files in two directories by relative path or logical name."""
     warnings_ls = []
+    duplicate_counts = {
+        'ref': {'all': 0, 'supported': 0, 'ignored': 0},
+        'target': {'all': 0, 'supported': 0, 'ignored': 0},
+        'ambiguous': 0,
+    }
 
-    def collect_files(base_dir):
+    def collect_files(base_dir, side):
         def is_excluded(pth):
             return any(pth.match(ptn) for ptn in exclude_patterns)
+
+        def is_supported(pth):
+            if pth.suffix.lower() == '.png' and not include_png:
+                return False
+            try:
+                _file_kind(pth)
+            except ValueError:
+                return False
+            return True
 
         def get_id(pth):
             f_id = pth.name if match_by_name else pth.relative_to(base_dir).as_posix()
             lower = f_id.lower()
+            for suffix in ('.npz', '.csv', '.png'):
+                if lower.endswith(suffix + '.zip'):
+                    return f_id[:-4]
             for suffix in STREAM_FILE_TYPES:
                 if lower.endswith(suffix):
                     return f_id[:-len(suffix)] + '.json'
@@ -508,25 +534,31 @@ def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
                 if file_path.suffix.lower() == '.png' and not include_png:
                     continue
                 file_id = get_id(file_path)
-                if file_id in files_by_id:
-                    first = files_by_id[file_id]
-                    if first is None:
-                        warning = next(itm for itm in warnings_ls if itm['file_base'] == file_id)
-                        warning['files'].append(str(file_path))
-                        continue
-                    if first == file_path:
-                        continue
-                    files_by_id[file_id] = None
-                    warning = next((itm for itm in warnings_ls if itm['file_base'] == file_id), None)
-                    if warning is not None:
-                        warning['files'].extend((str(first), str(file_path)))
-                        continue
-                    warning = {'type': 'duplicated_files', 'file_base': file_id,
-                               'files': [str(first), str(file_path)]}
-                    warnings_ls.append(warning)
-                    continue
-                files_by_id[file_id] = file_path
-        return {file_id: path for file_id, path in files_by_id.items() if path is not None}
+                files_by_id.setdefault(file_id, set()).add(file_path)
+
+        selected = {}
+        for file_id, file_paths in files_by_id.items():
+            file_paths = sorted(file_paths)
+            if len(file_paths) == 1:
+                selected[file_id] = file_paths[0]
+                continue
+
+            first = file_paths[0]
+            if all(bytewise_equal(first, duplicate) for duplicate in file_paths[1:]):
+                selected[file_id] = first
+                redundant = len(file_paths) - 1
+                category = 'supported' if is_supported(first) else 'ignored'
+                duplicate_counts[side]['all'] += redundant
+                duplicate_counts[side][category] += redundant
+                continue
+
+            duplicate_counts['ambiguous'] += 1
+            warnings_ls.append({
+                'type': 'duplicated_files',
+                'file_base': file_id,
+                'files': [path.relative_to(base_dir).as_posix() for path in file_paths],
+            })
+        return selected
 
     test_dir, ref_dir = assert_path(test_dir, 'dir'), assert_path(ref_dir, 'dir')
     # if not test_dir.is_dir()
@@ -546,7 +578,8 @@ def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
     if include_png and patterns is not None and not any(
             str(pattern).lower() == '*.png' for pattern in patterns):
         patterns.append('*.png')
-    tst_files, ref_files = collect_files(test_dir), collect_files(ref_dir)
+    tst_files = collect_files(test_dir, 'target')
+    ref_files = collect_files(ref_dir, 'ref')
     misses = sorted(set(ref_files) - set(tst_files))
     extra  = sorted(set(tst_files) - set(ref_files))
     file_reports, errors = [], []
@@ -574,6 +607,7 @@ def compare_dirs(test_dir, ref_dir, **kwargs) -> dict[str, Any]:
             'match_by_name': match_by_name,
             'include_png': include_png,
             'missing': misses, 'extra': extra,
+            'duplicates': duplicate_counts,
             'files': file_reports,
             'warnings': warnings_ls, 'errors': errors
             }
@@ -753,6 +787,10 @@ def _byte_equal_report(kind, test, ref):
 
 def _file_kind(path):
     name = Path(path).name.lower()
+    for suffix, kind in (('.npz.zip', 'npz'), ('.csv.zip', 'csv'),
+                         ('.png.zip', 'png')):
+        if name.endswith(suffix):
+            return kind
     if name.endswith(STREAM_FILE_TYPES):
         return 'json'
     if name.endswith('.npz'):
@@ -762,6 +800,36 @@ def _file_kind(path):
     if name.endswith('.png'):
         return 'png'
     raise ValueError(f'Unsupported file type: {path}')
+
+
+def _open_byte_stream(path):
+    """Open raw bytes or the sole payload member of a recognized ZIP file."""
+    try:
+        kind = _file_kind(path)
+    except ValueError:
+        kind = None
+    if not (Path(path).name.lower().endswith('.zip')
+            and kind in BYTEWISE_PAYLOAD_TYPES
+            and zipfile.is_zipfile(path)):
+        return path.open('rb'), None
+
+    archive = zipfile.ZipFile(path, 'r')
+    members = [info for info in archive.infolist() if not info.is_dir()]
+    if len(members) != 1:
+        archive.close()
+        return path.open('rb'), None
+    return archive.open(members[0], 'r'), archive
+
+
+def _payload_bytes(path):
+    """Read raw bytes or the sole payload member of a recognized ZIP file."""
+    stream, archive = _open_byte_stream(path)
+    try:
+        return stream.read()
+    finally:
+        stream.close()
+        if archive is not None:
+            archive.close()
 
 
 def _is_number(val):
@@ -865,32 +933,46 @@ def _print_quick(report, ref_path, target_path, ref_files=None, target_files=Non
     else:
         ref_all = {inventory_id(path, ref_path) for path in ref_files}
         trg_all = {inventory_id(path, target_path) for path in target_files}
-        ref_supported = {inventory_id(path, ref_path) for path in ref_files if _is_supported(path)}
-        target_supported = {inventory_id(path, target_path) for path in target_files if _is_supported(path)}
-        ref_ignored = ref_all - ref_supported
-        target_ignored = trg_all - target_supported
+        ref_support = {inventory_id(path, ref_path) for path in ref_files if _is_supported(path)}
+        trg_support = {inventory_id(path, target_path) for path in target_files if _is_supported(path)}
+        ref_ignored = ref_all - ref_support
+        trg_ignored = trg_all - trg_support
         counts = _report_counts(report['files'])
         total_compared = sum(row['total'] for row in counts.values())
 
         print(f'Compared: {ref_path}  vs  {target_path}\n')
         print('File inventory')
-        _print_table(['', 'Ref', 'Target', 'Missing', 'Extra'],
-                     [('All files', len(ref_all), len(trg_all),
-                            len(ref_all - trg_all), len(trg_all - ref_all)),
-                            ('Supported', len(ref_supported), len(target_supported),
-                            len(ref_supported - target_supported),
-                            len(target_supported - ref_supported)),
-                            ('Ignored', len(ref_ignored), len(target_ignored),
-                            len(ref_ignored - target_ignored),
-                            len(target_ignored - ref_ignored))])
+        duplicate_info = report.get('duplicates', {})
+        target_dups = duplicate_info.get('target', {})
+        has_target_dups = any(target_dups.get(category, 0) for category in ('all', 'supported', 'ignored'))
+        inventory_headers = ['', 'Ref', 'Target', 'Missing', 'Extra']
+        if has_target_dups:
+            inventory_headers.append('Dups')
+        inventory_rows = [ ('All files', len(ref_all), len(trg_all), len(ref_all - trg_all), len(trg_all - ref_all)),
+                           ('Supported', len(ref_support), len(trg_support), len(ref_support - trg_support),
+                                         len(trg_support - ref_support)),
+                           ('Ignored',   len(ref_ignored), len(trg_ignored), len(ref_ignored - trg_ignored),
+                                         len(trg_ignored - ref_ignored)),
+                           ]
+        if has_target_dups:
+            inventory_rows = [row + (target_dups.get(category, 0),)
+                              for row, category in zip(inventory_rows, ('all', 'supported', 'ignored'))]
+        _print_table(inventory_headers, inventory_rows)
         compared_types = (f"npz: {counts['npz']['total']} | csv: {counts['csv']['total']} | "
                           f"json: {counts['json']['total']}")
         if report.get('include_png', False):
             compared_types += f" | png: {counts['png']['total']}"
         print(f'\nCompared pairs: {total_compared}  ({compared_types})\n')
         for warning in report.get('warnings', []):
-            cli_warning(f"Duplicated files for {warning['file_base']!r}: "
-                        f"{', '.join(warning['files'])}", 'y')
+            warning_title = f"Ambiguous files for {warning['file_base']!r}:"
+            path_indent = ' ' * (len(warning_title) + 2)
+            for path_idx, duplicate_path in enumerate(warning['files']):
+                warning_line = (f'{warning_title}  {duplicate_path}' if path_idx == 0
+                                else f'{path_indent}{duplicate_path}')
+                cli_warning(warning_line, 'y')
+        ambiguous = duplicate_info.get('ambiguous', 0)
+        if ambiguous:
+            cli_warning(f'Ambiguous duplicates: {ambiguous}', 'y')
         result_rows = [(kind, counts[kind]['total'], counts[kind]['byte'], counts[kind]['numerical'],
                         counts[kind]['structural'], counts[kind]['failed'])
                                 for kind in ('npz', 'csv', 'json', 'png') if counts[kind]['total']]
@@ -902,7 +984,9 @@ def _print_quick(report, ref_path, target_path, ref_files=None, target_files=Non
         _print_table(['Type', 'Compr.', 'Byte', 'Numeric', 'Struct.', 'Failed'], result_rows,
                      separator_before=len(result_rows) - 1, equal_width=True, bold_after=(0, 4))
     if saved_path is not None:
-        print(f'\nSaved report: {saved_path}')
+        print(f"\nSaved report: {saved_path}\n")
+    else:
+        print()
 
 
 def _all_files(path):

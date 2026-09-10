@@ -1,8 +1,9 @@
 import shutil, re, zipfile, fnmatch
 import numpy as np, torch, json
 from pathlib import Path
-
 from colorama import Fore, Style
+
+#* region *** printing tools ***************************************************#
 # B, U, R = '\033[1m', '\033[4m', '\033[0m'
 # RED, GREEN, BLUE = Fore.RED, Fore.GREEN, Fore.BLUE
 # RESET = Style.RESET_ALL
@@ -21,10 +22,42 @@ def print_color(msg:str, clr=Fore.RED):
 
     print( f"{clr}{msg}{Style.RESET_ALL}")
 
-
 def cli_warning(msg, clr='r'):
     print_color(f"[WARN] {msg}", clr)
 
+def print_progress(total, completed, mode=None, current=None):
+    """Print file progress in normal or overwriting single-line mode."""
+    if total <= 0:
+        raise ValueError('total must be positive')
+    if completed < 0 or completed > total:
+        raise ValueError('completed must be between zero and total')
+
+    mode = 'default' if mode is None else str(mode).lower()
+    if mode not in {'default', 'single_line'}:
+        raise ValueError("mode must be 'default' or 'single_line'")
+
+    message = f'Progress : {completed / total * 100:.1f}% ({completed}/{total})'
+    if current is not None:
+        message += f'  {current}'
+    if mode == 'single_line':
+        print(f'\r{message}', end='', flush=True)
+    else:
+        print(message)
+
+def _fmt(value, **kwargs):
+    """ Format a number by decimal/significant digits and optional total length."""
+    if value is None:
+        return 'N/A'
+    if not isinstance(value, float):
+        return str(value)
+    d = kwargs.get('d', 3)
+    s = kwargs.get('s')
+    length = kwargs.get('l')
+    text = f'{value:.{s}g}' if s is not None else f'{value:.{d}f}'
+    return text.zfill(length) if length is not None else text
+
+
+# endregion
 
 #* region *** Collection casting ***** #
 def as_collection(x):
@@ -66,21 +99,7 @@ collection = as_collection
 
 # endregion
 
-
-def _fmt(value, **kwargs):
-    """Format a number by decimal/significant digits and optional total length."""
-    if value is None:
-        return 'N/A'
-    if not isinstance(value, float):
-        return str(value)
-    d = kwargs.get('d', 3)
-    s = kwargs.get('s')
-    length = kwargs.get('l')
-    text = f'{value:.{s}g}' if s is not None else f'{value:.{d}f}'
-    return text.zfill(length) if length is not None else text
-
-
-#* region *** General Files/ Paths sys Utils ***************************************#
+#* region *** General Files/ Paths sys Utils *********************************#
 # -----------------------------------------------------------------------------
 
 def assert_path(path, kind='path'):

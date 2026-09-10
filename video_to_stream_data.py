@@ -493,7 +493,8 @@ if __name__ == "__main__":
     ubi_tst_ls +=[ "data/video/testing-streams/N_656_1_0_1_0.mp4",   #* Normal
                    "data/video/testing-streams/N_765_0_0_1_0.mp4",]
 
-    vid_ls = Path("data/video/misc")
+    # vid_ls =   Path("data/video/misc")
+    vid_ls =  Path(f"data/video/RWF-2000/anna_corrections")
     output_dir = Path(f"data/json_files")
 
     fps_ = 3; yolo_th =0.4 ;grp_tag = 0
@@ -503,7 +504,7 @@ if __name__ == "__main__":
     ubi_output = Path(f"data/json_files/UBI/{fps_}fps-yl{int(100 * yolo_th)}/")
 
     skip = False
-    process_video(vid_ls, output_dir/'misc',
+    process_video(vid_ls, output_dir/'RWF-2000/corrections',
                   zip_output=True, skip_existing=skip,
                   ann_path=None,  skip_without_ann=False,
                   default_grp_tag=grp_tag,
