@@ -1,17 +1,17 @@
-import json
-import os
+import os, json
 from pathlib import Path
 import cv2
 import numpy as np
 
 from common.my_local_utils import as_collection, get_unique_name, print_progress
+from common.table_utils import print_table
 from video_analytics import measure_video_fps, DEFAULT_MF_THRESHOLD, FPS_CONSISTENCY_RTOL
 
 DECI_PRECISION = 5
 INF_THRESHOLD = 500
 MIN_ELIGIBLE_FPS = 0.5
 VIDEO_SUFFIXES = {'.mp4', '.avi', '.wmv', '.flv', '.mkv', '.mov', '.m4v'}
-DEFAULT_EFF_FPS_REPORT = 'effective_fps.json'
+DEFAULT_FPS_REPORT = 'measured_fps.json'
 FPS_SUMMARY_COL_WIDTH = 16
 
 
@@ -57,7 +57,7 @@ def get_measured_fps(videos, mf_threshold=DEFAULT_MF_THRESHOLD, **kwargs) -> tup
             report_dir = video_paths[0].parent
         else:
             report_dir = Path.cwd()
-        return report_dir/DEFAULT_EFF_FPS_REPORT
+        return report_dir/DEFAULT_FPS_REPORT
 
     recursive = kwargs.get('recursive', True)
     save_results = kwargs.get('save_to', None)
@@ -70,6 +70,7 @@ def get_measured_fps(videos, mf_threshold=DEFAULT_MF_THRESHOLD, **kwargs) -> tup
     video_results, errors = [], list(input_errors)
     total_vids = len(video_paths)
     completed = 0
+
     for vp in video_paths:
         try:
             _, result = measure_video_fps(vp, mf_threshold)
@@ -118,34 +119,32 @@ def get_measured_fps(videos, mf_threshold=DEFAULT_MF_THRESHOLD, **kwargs) -> tup
                              })
     if save_results:
         output_path = report_path()  if save_results is True else save_results
-        _save_report(report, output_path)
+        save_fps_report(report, output_path)
     if print_res:
-        print_eff_fps(report)
+        print_fps_report(report)
     return weighted_mean, report
 
 
-get_effective_fps = get_measured_fps
-
-
-def load_eff_fps_report(report_path) -> dict:
-    """ Load a saved effective-FPS report from a JSON file."""
+def load_fps_report(report_path) -> dict:
+    """Load a saved measured-FPS report from a JSON file."""
     report_path = Path(report_path)
     with report_path.open('r', encoding='utf-8') as file:
         report = json.load(file)
     if not isinstance(report, dict):
-        raise ValueError('effective-FPS report must contain a JSON object')
+        raise ValueError('measured-FPS report must contain a JSON object')
     return report
 
 
-def print_eff_fps(results:dict, **kwargs) -> None:
-    """Print effective FPS results in standard or total-only table form."""
+def print_fps_report(report:dict, **kwargs) -> None:
+    """Print measured FPS results in standard or total-only table form."""
+    LEGACY_MAIN_LABEL = "fps_measureds"
 
-    def _legacy_reports(report): #* 42
+    def _normalize_legacy_report(): #* 42
         """Normalize historical report schemas in place and return the report."""
         if 'fps_stats' in report:  #* exist only in new format or legacy fixed
             return report
-        if 'fps_measureds' in report:
-            report['fps_stats'] = report.pop('fps_measureds')
+        if LEGACY_MAIN_LABEL in report:
+            report['fps_stats'] = report.pop(LEGACY_MAIN_LABEL)
         if 'min_measured_fps_for_ratio' in report:
             report['min_eligible_fps'] = report.pop('min_measured_fps_for_ratio')
         if 'fps_stats' in report:
@@ -164,16 +163,15 @@ def print_eff_fps(results:dict, **kwargs) -> None:
             vid['fps_measured_std'] = vid.pop('fps_eff_std', None)
             vid['near_static'] = vid['fps_measured'] < legacy_min_fps
             vid['fps_consistent'] = ( vid['path'] not in legacy_paths if consis_meta else
-                                      vid['fps_measured'] > 0 and
-                                      abs(vid['fps_measured'] - vid['fps_encoded'])/vid['fps_encoded']
+                                      vid['fps_measured'] > 0 and  abs(vid['fps_measured'] - vid['fps_encoded'])/vid['fps_encoded']
                                       <= FPS_CONSISTENCY_RTOL)
 
-        inconsis_vids = [vid for vid in report['videos'] if not vid['fps_consistent']]
-        static_videos = [vid for vid in report['videos'] if vid['near_static']]
-        report['fps_consistency'] = {'count': len(inconsis_vids),
-                                     'files': [vid['path'] for vid in inconsis_vids], }
-        report['near_static_files']= {'count': len(static_videos),
-                                      'files': [vid['path'] for vid in static_videos], }
+        inconsistent = [vid for vid in report['videos'] if not vid['fps_consistent']]
+        near_static  = [vid for vid in report['videos'] if vid['near_static']]
+        report['fps_consistency'] = {'count': len(inconsistent),
+                                     'files': [vid['path'] for vid in inconsistent], }
+        report['near_static_files']= {'count': len(near_static),
+                                      'files': [vid['path'] for vid in near_static], }
         report['_legacy_report'] = True
         report['_fps_label'] = 'Effective FPS'
         report['_consistency_known'] = consis_meta
@@ -183,8 +181,7 @@ def print_eff_fps(results:dict, **kwargs) -> None:
         return '--' if val is None else f'{val:.2f}'
 
     def ratio(res):
-        fps_msr = res['fps_measured']
-        return res['fps_encoded'] / fps_msr if fps_msr > 0 else None
+        return res['fps_encoded']/res['fps_measured'] if res['fps_measured'] > 0 else None
 
     def stats_ratio(res):
         return ratio(res) if not res['near_static'] else None
@@ -194,7 +191,7 @@ def print_eff_fps(results:dict, **kwargs) -> None:
             return result['titel'].lower()
         if sort == 'encoded':
             return result['fps_encoded']
-        if sort == 'effective':
+        if sort == 'measured':
             return result['fps_measured']
         value = ratio(result)
         return float('inf') if value is not None and value > 500 else value
@@ -214,28 +211,28 @@ def print_eff_fps(results:dict, **kwargs) -> None:
             return 'N/A'
         if inf_th is not None and mean > inf_th:
             return 'inf (N/A)'
-        mean_text = f'{mean:.2f}'
-        std_text =  '0' if std == 0 else  f'{std:.2f}'
-        return f"{mean_text} ({std_text})"
+        mean_text = f'{mean:5.2f}'
+        std_text =  '(0)' if std == 0 else  f'({std:.2f})'
+        return f"{mean_text} {std_text:6}"
 
-    results = _legacy_reports(results)
-    # fps_label = results.get('_fps_label', 'Measured FPS')
-    consistency_known = results.get('_consistency_known', True)
+    report = _normalize_legacy_report()
+    consistency_known = report.get('_consistency_known', True)
 
     sort_arg = kwargs.pop('sort', None)
     sort = 'video' if sort_arg is None else sort_arg
-    show_num = sort_arg is not None
+    order = kwargs.pop('order', 'ascending')
+
     total_only = kwargs.pop('total_only', False)
     rows = kwargs.pop('rows', None)
-    order = kwargs.pop('order', 'ascending')
+    col_width = kwargs.pop('col_width', 'smart-opt')
     if kwargs:
         unknown = ', '.join(sorted(kwargs))
         raise TypeError(f'unexpected keyword argument(s): {unknown}')
 
-    sort = {'vid': 'video', 'enc': 'encoded', 'eff': 'effective'}.get( str(sort).lower(), str(sort).lower())
+    sort = {'vid': 'video', 'enc': 'encoded', 'msr': 'measured'}.get( str(sort).lower(), str(sort).lower())
     order = {'asc': 'ascending', 'dsc': 'descending'}.get( str(order).lower(), str(order).lower())
-    if sort not in {'video', 'encoded', 'effective', 'ratio'}:
-        raise ValueError("sort must be 'video', 'encoded', 'effective', or 'ratio'")
+    if sort not in {'video', 'encoded', 'measured', 'ratio'}:
+        raise ValueError("sort must be 'video', 'encoded', 'measured', or 'ratio'")
     if order not in {'ascending', 'descending'}:
         raise ValueError("order must be 'ascending' or 'descending'")
     if rows is not None:
@@ -243,16 +240,16 @@ def print_eff_fps(results:dict, **kwargs) -> None:
         if rows <= 0:
             raise ValueError('rows must be positive')
 
-    fps_stats = results['fps_stats']
-    fps_label = results.get('_fps_label', 'Measured FPS')
-    print(f"Meaningful threshold: {results['mf_threshold']}"
+    fps_stats = report['fps_stats']
+    fps_label = report.get('_fps_label', 'Measured FPS')
+    print(f"Meaningful threshold: {report['mf_threshold']}"
           f"{fps_label}: mean = {fps_stats['mean']:.3f}, std = {fps_stats['std']:.3f},\n"
           f"{'Weighted':12}: mean = {fps_stats['weighted_mean']:.3f}, "
           f"std = {fps_stats['weighted_std']:.3f}\n"
-          f"Mean diff: {results['mean_diff']:.3f}; "
-          f"Mean MF diff: {_frmt_val(results['mean_mf_diff'])}")
+          f"Mean diff: {report['mean_diff']:.3f}; "
+          f"Mean MF diff: {_frmt_val(report['mean_mf_diff'])}\n")
 
-    vid_results = results['videos']
+    vid_results = report['videos']
     descending = order == 'descending'
     if sort == 'video':
         ordered = sorted(vid_results, key=sort_value, reverse=descending)
@@ -298,26 +295,27 @@ def print_eff_fps(results:dict, **kwargs) -> None:
                                _frmt_val(result['mean_diff']),
                                'X' if not result['fps_consistent'] else '',
                                'X' if result['near_static'] else '')
-            table_rows.append((str(row_idx), *row) if show_num else row)
-        average_row = ['Average',
-                       *(_frmt_val(average([vr[key] for vr in vid_results]))
-                       for key in ('duration', 'sampled_duration', 'fps_encoded')),
-                       _frmt_val (average([vr['fps_measured']     for vr in vid_results])),
-                       _frmt_val (average([vr['fps_measured_std'] for vr in vid_results])),
-                       _frmt_val (average([stats_ratio(vr)  for vr in vid_results])),
-                       _frmt_val (average([vr['mean_diff']  for vr in vid_results])),
-                       '', '', ]
-        if show_num:
-            average_row.insert(0, '')
-        average_row = tuple(average_row)
-        print()
-        headers = ('Video', 'Duration', 'Sampled', 'FPS_enc', fps_label,
-                   'Eff std', 'Dif ratio', 'Mean Diff', 'Not-Consis.', 'n.static')
-        if show_num:
-            headers = ('Num', *headers)
-        print_table(table_rows + [average_row], headers)
+            table_rows.append((str(row_idx), *row) if sort_arg is not None else row)
+        avg_row = ['Average',
+                    *(_frmt_val(average([vr[key] for vr in vid_results]))
+                    for key in ('duration', 'sampled_duration', 'fps_encoded')),
+                    _frmt_val (average([vr['fps_measured']     for vr in vid_results])),
+                    _frmt_val (average([vr['fps_measured_std'] for vr in vid_results])),
+                    _frmt_val (average([stats_ratio(vr)  for vr in vid_results])),
+                    _frmt_val (average([vr['mean_diff']  for vr in vid_results])),
+                    '', '', ]
 
-    print(f"\nVideo directory: {results.get('video_dir', '--')}")
+        headers = ('Video', 'Duration', 'Sampled', 'FPS_enc', fps_label,
+                   'Measured std', 'Dif ratio', 'Mean Diff', 'Not-Consis.', 'n.static')
+        if sort_arg is not None:
+            headers = ('Num', *headers)
+            avg_row.insert(0, '')
+        avg_row = tuple(avg_row)
+        fps_col = 5 if sort_arg is not None else 4
+        print_table(table_rows + [avg_row], headers, col_width =col_width,
+                    B={'cols': [fps_col]}, lines=[len(table_rows)], )
+
+    print(f"\nVideo directory: {report.get('video_dir', '--')}")
     print('FPS consistency')
     static_vids = [vr for vr in vid_results if vr['near_static']]
     if not consistency_known:
@@ -328,38 +326,25 @@ def print_eff_fps(results:dict, **kwargs) -> None:
                       ('Diff ratio', _frmt_mean_std(*mean_std([stats_ratio(vr) for vr in vid_results]), inf_th=INF_THRESHOLD), 'N/A', 'N/A'),
                       ]
     else:
+        normal_vids = [vr for vr in vid_results if vr['fps_consistent']]
+        static_vids = [vr for vr in normal_vids if vr['near_static']]
         inconsis_vids = [vr for vr in vid_results if not vr['fps_consistent']]
-        consis_vids   = [vr for vr in vid_results if vr['fps_consistent']]
-        consis_static_vids   = [vr for vr in consis_vids if vr['near_static']]
-        inconsis_static_vids = [vr for vr in inconsis_vids if vr['near_static']]
-        table_rows = [ ('Files', len(vid_results), len(consis_vids), len(inconsis_vids)),
-                       ('Near static', len(static_vids), len(consis_static_vids), len(inconsis_static_vids)),
+        inconsis_n_static = [vr for vr in inconsis_vids if vr['near_static']]
+        table_rows = [ ('Files', len(vid_results), len(normal_vids), len(inconsis_vids)),
+                       ('Near static', len(static_vids), len(static_vids), len(inconsis_n_static)),
                        ('Encoded FPS', _frmt_mean_std(*mean_std([result['fps_encoded'] for result in vid_results])),
-                       _frmt_mean_std(*mean_std([r['fps_encoded'] for r in consis_vids])),
+                       _frmt_mean_std(*mean_std([r['fps_encoded'] for r in normal_vids])),
                        _frmt_mean_std(*mean_std([r['fps_encoded'] for r in inconsis_vids]))),
                        (fps_label, _frmt_mean_std(*mean_std([r['fps_measured'] for r in vid_results])),
-                       _frmt_mean_std(*mean_std([r['fps_measured'] for r in consis_vids])),
+                       _frmt_mean_std(*mean_std([r['fps_measured'] for r in normal_vids])),
                        _frmt_mean_std(*mean_std([r['fps_measured'] for r in inconsis_vids]))),
                        ('Diff ratio', _frmt_mean_std(*mean_std([stats_ratio(r) for r in vid_results]), inf_th=INF_THRESHOLD),
-                       _frmt_mean_std(*mean_std([stats_ratio(r) for r in consis_vids]),   inf_th=INF_THRESHOLD),
+                       _frmt_mean_std(*mean_std([stats_ratio(r) for r in normal_vids]),   inf_th=INF_THRESHOLD),
                        _frmt_mean_std(*mean_std([stats_ratio(r) for r in inconsis_vids]), inf_th=INF_THRESHOLD)),
                        ]
-    print_table(table_rows, ('', 'Total', 'Consistent', 'Inconsistent'),
-                min_width=FPS_SUMMARY_COL_WIDTH, left_labels=True)
-    for err in results['errors']:
+    print_table(table_rows, ('', 'Total', 'Consistent', 'Inconsistent'), align=['l', 'c', 'c', 'c'])
+    for err in report['errors']:
         print(f"[WARN] {err['path']}: {err['error']}")
-
-
-def print_table(tbl_rows, headers, min_width=0, left_labels=False):
-    widths = [max(min_width, len(str(header)), *(len(str(r[i])) for r in tbl_rows))
-                                                for i, header in enumerate(headers)]
-    separator = '-+-'.join('-' * width for width in widths)
-    print(' | '.join(f'{header:^{width}}' for header, width in zip(headers, widths)))
-    print(separator)
-    for row in tbl_rows:
-        cells = [f'{row[0]:<{widths[0]}}' if left_labels else f'{row[0]:^{widths[0]}}']
-        cells += [f'{val:^{width}}' for val, width in zip(row[1:], widths[1:])]
-        print(' | '.join(cells))
 
 # endregion
 
@@ -403,11 +388,11 @@ def _diff_means(samples, mf_threshold):
     return total/count, mf_total/mf_count if mf_count else None
 
 
-def _save_report(report, output_path):
-    """ Save one complete effective-FPS report as JSON."""
+def save_fps_report(report, output_path):
+    """Save one complete measured-FPS report as JSON."""
     output_path = Path(output_path)
     if output_path.is_dir():
-        output_path /= DEFAULT_EFF_FPS_REPORT
+        output_path /= DEFAULT_FPS_REPORT
     elif output_path.suffix == '':
         output_path = output_path.with_suffix('.json')
     output_path = get_unique_name(output_path)
@@ -415,38 +400,29 @@ def _save_report(report, output_path):
     with output_path.open('w', encoding='utf-8') as file:
         json.dump(report, file, ensure_ascii=False, indent=2)
 
-def _load_report(report_path) -> dict:
-    """ Load a saved effective-FPS report from a JSON file."""
-    report_path = Path(report_path)
-    with report_path.open('r', encoding='utf-8') as file:
-        report = json.load(file)
-    if not isinstance(report, dict):
-        raise ValueError('effective-FPS report must contain a JSON object')
-    return report
-
 # endregion
 
 #387(1,4,1) 400(1,2,)->379(1,1,1)
 #505(1,2,5) #415(1,2,5)
-#460(1,2,8)->#471(1,1,8) -> #427(1,2,2)
-def test_printing(report_path, legacy_rep=None, r=100):
-    report = load_eff_fps_report(report_path)
+#460(1,2,8)->#471(1,1,8) -> #427(1,2,2)->422(2,2,2)->407(1,1,1)
+def test_printing(report_path, legacy_rep=None, r=100, **kwargs):
+    report = load_fps_report(report_path)
     print(f"Print {r} rows:\n{72*'*'}  ")
-    print_eff_fps(report, rows=r)
+    print_fps_report(report, rows=r, col_width='auto', **kwargs)
     print(f"\n\nPrint {r} rows, sorted by ratio:\n{72*'*'}")
-    print_eff_fps(report, sort='ratio', rows=r)
-    if legacy_rep is None:
-        return
-    report = load_eff_fps_report(legacy_rep)
-    print(f"\n\nPrint legacy {r} rows:\n{72*'*'}  ")
-    print_eff_fps(report,  rows=r)
-    
+    print_fps_report(report, rows=r, sort='ratio', **kwargs)
+
+    if legacy_rep:
+        report = load_fps_report(legacy_rep)
+        print(f"\n\nPrint legacy {r} rows:\n{72*'*'}  ")
+        print_fps_report(report, rows=r, sort='ratio', **kwargs)
+
 
 if __name__ == '__main__': # pass
 
     test_report   = Path("/mnt/local-data/Python/Projects/weSmart/data/video/UBI_FIGHTS/videos/fps_msr_ubi.json")
-    legacy_report = Path("/mnt/local-data/Projects/Wesmart/Video-datasets/UBI_FIGHTS/videos/eff_fps_ubi.json")
+    legacy_report = None # Path("/mnt/local-data/Projects/Wesmart/Video-datasets/UBI_FIGHTS/videos/eff_fps_ubi.json")
     # test_report   = Path("/mnt/local-data/Projects/Wesmart/Video-datasets/VioPeru/Copy (1) fps_msr_vp.json")
     # legacy_report = Path("/mnt/local-data/Projects/Wesmart/Video-datasets/VioPeru/Copy (1) eff_fps_vp_001.json")
 
-    test_printing(test_report, legacy_report, r=50)
+    test_printing(test_report, legacy_report, r=50, order='dsc')

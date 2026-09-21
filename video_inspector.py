@@ -1,14 +1,13 @@
-""" Play videos with synced event-annotation overlays.
+"""Play videos with synced event-annotation overlays and inspection tools.
     Usage:
-        python visual_analyzer.py <video.mp4> [annotation.ann|annotation.txt|annotation.csv]
-        python visual_analyzer.py <video.mp4> <annotation> --start 12.5 --hold
+        python vid.py play <video.mp4> [annotation.ann|annotation.txt|annotation.csv]
+        python vid.py play <video.mp4> <annotation> --start 12.5 --hold
 
     The player supports default event annotations files through annotations.py. It draws
     active event flags below the video, supports timeline mouse seeking, and exposes keyboard seek.
 """
 
 from __future__ import annotations
-import argparse
 import re, shutil, subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -345,7 +344,6 @@ def play_annotated_video(video_path:str|Path, ann_path:str|Path|None = None, **k
                 if x1 <= x <= x2 and y1 <= y <= y2:
                     timeline_state['action'] = action
                     return
-        # rect = timeline_state['rect']
         if timeline_state['rect'] is None:
             return
         if event == cv2.EVENT_LBUTTONDOWN and _in_timeline(x, y, timeline_state['rect']):
@@ -392,7 +390,7 @@ def play_annotated_video(video_path:str|Path, ann_path:str|Path|None = None, **k
     speed = max(0.05, float(kwargs.get('speed', 1.0)))
     start_sec = max(0.0, float(kwargs.get('start_sec', 0.0)))
     hold_on_end = bool(kwargs.get('hold_on_end', False))
-    title = str(kwargs.get('window_title', 'visual_analyzer'))
+    title = str(kwargs.get('window_title', 'video_inspector'))
     window_caption = video_path.stem
     size_mode = kwargs.get('size', 'org')
     if size_mode not in {'org', 'max'}:
@@ -617,7 +615,7 @@ def play_multi_vid(videos:str|Path|list|tuple|set, ann_path:str|Path|None = None
     video_count = len(sources)
     video_index = 0
     window_state = {}
-    window_title = str(play_kwargs.setdefault('window_title', 'visual_analyzer'))
+    window_title = str(play_kwargs.setdefault('window_title', 'video_inspector'))
     try:
         while True:
             video = sources[video_index]
@@ -633,7 +631,6 @@ def play_multi_vid(videos:str|Path|list|tuple|set, ann_path:str|Path|None = None
             except Exception as error:
                 cli_warning(f'Skipping {video}: {type(error).__name__}: {error}')
                 action = 'end'
-
             if action == 'close':
                 break
             if action == 'previous':
@@ -651,33 +648,6 @@ def play_multi_vid(videos:str|Path|list|tuple|set, ann_path:str|Path|None = None
             except cv2.error:
                 pass
 
-
 # endregion
 
-#* region *** CLI *****************************************************************#
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Play video(s) with synced annotation event overlays.')
-    parser.add_argument('video_path', type=Path, help='video, directory, or playlist file')
-    parser.add_argument('annotation_path', type=Path, nargs='?', default=None, help='annotation file or dir; defaults to sibling annotations')
-    parser.add_argument('-sd', '--speed', type=float, default=1.0, help='playback speed factor')
-    parser.adargument('-s', '--start', type=float, default=0.0, help='start time in seconds')
-    parser.add_argument('-o', '--order', choices=('name', 'date', 'size'), default=None, help='optional playback order')
-    parser.add_argument('-r', '--reverse', action='store_true', help='reverse playback order')
-    parser.add_argument('-z', '--size', default='org', help="window size: 'org', 'max', or a scale factor")
-    parser.add_argument('--hold', action='store_true', help='keep the player open until Esc is pressed')
-    return parser
-
-
-def main(argv: list[str] | None = None) -> None:
-    args = _build_parser().parse_args(argv)
-    play_multi_vid(args.video_path, args.annotation_path,
-                   speed=args.speed, start_sec=args.start, hold_on_end=args.hold,
-                   order=args.order, reverse=args.reverse, size=args.size)
-
-# endregion
-#442(2,4,1)-> 423->415 ->428(2,1,1)  #527(2,11,1)->640(2,11,2)->636(2,1,1)
-#659(2,1,4)->652(1,1,1)
-
-if __name__ == '__main__':
-    main()
+#659(2,1,4)->652(1,1,1) ***
