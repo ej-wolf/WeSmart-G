@@ -5,13 +5,13 @@ from pathlib import Path
 import yaml
 import numpy as np
 
-from analysis_utils import (AUTO_META, attach_stream_meta, build_timelines,
-                            load_report_file, load_timelines, print_metric_report,
+from analysis_utils import (AUTO_META, TIMELINE_GLOB, attach_stream_meta,
+                            build_timelines, convert_tcn_format, load_report_file,
+                            load_timeline_csv, print_metric_report,
                             print_report_table, print_test_report,
-                            print_threshold_comparison,
-                            resolve_stream_meta_path,
+                            print_threshold_comparison, resolve_stream_meta_path,
                             save_metric_report, save_timeline_csv)
-from common.my_local_utils import as_collection, cli_warning, print_color
+from common.my_local_utils import as_collection, cli_warning, list_file_list, print_color
 from evaluation_core import DEFAULT_EVAL_THRESHOLD, analyze_clip_test, analyze_video_test, resolve_input
 from project_utils import get_exporting_name, get_test_title_lines
 from stream_metric import eval_multi_thresholds, get_timeline_timing, resolve_metric_config
@@ -22,6 +22,68 @@ DEFAULT_METRIC_CONFIG = Path(__file__).resolve().parent/"configs/metrics/metric_
 
 #* region Public API  ---------------------------------------------------
 # -----------------------------------------------------------------------
+def resolve_timeline_sources(source, *, directory_list=False) -> list[Path]:
+    """ Resolve timeline files, directories, parents, or directory-list files."""
+    sources = [source] if isinstance(source, (str, Path)) else list(as_collection(source))
+    inputs = []
+    for item in sources:
+        path = Path(item)
+        if path.is_file():
+            if path.suffix.lower() == '.csv' and not directory_list:
+                inputs.append(path)
+                continue
+            paths = list_file_list(path, root_path=Path.cwd())
+            for listed_path in paths:
+                if listed_path.is_dir():
+                    inputs.append(listed_path)
+                else:
+                    cli_warning(f'Skipping non-directory metric input: {listed_path}')
+            continue
+
+        if not path.is_dir():
+            raise FileNotFoundError(f'Metric directory source not found: {path}')
+        if any(path.glob(TIMELINE_GLOB)):
+            inputs.append(path)
+            continue
+
+        inputs.extend(child for child in sorted(path.iterdir())
+                      if child.is_dir() and any(child.glob(TIMELINE_GLOB)))
+
+    if not inputs:
+        raise ValueError(f'No timeline sources found in {source}')
+    return inputs
+
+
+def load_timelines(timeline_input) -> tuple[list[dict], list[dict], list[Path]]:
+    """Load timeline files from one resolved path, directory, or collection."""
+    inputs = as_collection(timeline_input)
+    files = []
+    for item in inputs:
+        if isinstance(item, dict):
+            files.append(item)
+            continue
+        path = Path(item)
+        files.extend(sorted(path.glob(TIMELINE_GLOB)) if path.is_dir() else [path])
+
+    timelines, errors, paths = [], [], []
+    seen = set()
+    for item in files:
+        if isinstance(item, dict):
+            timelines.append(item)
+            continue
+        key = str(Path(item))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            timelines.append(load_timeline_csv(item))
+            paths.append(Path(item))
+        except Exception as error:
+            errors.append({'timeline': Path(item).stem, 'stream': None, 'status': 'fail',
+                           'error': f"{type(error).__name__}: {error}"})
+    return timelines, errors, paths
+
+
 def print_eval_group(reports, output_name) -> None:
     """Print shared ROC outputs and threshold-specific summary files."""
     def relative_path(path, root):
@@ -189,6 +251,14 @@ def analyze_timelines(timeline_input, thresholds=None, pred_cols=None, **kwargs)
     print_res   = bool(kwargs.pop('print_results', False))
     print_kwargs = kwargs.pop('print_kwargs', {})
 
+    if isinstance(timeline_input, (str, Path)):
+        resolved = resolve_timeline_sources(timeline_input)
+        if len(resolved) != 1:
+            raise ValueError('Multiple timeline sources require analyze_timeline_batch()')
+        timeline_input = resolved[0]
+        if timeline_input.name.endswith('.window_predictions.csv'):
+            timeline_input = convert_tcn_format(timeline_input)
+
     timelines, load_errors, timeline_files = load_timelines(timeline_input)
     if not timelines:
         details = load_errors[0]['error'] if load_errors else 'no timeline inputs'
@@ -237,7 +307,7 @@ def analyze_timeline_batch(timeline_inputs, thresholds=None, pred_cols=None, **k
         name = Path(input_path).name
         return re.sub(r'^\d{6}_\d{2}-\d{2}-\d{2}_', '', name)
 
-    inputs = list(as_collection(timeline_inputs))
+    inputs = resolve_timeline_sources(timeline_inputs)
     batch_kwargs = dict(kwargs)
     batch_kwargs.pop('output_path', None)
     batch_kwargs.pop('print_results', None)
@@ -399,3 +469,4 @@ def plot_timeline(timeline_path, **kwargs):
 
 # endregion
 #264(5,3,)
+#470((2,6,2)

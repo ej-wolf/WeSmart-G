@@ -1,3 +1,4 @@
+import math
 import os, json
 from pathlib import Path
 import cv2
@@ -236,9 +237,11 @@ def print_fps_report(report:dict, **kwargs) -> None:
     if order not in {'ascending', 'descending'}:
         raise ValueError("order must be 'ascending' or 'descending'")
     if rows is not None:
-        rows = int(rows)
-        if rows <= 0:
-            raise ValueError('rows must be positive')
+        rows = float(rows)
+        if not math.isfinite(rows) or rows < 0:
+            raise ValueError('rows must be finite and non-negative')
+        rows = math.floor(rows)
+        total_only = total_only or rows == 0
 
     fps_stats = report['fps_stats']
     fps_label = report.get('_fps_label', 'Measured FPS')

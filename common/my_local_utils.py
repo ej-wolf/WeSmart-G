@@ -44,17 +44,24 @@ def print_progress(total, completed, mode=None, current=None):
     else:
         print(message)
 
-def _fmt(value, **kwargs):
+#* Common Formating
+def c_fmt(value, **kwargs):
     """ Format a number by decimal/significant digits and optional total length."""
     if value is None:
         return 'N/A'
-    if not isinstance(value, float):
+    if isinstance(value, (bool, np.bool_)):
         return str(value)
-    d = kwargs.get('d', 3)
-    s = kwargs.get('s')
-    length = kwargs.get('l')
-    text = f'{value:.{s}g}' if s is not None else f'{value:.{d}f}'
-    return text.zfill(length) if length is not None else text
+
+    d  = kwargs.get('d', 3)
+    s  = kwargs.get('s')
+    ln = kwargs.get('l')
+    if isinstance(value, (float, np.floating)):
+        text = f'{value:.{s}g}' if s is not None else f'{value:.{d}f}'
+    elif isinstance(value, (int, np.integer)):
+        text = str(int(value))
+    else:
+        return str(value)
+    return text.zfill(ln) if ln is not None else text
 
 
 # endregion

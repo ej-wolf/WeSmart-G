@@ -1,7 +1,6 @@
 """Timeline preparation, persistence, metadata, and presentation utilities."""
-import re
+import re, math
 import csv, json
-import math
 from statistics import median
 from numbers import Integral, Real
 from pathlib import Path
@@ -10,12 +9,13 @@ import numpy as np
 #* project imports
 from json_stream_utils import DEFAULT_STREAM_META, SJ_META_INFO, stream_stem
 from json_utils import STREAM_FILE_TYPES
-from common.my_local_utils import _fmt, as_collection, get_unique_name
+from common.my_local_utils import c_fmt, get_unique_name
 
 TIMELINE_PROB_ATOL = 1e-6
 TIMELINE_PROB_VARIANCE_K = 0.03
 TIMELINE_TIME_ATOL = 1e-9
 TIMELINE_MAX_ISSUES = 50
+TIMELINE_GLOB = 'timeline*.csv'
 
 
 #* region Public API  ---------------------------------------------------
@@ -51,7 +51,7 @@ def build_timelines(y_true, y_prob, streams, t_start, t_end, n_frames=None) -> l
     timelines = []
     fields = ['win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob']
     for stream, indices in sorted(grouped.items()):
-        ordered = sorted(indices, key=lambda index: (t_end[index], t_start[index], index))
+        ordered = sorted(indices, key=lambda i: (t_end[i], t_start[i], i))
         rows = [{'win_idx': win_idx,
                  't_frm': float(t_end[index]),
                  't_start': float(t_start[index]),
@@ -136,12 +136,11 @@ def compare_timeline(test_timeline: dict, ref_timeline: dict, *,
         if len(structure['issues']) < max_issues:
             structure['issues'].append({'type': issue_type, **details})
 
-    def add_numeric_issue(field, row_idx, test_val, ref_val, abs_error):
+    def add_numeric_issue(field, row_index, test_value, ref_value, abs_error):
         numeric['mismatches'] += 1
         if len(numeric['issues']) < max_issues:
-            numeric['issues'].append({'field': field, 'row': row_idx,
-                                      'test': test_val, 'ref': ref_val,
-                                      'abs_error': abs_error})
+            numeric['issues'].append({'field': field, 'row': row_index,
+                                      'test': test_value, 'ref': ref_value, 'abs_error': abs_error})
 
     if not isinstance(test_timeline, dict) or not isinstance(ref_timeline, dict):
         raise TypeError('compare_timeline expects two timeline dictionaries')
@@ -262,46 +261,11 @@ def compare_timeline(test_timeline: dict, ref_timeline: dict, *,
             'max_prob_delta': max_prob_delta}
 
 
-def load_timelines(timeline_input) -> tuple[list[dict], list[dict], list[Path]]:
-    """ Load timeline files from one path, directory, or path collection."""
-
-    inputs = as_collection(timeline_input)
-    files = []
-    for item in inputs:
-        if isinstance(item, dict):
-            files.append(item)
-            continue
-        path = Path(item)
-        files.extend(sorted(path.glob('timeline_*.csv')) if path.is_dir() else [path])
-
-    timelines, errors, paths = [], [], []
-    seen = set()
-    for item in files:
-        if isinstance(item, dict):
-            timelines.append(item)
-            continue
-        key = str(Path(item))
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            timelines.append(load_timeline_csv(item))
-            paths.append(Path(item))
-        except Exception as error:
-            errors.append({'timeline': Path(item).stem, 'stream': None, 'status': 'fail',
-                           'error': f"{type(error).__name__}: {error}"})
-    return timelines, errors, paths
-
-
 def convert_tcn_format(csv_path, out_dir=None) -> list[Path]:
     """Convert one TCN prediction CSV or a directory of CSVs into compatible timelines."""
 
     required = {'json_name', 'window_index', 'window_start_frame', 'window_end_frame',
-                'window_start_time_sec', 'window_end_time_sec', 'target',
-                'prob_raw', 'pred_raw'}
-
-    def number(row, key, kind=float):
-        return kind(float(row[key]))
+                'window_start_time_sec', 'window_end_time_sec', 'target', 'prob_raw', 'pred_raw'}
 
     def json_stem(value):
         """Remove only a recognized JSON/archive suffix, preserving variant tags such as `.5fps`."""
@@ -311,6 +275,8 @@ def convert_tcn_format(csv_path, out_dir=None) -> list[Path]:
             if lower.endswith(suffix):
                 return name[:-len(suffix)]
         return Path(name).stem
+
+    number = lambda r, k, kind=float: kind(float(r[k]))
 
     csv_path = Path(csv_path)
     if csv_path.is_dir():
@@ -338,7 +304,7 @@ def convert_tcn_format(csv_path, out_dir=None) -> list[Path]:
     out_files = []
     fields = ['win_idx', 't_frm', 't_start', 'n_frm', 'gt_label', 'y_prob', 'y_pred']
     for json_name, rows_in in sorted(groups.items()):
-        rows_in = sorted(rows_in, key=lambda row: number(row, 'window_index', int))
+        rows_in = sorted(rows_in, key=lambda r: number(r, 'window_index', int))
         rows = []
         for row in rows_in:
             t_start = number(row, 'window_start_time_sec')
@@ -397,12 +363,12 @@ def save_timeline_csv(timeline: dict, output_path, pred_cols=None) -> Path:
             n += 1
         return f"{name}({n})"
 
-    def base_rows_match(rows_a, rows_b, base_fields):
+    def base_timeline_match(rows_a, rows_b, tl_fields):
         if len(rows_a) != len(rows_b):
             return False
         return all(str(row_a.get(field, '')) == str(row_b.get(field, ''))
                    for row_a, row_b in zip(rows_a, rows_b)
-                   for field in base_fields)
+                   for field in tl_fields)
 
     output_path = Path(output_path)
     if output_path.is_dir():
@@ -414,24 +380,24 @@ def save_timeline_csv(timeline: dict, output_path, pred_cols=None) -> Path:
     if output_path.exists():
         saved = load_timeline_csv(output_path)
         rows = [dict(row) for row in saved['rows']]
-        fields = list(saved['fieldnames'])
-        base_fields = [field for field in timeline['fieldnames'] if field in fields and
-                       field != 'y_pred' and not field.startswith('y_prd-')]
-        if not base_rows_match(timeline['rows'], rows, base_fields):
+        field_names = list(saved['fieldnames'])
+        base_fields = [f for f in timeline['fieldnames'] if f in field_names and f != 'y_pred'
+                                                         and not f.startswith('y_prd-')]
+        if not base_timeline_match(timeline['rows'], rows, base_fields):
             raise ValueError(f"existing timeline does not match generated timeline: {output_path}")
         metadata = saved.get('metadata', {})
     else:
         rows = [dict(row) for row in timeline['rows']]
-        fields = list(timeline['fieldnames'])
+        field_names = list(timeline['fieldnames'])
         metadata = timeline.get('metadata', {})
 
-    for name, values in (pred_cols or {}).items():
-        if len(values) != len(rows):
-            raise ValueError(f"prediction column {name} length mismatch")
-        name = next_column_name(fields, name)
-        fields.append(name)
-        for row, value in zip(rows, values):
-            row[name] = int(value)
+    for itm_name, itm_vals in (pred_cols or {}).items():
+        if len(itm_vals) != len(rows):
+            raise ValueError(f"prediction column {itm_name} length mismatch")
+        itm_name = next_column_name(field_names, itm_name)
+        field_names.append(itm_name)
+        for row, value in zip(rows, itm_vals):
+            row[itm_name] = int(value)
 
     with output_path.open('w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
@@ -441,7 +407,7 @@ def save_timeline_csv(timeline: dict, output_path, pred_cols=None) -> Path:
                        round(metadata[key], 9) if isinstance(metadata[key], Real) else metadata[key])
                 writer.writerow(['infer_frq' if key == 'frq_i' else key, val])
         writer.writerow(['other data', ''])
-        table = csv.DictWriter(file, fieldnames=fields)
+        table = csv.DictWriter(file, fieldnames=field_names)
         table.writeheader()
         table.writerows(rows)
     return output_path
@@ -479,6 +445,7 @@ def load_report_file(report_path) -> dict | list:
 def save_metric_report(report: dict | list[dict], output_path) -> Path:
     """Save a stream-metric report as CSV or JSON and return its path."""
     def save_csv(path):
+
         def full_stream_name(stream):
             source = stream.get('stream')
             if source:
@@ -495,26 +462,36 @@ def save_metric_report(report: dict | list[dict], output_path) -> Path:
                           field in {'longest_gt', 'event_gap', 'fp_cost'})
             return f'{value:.{2 if time_field else 3}f}'
 
+        def sort_key(row):
+            fps = row['fps']
+            threshold = row['threshold']
+            return (str(row.get('model', '')).casefold(),
+                    str(row.get('source_dir', '')).casefold(),
+                    str(row['stream']).casefold(),
+                    fps == '', float(fps) if fps != '' else math.inf,
+                    threshold == '', float(threshold) if threshold != '' else math.inf,
+                    str(row['y_pred']), str(row['timeline_file']))
+
         reports = report if isinstance(report, list) else [report]
         batch_report = any(result.get('model') is not None for result in reports)
         rows = []
         for result in reports:
             prediction = result.get('prediction', {})
-            for stream in result.get('streams', []):
-                timing = stream.get('timing', {})
-                time_info = stream.get('time', {})
-                events = stream.get('events', {})
+            for strm in result.get('streams', []):
+                timing = strm.get('timing', {})
+                time_info = strm.get('time', {})
+                events = strm.get('events', {})
                 duration = events.get('duration', {})
-                scores = stream.get('scores', {})
-                meta = stream.get('stream_meta', {})
-                row = {'stream': full_stream_name(stream),
+                scores = strm.get('scores', {})
+                meta = strm.get('stream_meta', {})
+                r = {'stream': full_stream_name(strm),
                              'fps': timing.get('fps', ''),
                              'win_span': timing.get('window_span', ''),
                              'infer_frq': timing.get('frq_i', ''),
                              'threshold': '' if prediction.get('threshold') is None else prediction['threshold'],
                              'y_pred': prediction.get('column') or '',
-                             'status': stream.get('status', 'N/A'),
-                             'timeline_file': str(stream.get('timeline', '')),
+                             'status': strm.get('status', 'N/A'),
+                             'timeline_file': str(strm.get('timeline', '')),
                              'src_span': meta.get('duration', ''),
                              'frames_count': meta.get('frames', ''),
                              'yolo_threshold': meta.get('yolo_threshold', ''),
@@ -535,24 +512,22 @@ def save_metric_report(report: dict | list[dict], output_path) -> Path:
                              't_tn': time_info.get('t_tn', ''),
                              'fp_per_h' : events.get('fp_per_h', ''),
                              'fp_burden': scores.get('fp_burden', ''),
-                             'notes': stream.get('error', '')}
+                             'notes': strm.get('error', '')}
                 if batch_report:
-                    row['model'] = result.get('model', '')
-                    row['source_dir'] = result.get('source_dir', '')
-                rows.append(row)
+                    r['model'] = result.get('model', '')
+                    r['source_dir'] = result.get('source_dir', '')
+                rows.append(r)
 
         metadata = []
-        passed = [row for row in rows if row['status'] == 'pass']
-        for field in ('win_span', 'infer_frq'):
-            values = [row[field] for row in passed]
-            common = bool(values) and all(
-                value != '' and math.isclose(float(value), float(values[0]),
-                                             rel_tol=1e-6, abs_tol=1e-6)
-                for value in values)
+        passed_row = [r for r in rows if r['status'] == 'pass']
+        for fld in ('win_span', 'infer_frq'):
+            vals = [r[fld] for r in passed_row]
+            common = bool(vals) and all( v != '' and math.isclose(float(v), float(vals[0]),
+                                                     rel_tol=1e-6, abs_tol=1e-6)  for v in vals)
             if common:
-                metadata.append((field, values[0]))
-                for row in rows:
-                    row.pop(field)
+                metadata.append((fld, vals[0]))
+                for r in rows:
+                    r.pop(fld)
 
         params = reports[0].get('params', {}) if reports else {}
         metadata += list(params.items())
@@ -566,26 +541,15 @@ def save_metric_report(report: dict | list[dict], output_path) -> Path:
                    'pred_events', 'det_full', 'det_half', 'false', 'recall', 'avg_lag',
                    't_fp', 't_tn', 'fp_per_h', 'fp_burden', 'notes']
 
-        def sort_key(row):
-            fps = row['fps']
-            threshold = row['threshold']
-            return (str(row.get('model', '')).casefold(),
-                    str(row.get('source_dir', '')).casefold(),
-                    str(row['stream']).casefold(),
-                    fps == '', float(fps) if fps != '' else math.inf,
-                    threshold == '', float(threshold) if threshold != '' else math.inf,
-                    str(row['y_pred']), str(row['timeline_file']))
-
         rows.sort(key=sort_key)
-        with path.open('w', newline='', encoding='utf-8') as file:
-            writer = csv.writer(file)
+        with path.open('w', newline='', encoding='utf-8') as csv_file:
+            writer = csv.writer(csv_file)
             writer.writerow(['parameter', 'value'])
-            writer.writerows((field, format_cell(field, value)) for field, value in metadata)
+            writer.writerows((fld, format_cell(fld, val)) for fld, val in metadata)
             writer.writerow([])
-            table = csv.DictWriter(file, fieldnames=fields, extrasaction='ignore')
+            table = csv.DictWriter(csv_file, fieldnames=fields, extrasaction='ignore')
             table.writeheader()
-            table.writerows({field: format_cell(field, value) for field, value in row.items()}
-                            for row in rows)
+            table.writerows({f: format_cell(f, v) for f, v in r.items()}  for r in rows)
 
     output_path = Path(output_path)
     suffix = output_path.suffix.lower()
@@ -602,8 +566,8 @@ def save_metric_report(report: dict | list[dict], output_path) -> Path:
     if suffix == '.csv':
         save_csv(output_path)
     else:
-        with output_path.open('w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2)
+        with output_path.open('w', encoding='utf-8') as file:
+            json.dump(report, file, indent=2)
     return output_path
 
 # endregion
@@ -660,9 +624,9 @@ def _metric_values(data, fp_unit, lag_digits=2):
             'gt': str(events.get('gt', 'N/A')),
             'detected': str(detected),
             'false' : str(events.get('false', 'N/A')),
-            'recall': _fmt(scores.get('recall'), d=2),
-            'lag':   _fmt(events.get('avg_lag'), d=lag_digits),
-            'fp_burden': _fmt(scores.get('fp_burden'), d=2),
+            'recall': c_fmt(scores.get('recall'), d=2),
+            'lag':   c_fmt(events.get('avg_lag'), d=lag_digits),
+            'fp_burden': c_fmt(scores.get('fp_burden'), d=2),
             'fp_rate': 'N/A' if fp_rate is None else fp_rate,
             'fp_per_det': fp_per_det}
 
@@ -713,9 +677,9 @@ def print_metric_report(report: dict, **kwargs):
     if not multi_thresholds:
         print(f"Events:      GT = {events.get('gt', 'N/A')};  detected = {det};  missed = {mis};"
               f"  false = {events.get('false', 'N/A')}")
-        print(f"Recall:      {_fmt(scores.get('recall'))}")
-        print(f"FP:          burden = {_fmt(scores.get('fp_burden'))};  score = {_fmt(scores.get('fp'))}")
-        print(f"Total score: {_fmt(scores.get('total'))}")
+        print(f"Recall:      {c_fmt(scores.get('recall'))}")
+        print(f"FP:          burden = {c_fmt(scores.get('fp_burden'))};  score = {c_fmt(scores.get('fp'))}")
+        print(f"Total score: {c_fmt(scores.get('total'))}")
 
     if not results_table:
         return report
@@ -848,11 +812,11 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
                     for report in reports)
     selector_type = ('Column' if any(r.get('prediction',{}).get('column') is not None for r in reports)
                               else 'Threshold')
-    headers = ['Prediction', 'GT', 'Detected', 'Missed', 'False',
-               'Recall', 'Lag(s)', 'FP score', 'FP burden', f'FP/{fp_unit}']
+    table_headers = ['Prediction', 'GT', 'Detected', 'Missed', 'False',
+                     'Recall', 'Lag(s)', 'FP score', 'FP burden', f'FP/{fp_unit}']
     if show_meta:
-        headers.append('FP/kP')
-    headers.append('Score')
+        table_headers.append('FP/kP')
+    table_headers.append('Score')
 
     table = []
     for report in reports:
@@ -865,17 +829,17 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
                                                                  else f"th={prediction['threshold']:g}"))
         detected = events.get('full', 0) + events.get('half', 0)
         missed = events.get('gt', 0) - detected
-        row = [prediction_name, str(events.get('gt', 'N/A')),
-               values['detected'], str(missed), values['false'],
-               _fmt(scores.get('recall')), values['lag'],
-               _fmt(scores.get('fp')), _fmt(scores.get('fp_burden')),
-               values['fp_rate']]
+        cmp_row = [prediction_name, str(events.get('gt', 'N/A')),
+                   values['detected'], str(missed), values['false'],
+                   c_fmt(scores.get('recall')), values['lag'],
+                   c_fmt(scores.get('fp')), c_fmt(scores.get('fp_burden')),
+                   values['fp_rate']]
         if show_meta:
             dets = report.get('stream_meta', {}).get('person_dets')
             fp_per_dets = None if not dets else events.get('false', 0)*1000/dets
-            row.append(_fmt(fp_per_dets))
-        row.append(_fmt(scores.get('total')))
-        table.append(row)
+            cmp_row.append(c_fmt(fp_per_dets))
+        cmp_row.append(c_fmt(scores.get('total')))
+        table.append(cmp_row)
 
     def summary_tag():
         tags = []
@@ -897,7 +861,7 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
                     f"{' | '.join(cells[5:])}")
 
         alignments = ['<'] + ['^']*(len(hdr) - 1)
-        widths = [max(5, len(header), *(len(str(row[idx])) for row in rows))
+        widths = [max(5, len(header), *(len(str(r[idx])) for r in rows))
                   for idx, header in enumerate(hdr)]
         widths[0] = max(widths[0], len(selector_type))
 
@@ -921,7 +885,7 @@ def print_threshold_comparison(reports: list[dict], **kwargs):
 
     tag = summary_tag()
     print(f"\n=== Threshold Summary{' for ' + tag if tag else ''} ===")
-    print_grouped_summary(headers, table)
+    print_grouped_summary(table_headers, table)
     return reports
 
 
@@ -950,7 +914,7 @@ def print_model_comparison(reports: list[dict], **kwargs):
         scores = report.get('scores', {})
         rows.append([model, selector, values['gt'], values['detected'], values['false'],
                      values['recall'], values['lag'], values['fp_burden'],
-                     values['fp_rate'], _fmt(scores.get('total'))])
+                     values['fp_rate'], c_fmt(scores.get('total'))])
 
     print("\n=== Model Comparison ===")
     _print_table(headers, rows, ['<'] + ['^']*(len(headers) - 1), separators)
@@ -982,13 +946,6 @@ def print_test_report(results, **kwargs):
     if num_samples is None:
         num_samples = testing_set.get('videos_num', testing_set.get('clips_num'))
 
-    def fmt(value):
-        if isinstance(value, (float, np.floating)):
-            return f"{value:.{precision}f}"
-        if isinstance(value, np.integer):
-            return str(int(value))
-        return str(value)
-
     rows = [("Predictions file", Path(summary.get('raw_results_path', '')).name),
             ("Num_samples", num_samples),
             ("GT_counts 0/1", support_str),
@@ -999,7 +956,7 @@ def print_test_report(results, **kwargs):
     print("\n===== Test Summary =====")
     for key, value in rows:
         if value is not None:
-            print(f"{key:<{label_w}}: {fmt(value)}")
+            print(f"{key:<{label_w}}: {c_fmt(value, d=precision)}")
     if cm is not None and len(cm) == 2 and len(cm[0]) == 2 and len(cm[1]) == 2:
         print(f"{'Confusion Matrix':<{label_w}}: pred-0  pred-1\n"
               f"{'True: 0':<{label_w}}[[{cm[0][0]:>5}, {cm[0][1]:>5}]\n"
@@ -1008,7 +965,7 @@ def print_test_report(results, **kwargs):
 
 
 def print_report_table(report: dict):
-    """Print one previously saved tabular CSV report."""
+    """ Print one previously saved tabular CSV report."""
     if not {'fieldnames', 'rows'}.issubset(report):
         raise ValueError("tabular report requires fieldnames and rows")
     metadata = report.get('metadata', {})
@@ -1064,18 +1021,17 @@ def load_stream_meta(path: Path|None) -> list[dict]:
 
 
 def attach_stream_meta(result: dict, meta_path: Path | None) -> dict:
-    def find_meta(stream: dict, records: list[dict]) -> dict | None:
+    def find_meta(stream: dict, records: list[dict])->dict|None:
         stem = stream_stem(stream.get('stream', ''))
-        candidates = [record for record in records
-                      if isinstance(record, dict) and record.get('stem') == stem]
+        candidates = [rec for rec in records if isinstance(rec, dict) and rec.get('stem') == stem]
         stream_fps = stream.get('timing', {}).get('fps')
         if stream_fps is not None:
             matching = []
             for record in candidates:
                 try:
-                    if record.get('fps') is not None and math.isclose(
-                            float(record['fps']), float(stream_fps),
-                            rel_tol=1e-3, abs_tol=0.01):
+                    if record.get('fps') is not None and math.isclose(float(record['fps']),
+                                                                      float(stream_fps),
+                                                                      rel_tol=1e-3, abs_tol=0.01):
                         matching.append(record)
                 except (TypeError, ValueError):
                     continue
@@ -1087,28 +1043,27 @@ def attach_stream_meta(result: dict, meta_path: Path | None) -> dict:
     if meta_path is None:
         return result
 
-    records = load_stream_meta(meta_path)
-    for stream in result.get('streams', []):
-        stream.pop('stream_meta', None)
+    meta_records = load_stream_meta(meta_path)
+    for strm in result.get('streams', []):
+        strm.pop('stream_meta', None)
     result.pop('stream_meta', None)
 
     matched = []
-    for stream in result.get('streams', []):
-        if stream.get('status') != 'pass':
+    for strm in result.get('streams', []):
+        if strm.get('status') != 'pass':
             continue
-        metadata = find_meta(stream, records)
+        metadata = find_meta(strm, meta_records)
         if metadata is not None:
-            stream['stream_meta'] = metadata
+            strm['stream_meta'] = metadata
             matched.append(metadata)
 
     if matched:
         result['stream_meta'] = { 'path': str(meta_path),
                                   'matched': len(matched),
                                   'person_dets': sum(int(item.get('person_dets', 0)) for item in matched),
-                                  'max_dets_frame': max(int(item.get('max_dets_frame', 0)) for item in matched),
-                                  'consc_det_frms': max( int(item.get('consc_det_frms',
-                                                                 item.get('max_consc_det_frms', 0)))
-                                                                 for item in matched),
+                                  'max_dets_frame': max(int(itm.get('max_dets_frame', 0)) for itm in matched),
+                                  'consc_det_frms': max( int(itm.get('consc_det_frms',
+                                                          itm.get('max_consc_det_frms', 0))) for itm in matched),
                                   }
     else:
         result['stream_meta'] = {'path': str(meta_path), 'matched': 0}
@@ -1116,7 +1071,7 @@ def attach_stream_meta(result: dict, meta_path: Path | None) -> dict:
 
 # endregion
 
-#sm-tools 636(,9,2) -> sm-tools 767(1,10,2)
 #837(1,17,2) ; #912(2,15,2)
+# 1088(3,19,)->1072(2,,) :  23.09.26
 
 if __name__ == '__main__': pass
